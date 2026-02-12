@@ -4,7 +4,7 @@ use log::debug;
 
 use crate::director::{
     chunks::cast_member_info::CastMemberInfoChunk,
-    enums::{BitmapInfo, FilmLoopInfo, FontInfo, MemberType, ScriptType, ShapeInfo, SoundInfo, FieldInfo},
+    enums::{BitmapInfo, FilmLoopInfo, FontInfo, MemberType, ScriptType, ShapeInfo, SoundInfo, FieldInfo, TextInfo},
 };
 
 use super::Chunk;
@@ -122,7 +122,7 @@ impl CastMemberChunk {
             }
             MemberType::Bitmap => {
                 specific_data_parsed =
-                    CastMemberSpecificData::Bitmap(BitmapInfo::from(specific_data.as_slice()));
+                    CastMemberSpecificData::Bitmap(BitmapInfo::from_versioned(specific_data.as_slice(), dir_version));
             }
             MemberType::Shape => {
                 specific_data_parsed =
@@ -141,8 +141,15 @@ impl CastMemberChunk {
                 specific_data_parsed = CastMemberSpecificData::None;
             }
             MemberType::Text => {
-                specific_data_parsed =
-                    CastMemberSpecificData::Field(FieldInfo::from(specific_data.as_slice()));
+                // Check if this is D6+ format with "text" FourCC header
+                if TextInfo::looks_like_text_info(specific_data.as_slice()) {
+                    specific_data_parsed =
+                        CastMemberSpecificData::Text(TextInfo::from(specific_data.as_slice()));
+                } else {
+                    // Fall back to older D4/D5 FieldInfo format
+                    specific_data_parsed =
+                        CastMemberSpecificData::Field(FieldInfo::from(specific_data.as_slice()));
+                }
             }
             _ => {
                 specific_data_parsed = CastMemberSpecificData::None;
@@ -166,6 +173,7 @@ pub enum CastMemberSpecificData {
     Sound(SoundInfo),
     Font(FontInfo),
     Field(FieldInfo),
+    Text(TextInfo),  // D6+ text member with "text" FourCC header
     None,
 }
 
@@ -221,6 +229,14 @@ impl CastMemberSpecificData {
     pub fn field_info(&self) -> Option<&FieldInfo> {
         if let CastMemberSpecificData::Field(field_info) = self {
             Some(field_info)
+        } else {
+            None
+        }
+    }
+
+    pub fn text_info(&self) -> Option<&TextInfo> {
+        if let CastMemberSpecificData::Text(text_info) = self {
+            Some(text_info)
         } else {
             None
         }

@@ -62,7 +62,11 @@ impl ScoreFrameChannelData {
 }
 
 impl ScoreFrameChannelData {
-    pub fn read(reader: &mut BinaryReader) -> Result<ScoreFrameChannelData, String> {
+    pub fn read_with_size(reader: &mut BinaryReader, sprite_record_size: u16) -> Result<ScoreFrameChannelData, String> {
+        let start_pos = reader.pos;
+        let sz = sprite_record_size as usize;
+
+        // Core fields: 20 bytes (always present for D5+)
         let sprite_type = reader
             .read_u8()
             .map_err(|e| format!("Failed to read sprite_type: {:?}", e))?;
@@ -99,60 +103,61 @@ impl ScoreFrameChannelData {
         let width = reader
             .read_u16()
             .map_err(|e| format!("Failed to read width: {:?}", e))?;
+        // 20 bytes read
 
-        let unk3 = reader
-            .read_u8()
-            .map_err(|e| format!("Failed to read unk3: {:?}", e))?;
-        let color_flag = (unk3 & 0xF0) >> 4;
-        let unk3_2 = unk3 & 0x0F;
+        // Extended fields: only present if sprite_record_size > 20
+        let mut color_flag: u8 = 0;
+        let mut blend_raw: u8 = 0;
+        let mut fore_color_g: u8 = 0;
+        let mut back_color_g: u8 = 0;
+        let mut fore_color_b: u8 = 0;
+        let mut back_color_b: u8 = 0;
+        let mut rotation_angle: f64 = 0.0;
+        let mut skew_angle: f64 = 0.0;
 
-        let blend_raw = reader
-            .read_u8()
-            .map_err(|e| format!("Failed to read blend: {:?}", e))?;
-
-        let unk5 = reader
-            .read_u8()
-            .map_err(|e| format!("Failed to read unk5: {:?}", e))?;
-        let unk6 = reader
-            .read_u8()
-            .map_err(|e| format!("Failed to read unk6: {:?}", e))?;
-        let fore_color_g = reader
-            .read_u8()
-            .map_err(|e| format!("Failed to read fore_color_g: {:?}", e))?;
-        let back_color_g = reader
-            .read_u8()
-            .map_err(|e| format!("Failed to read back_color_g: {:?}", e))?;
-        let fore_color_b = reader
-            .read_u8()
-            .map_err(|e| format!("Failed to read fore_color_b: {:?}", e))?;
-        let back_color_b = reader
-            .read_u8()
-            .map_err(|e| format!("Failed to read back_color_b: {:?}", e))?;
-        let unk7 = reader
-            .read_u16()
-            .map_err(|e| format!("Failed to read unk7: {:?}", e))?;
-        // Rotation (fixed-point * 100)
-        let rotation_raw = reader
-            .read_u16()
-            .map_err(|e| format!("Failed to read rotation: {:?}", e))? as i16;
-
-        let mut rotation_angle = 0.00 as f64;
-
-        if rotation_raw != 0 {
-            rotation_angle = rotation_raw as f64 / 100.0;
+        if sz >= 22 {
+            let unk3 = reader.read_u8()
+                .map_err(|e| format!("Failed to read unk3: {:?}", e))?;
+            color_flag = (unk3 & 0xF0) >> 4;
+            blend_raw = reader.read_u8()
+                .map_err(|e| format!("Failed to read blend: {:?}", e))?;
         }
-        let unk8 = reader
-            .read_u16()
-            .map_err(|e| format!("Failed to read unk8: {:?}", e))?;
-        // Skew angle (fixed-point * 100)
-        let skew_raw = reader
-            .read_u16()
-            .map_err(|e| format!("Failed to read skew: {:?}", e))? as i16;
 
-        let mut skew_angle = 0.00 as f64;
+        if sz >= 24 {
+            let _unk5 = reader.read_u8()
+                .map_err(|e| format!("Failed to read unk5: {:?}", e))?;
+            let _unk6 = reader.read_u8()
+                .map_err(|e| format!("Failed to read unk6: {:?}", e))?;
+        }
 
-        if skew_raw != 0 {
-            skew_angle = skew_raw as f64 / 100.0;
+        // D8+ extended color fields
+        if sz >= 28 {
+            fore_color_g = reader.read_u8()
+                .map_err(|e| format!("Failed to read fore_color_g: {:?}", e))?;
+            back_color_g = reader.read_u8()
+                .map_err(|e| format!("Failed to read back_color_g: {:?}", e))?;
+            fore_color_b = reader.read_u8()
+                .map_err(|e| format!("Failed to read fore_color_b: {:?}", e))?;
+            back_color_b = reader.read_u8()
+                .map_err(|e| format!("Failed to read back_color_b: {:?}", e))?;
+        }
+
+        // D8+ rotation/skew fields
+        if sz >= 36 {
+            let _unk7 = reader.read_u16()
+                .map_err(|e| format!("Failed to read unk7: {:?}", e))?;
+            let rotation_raw = reader.read_u16()
+                .map_err(|e| format!("Failed to read rotation: {:?}", e))? as i16;
+            if rotation_raw != 0 {
+                rotation_angle = rotation_raw as f64 / 100.0;
+            }
+            let _unk8 = reader.read_u16()
+                .map_err(|e| format!("Failed to read unk8: {:?}", e))?;
+            let skew_raw = reader.read_u16()
+                .map_err(|e| format!("Failed to read skew: {:?}", e))? as i16;
+            if skew_raw != 0 {
+                skew_angle = skew_raw as f64 / 100.0;
+            }
         }
 
         Ok(ScoreFrameChannelData {
@@ -177,6 +182,88 @@ impl ScoreFrameChannelData {
             rotation: rotation_angle,
             skew: skew_angle,
         })
+    }
+
+    /// Read a D5 sprite record (frames_version <= 7, sprite_record_size=24).
+    /// D5 layout readSpriteDataD5():
+    ///   [0]:    spriteType (u8)
+    ///   [1]:    inkData (u8: bits 0-5=ink, bit 6=trails, bit 7=stretch)
+    ///   [2-3]:  castLib (i16 BE)
+    ///   [4-5]:  castId/member (u16 BE)
+    ///   [6-7]:  scriptId.castLib (i16 BE)
+    ///   [8-9]:  scriptId.member (u16 BE)
+    ///   [10]:   foreColor (u8)
+    ///   [11]:   backColor (u8)
+    ///   [12-13]: startPoint.y / posY (i16 BE)
+    ///   [14-15]: startPoint.x / posX (i16 BE)
+    ///   [16-17]: height (i16 BE)
+    ///   [18-19]: width (i16 BE)
+    ///   [20]:   colorcode (u8: bit 6=editable, bit 7=moveable)
+    ///   [21]:   blendAmount (u8)
+    ///   [22]:   thickness (u8)
+    ///   [23]:   unused
+    pub fn read_d5(reader: &mut BinaryReader, _sprite_record_size: u16) -> Result<ScoreFrameChannelData, String> {
+        let sprite_type = reader.read_u8()
+            .map_err(|e| format!("D5: spriteType: {:?}", e))?;          // byte 0
+        let ink_data = reader.read_u8()
+            .map_err(|e| format!("D5: inkData: {:?}", e))?;             // byte 1
+        let ink_val = ink_data & 0x3f;
+        let cast_lib = reader.read_u16()
+            .map_err(|e| format!("D5: castLib: {:?}", e))? as i16;      // bytes 2-3
+        let cast_member = reader.read_u16()
+            .map_err(|e| format!("D5: castId: {:?}", e))?;              // bytes 4-5
+        let script_cast_lib = reader.read_u16()
+            .map_err(|e| format!("D5: scriptCastLib: {:?}", e))?;       // bytes 6-7
+        let script_member = reader.read_u16()
+            .map_err(|e| format!("D5: scriptMember: {:?}", e))?;        // bytes 8-9
+        let fore_color = reader.read_u8()
+            .map_err(|e| format!("D5: foreColor: {:?}", e))?;           // byte 10
+        let back_color = reader.read_u8()
+            .map_err(|e| format!("D5: backColor: {:?}", e))?;           // byte 11
+        let pos_y = reader.read_u16()
+            .map_err(|e| format!("D5: posY: {:?}", e))? as i16;         // bytes 12-13
+        let pos_x = reader.read_u16()
+            .map_err(|e| format!("D5: posX: {:?}", e))? as i16;         // bytes 14-15
+        let height = reader.read_u16()
+            .map_err(|e| format!("D5: height: {:?}", e))?;              // bytes 16-17
+        let width = reader.read_u16()
+            .map_err(|e| format!("D5: width: {:?}", e))?;               // bytes 18-19
+        let _colorcode = reader.read_u8()
+            .map_err(|e| format!("D5: colorcode: {:?}", e))?;           // byte 20
+        let blend_raw = reader.read_u8()
+            .map_err(|e| format!("D5: blend: {:?}", e))?;               // byte 21
+        let _thickness = reader.read_u8()
+            .map_err(|e| format!("D5: thickness: {:?}", e))?;           // byte 22
+        let _unused = reader.read_u8()
+            .map_err(|e| format!("D5: unused: {:?}", e))?;              // byte 23
+
+        Ok(ScoreFrameChannelData {
+            sprite_type,
+            ink: ink_val,
+            fore_color,
+            back_color,
+            cast_lib: cast_lib as u16,
+            cast_member,
+            sprite_list_idx_hi: script_cast_lib,
+            sprite_list_idx_lo: script_member,
+            pos_y,
+            pos_x,
+            height,
+            width,
+            color_flag: 0,
+            fore_color_g: 0,
+            back_color_g: 0,
+            fore_color_b: 0,
+            back_color_b: 0,
+            blend: blend_raw,
+            rotation: 0.0,
+            skew: 0.0,
+        })
+    }
+
+    pub fn read(reader: &mut BinaryReader) -> Result<ScoreFrameChannelData, String> {
+        // Legacy: assume large record size for backward compat with afterburner D8+ files
+        Self::read_with_size(reader, 36)
     }
 
     fn decode_scaled(value: u8, scale: u8) -> u8 {
@@ -210,6 +297,7 @@ pub struct ScoreFrameDataHeader {
     pub frame_count: u32,
     pub sprite_record_size: u16,
     pub num_channels: u16,
+    pub frames_version: u16,
 }
 
 #[derive(Clone, Debug)]
@@ -330,7 +418,34 @@ impl TempoChannelData {
 impl ScoreFrameData {
     #[allow(unused_variables)]
     pub fn read(reader: &mut BinaryReader) -> Result<ScoreFrameData, String> {
-        let header = Self::read_header(reader)?;
+        let mut header = Self::read_header(reader)?;
+
+        // "numOfFrames in the header is often incorrect"
+        // Pre-scan the frame delta stream to count actual frames
+        let frame_data_start = reader.pos;
+        let mut actual_frame_count: u32 = 0;
+        while !reader.eof() {
+            match reader.read_u16() {
+                Ok(length) => {
+                    if length == 0 { break; }
+                    let skip = (length as usize).saturating_sub(2);
+                    if reader.pos + skip > reader.length { break; }
+                    reader.jmp(reader.pos + skip);
+                    actual_frame_count += 1;
+                }
+                Err(_) => break,
+            }
+        }
+        reader.jmp(frame_data_start);
+
+        if header.frame_count == 0 || header.frame_count != actual_frame_count {
+            console::log_1(&format!(
+                "ScoreFrameData: header frame_count={} but actual_frame_count={}, using actual",
+                header.frame_count, actual_frame_count
+            ).into());
+            header.frame_count = actual_frame_count;
+        }
+
         debug!(
             "ScoreFrameData {} {} {}",
             header.frame_count, header.num_channels, header.sprite_record_size
@@ -343,14 +458,28 @@ impl ScoreFrameData {
                 * (header.sprite_record_size as usize)
         ];
 
-        let mut frame_index = 0;
-        while !reader.eof() {
+        let frame_size = (header.num_channels as usize) * (header.sprite_record_size as usize);
+
+        let mut frame_index: u32 = 0;
+        while !reader.eof() && frame_index < header.frame_count {
             let length = reader
                 .read_u16()
                 .map_err(|e| format!("Failed to read frame length: {:?}", e))?;
 
             if length == 0 {
                 break;
+            }
+
+            // Copy entire previous frame first (carry-forward).
+            // Deltas will overwrite only the bytes that changed.
+            // This is correct for both D5 (48-byte main channels) and D6+ (uniform channels).
+            if frame_index > 0 {
+                let prev_frame_offset = ((frame_index - 1) as usize) * frame_size;
+                let curr_frame_offset = (frame_index as usize) * frame_size;
+                channel_data.copy_within(
+                    prev_frame_offset..prev_frame_offset + frame_size,
+                    curr_frame_offset,
+                );
             }
 
             let frame_length = length - 2;
@@ -361,24 +490,10 @@ impl ScoreFrameData {
                 let mut frame_chunk_reader = BinaryReader::from_u8(chunk_data);
                 frame_chunk_reader.set_endian(Endian::Big);
 
-                // director reserves the first 6 channels:
-                // note that channel indices are different than channel numbers
-                // ┌───────┬─────────────────┐
-                // │ index │                 │
-                // ├───────┼─────────────────┤
-                // │     0 │ frame script    │
-                // │     1 │ palette         │
-                // │     2 │ transition      │
-                // │     3 │ sound 1         │
-                // │     4 │ sound 2         │
-                // │     5 │ tempo           │
-                // │   N>5 │ sprites         │
-                // └───────┴─────────────────┘
-                let mut channel_index = 0;
-                let mut channels_with_deltas = std::collections::HashSet::new();
-
+                // Apply deltas on top of carried-forward data.
+                // Delta stream: (channel_size: u16, channel_offset: u16, data: [u8; channel_size])
+                // channel_offset is a raw byte offset within the frame buffer.
                 while !frame_chunk_reader.eof() {
-                    channel_index = channel_index + 1;
                     let channel_size = frame_chunk_reader
                         .read_u16()
                         .map_err(|e| format!("Failed to read channel size: {:?}", e))?
@@ -391,73 +506,26 @@ impl ScoreFrameData {
                         .read_bytes(channel_size)
                         .map_err(|e| format!("Failed to read channel delta: {:?}", e))?;
 
-                    let frame_offset = (frame_index as usize)
-                        * (header.num_channels as usize)
-                        * (header.sprite_record_size as usize);
+                    let frame_offset = (frame_index as usize) * frame_size;
                     let end_offset = frame_offset + channel_offset + channel_size;
                     if end_offset > channel_data.len() {
-                        error!("❌ Channel data copy out of bounds. Frame offset: {}, Channel offset: {}, Channel size: {}, Total len: {}", 
-                    frame_offset, channel_offset, channel_size, channel_data.len());
+                        error!("Channel data copy out of bounds. Frame offset: {}, Channel offset: {}, Channel size: {}, Total len: {}",
+                            frame_offset, channel_offset, channel_size, channel_data.len());
                         return Err("Channel data copy out of bounds".to_string());
                     }
                     channel_data[frame_offset + channel_offset..end_offset]
                         .copy_from_slice(&channel_delta);
-
-                    // Mark which channels got this delta
-                    // A delta can span multiple channels, so mark ALL affected channels
-                    let first_channel = channel_offset / header.sprite_record_size as usize;
-                    let last_byte = channel_offset + channel_size - 1;
-                    let last_channel = last_byte / header.sprite_record_size as usize;
-                    
-                    for ch in first_channel..=last_channel {
-                        channels_with_deltas.insert(ch);
-                    }
-                    
-                    if first_channel != last_channel {
-                        debug!("  ✏️  Frame {} Multi-channel delta: channels {}-{} (offset={}, size={})", 
-                            frame_index + 1, first_channel, last_channel, channel_offset, channel_size);
-                    } else {
-                        debug!("  ✏️  Frame {} Delta for channel {} (offset={}, size={})", 
-                            frame_index + 1, first_channel, channel_offset, channel_size);
-                    }
                 }
-
-                // After processing all deltas for this frame, carry forward unchanged channels
-                if frame_index > 0 {
-                    let prev_frame_offset = ((frame_index - 1) as usize)
-                        * (header.num_channels as usize)
-                        * (header.sprite_record_size as usize);
-                    let curr_frame_offset = (frame_index as usize)
-                        * (header.num_channels as usize)
-                        * (header.sprite_record_size as usize);
-                    
-                    let mut carried_forward = 0;
-                    
-                    for ch in 0..header.num_channels as usize {
-                        // If this channel didn't receive a delta, copy from previous frame
-                        if !channels_with_deltas.contains(&ch) {
-                            let ch_offset = ch * (header.sprite_record_size as usize);
-                            let curr_pos = curr_frame_offset + ch_offset;
-                            let prev_pos = prev_frame_offset + ch_offset;
-                            
-                            // ALWAYS copy from previous frame for non-delta channels
-                            // This ensures sprites persist across frames
-                            channel_data.copy_within(
-                                prev_pos..prev_pos + header.sprite_record_size as usize,
-                                curr_pos
-                            );
-                            carried_forward += 1;
-                        }
-                    }
-                    
-                    debug!("  ↩ Frame {}: {} deltas applied, {} channels carried forward", 
-                        frame_index + 1, channels_with_deltas.len(), carried_forward);
-                }
-                // Reset for next frame
-                channels_with_deltas.clear();
             }
             frame_index = frame_index + 1;
         }
+
+        // D4/D5 (frames_version <= 7): first 48 bytes are packed main channels
+        // (script, sound types, transition, tempo, sounds, palette, etc.),
+        // followed by sprite channels at sprite_record_size bytes each.
+        // D6+ (frames_version > 7): all channels are uniform at sprite_record_size each.
+        let main_channels_size: usize = if header.frames_version <= 7 { 48 } else { 0 };
+        let is_d5 = main_channels_size > 0;
 
         let (decompressed_data, frame_channel_data, sound_channel_data, tempo_channel_data) = {
             let mut frame_channel_data = vec![];
@@ -466,78 +534,165 @@ impl ScoreFrameData {
             let decompressed_data = channel_data;
             let mut channel_reader = BinaryReader::from_vec(&decompressed_data);
             channel_reader.set_endian(Endian::Big);
+
             for frame_index in 0..header.frame_count {
-                for channel_index in 0..header.num_channels {
-                    let pos = channel_reader.pos;
+                let frame_start = (frame_index as usize) * frame_size;
 
-                    if channel_index == 3 || channel_index == 4 {
-                        // Sound channel - different structure
-                        let sound_data = SoundChannelData::read(&mut channel_reader)?;
-                        if sound_data.cast_member != 0 {
-                            debug!("Sound {} in frame {}: cast_member={}", 
-                                channel_index - 2, frame_index, sound_data.cast_member);
-                            sound_channel_data.push((frame_index, channel_index, sound_data));
-                        }
-                    }  else if channel_index == 5 {
-                        // Tempo channel
-                        let tempo_data = TempoChannelData::read(&mut channel_reader)?;
-                        
-                        // Only store non-default and non-empty tempo data
-                        if !tempo_data.is_default() && !tempo_data.is_empty() {
-                            debug!("🎵 Frame {} Tempo: fps={} flags1={:02x} flags2={:02x} unk4={:02x} wait={:04x} ch_flags={:04x} frame_data={:04x}",
-                                frame_index, tempo_data.tempo, tempo_data.flags1, tempo_data.flags2, 
-                                tempo_data.unk4, tempo_data.wait_flags, tempo_data.channel_flags, tempo_data.frame_data);
-                            tempo_channel_data.push((frame_index, tempo_data));
-                        }
-                    } else {
-                        // Regular sprite channel
-                        let data = ScoreFrameChannelData::read(&mut channel_reader)?;
+                if is_d5 {
+                    // D5: Main channels packed in first 48 bytes
+                    // Layout: actionId.castLib(2) actionId.member(2)
+                    //         sound1.castLib(2) sound1.member(2)
+                    //         sound2.castLib(2) sound2.member(2)
+                    //         trans.castLib(2) trans.member(2)
+                    //         colorTempo(1) colorSound1(1) colorSound2(1) colorScript(1) colorTrans(1)
+                    //         tempo(1) unk(2)
+                    //         palette(24 bytes)
 
-                        // Capture frames with ANY sprite data that might be part of a tween:
-                        // - Active sprite (cast_member != 0)
-                        // - Has transform properties (rotation, skew, blend)
-                        // - Has geometry (width, height, position)
-                        // - Has appearance (ink effects)
-                        // - Has color data (RGB components, color_flag set, or palette colors)
-                        // 
-                        // We need to be permissive here because Director stores keyframes sparsely.
-                        // A color tween might have the end frame with ONLY color data (size=0).
-                        // 
-                        // For colors: We check color_flag != 0 (RGB mode), any RGB component != 0,
-                        // or palette colors != 0. The only case we miss is black-on-black (both 0).
-                        let has_sprite_data = data.cast_member != 0 
-                            || data.rotation != 0.0 
-                            || data.skew != 0.0 
+                    // Frame script (actionId) at bytes 0-3: castLib(2) + member(2)
+                    channel_reader.jmp(frame_start);
+                    let action_cast_lib = channel_reader.read_u16().unwrap_or(0);
+                    let action_member = channel_reader.read_u16().unwrap_or(0);
+                    if action_member != 0 {
+                        // Store frame script as channel 0
+                        frame_channel_data.push((frame_index, 0_u16, ScoreFrameChannelData {
+                            sprite_type: 0,
+                            ink: 0,
+                            fore_color: 0,
+                            back_color: 0,
+                            cast_lib: action_cast_lib,
+                            cast_member: action_member,
+                            sprite_list_idx_hi: 0,
+                            sprite_list_idx_lo: 0,
+                            pos_y: 0,
+                            pos_x: 0,
+                            height: 0,
+                            width: 0,
+                            color_flag: 0,
+                            fore_color_g: 0,
+                            back_color_g: 0,
+                            fore_color_b: 0,
+                            back_color_b: 0,
+                            blend: 0,
+                            rotation: 0.0,
+                            skew: 0.0,
+                        }));
+                    }
+
+                    // Tempo at byte 21
+                    channel_reader.jmp(frame_start + 21);
+                    let tempo_val = channel_reader.read_u8().unwrap_or(0);
+                    if tempo_val > 0 {
+                        tempo_channel_data.push((frame_index, TempoChannelData {
+                            tempo: tempo_val,
+                            flags1: 0,
+                            flags2: 0,
+                            unk3: 0,
+                            unk4: 0,
+                            wait_flags: 0,
+                            channel_flags: 0,
+                            frame_data: 0,
+                        }));
+                    }
+
+                    // Sound 1: castLib at bytes 4-5, member at bytes 6-7
+                    channel_reader.jmp(frame_start + 6);
+                    let sound1_member = channel_reader.read_u16().unwrap_or(0);
+                    if sound1_member != 0 {
+                        debug!("Sound 1 in frame {}: cast_member={}", frame_index, sound1_member);
+                        sound_channel_data.push((frame_index, 3, SoundChannelData {
+                            cast_member: sound1_member as u8,
+                        }));
+                    }
+
+                    // Sound 2: castLib at bytes 8-9, member at bytes 10-11
+                    channel_reader.jmp(frame_start + 10);
+                    let sound2_member = channel_reader.read_u16().unwrap_or(0);
+                    if sound2_member != 0 {
+                        debug!("Sound 2 in frame {}: cast_member={}", frame_index, sound2_member);
+                        sound_channel_data.push((frame_index, 4, SoundChannelData {
+                            cast_member: sound2_member as u8,
+                        }));
+                    }
+
+                    // Sprite channels start at byte 48 within the frame
+                    let num_sprites = (frame_size - main_channels_size) / (header.sprite_record_size as usize);
+                    for sprite_idx in 0..num_sprites {
+                        let channel_index = (sprite_idx + 6) as u16;
+                        let pos = frame_start + main_channels_size + sprite_idx * (header.sprite_record_size as usize);
+
+                        channel_reader.jmp(pos);
+                        let data = ScoreFrameChannelData::read_d5(&mut channel_reader, header.sprite_record_size)?;
+
+                        let has_sprite_data = data.cast_member != 0
                             || data.blend != 0
                             || data.width != 0
                             || data.height != 0
                             || data.pos_x != 0
                             || data.pos_y != 0
                             || data.ink != 0
-                            || data.sprite_type != 0
-                            || data.color_flag != 0
-                            || data.fore_color != 0
-                            || data.fore_color_g != 0
-                            || data.fore_color_b != 0
-                            || data.back_color != 0
-                            || data.back_color_g != 0
-                            || data.back_color_b != 0;
-                            
+                            || data.sprite_type != 0;
+
                         if has_sprite_data {
-                            debug!("frame_index={frame_index} channel_index={channel_index} cast_lib={} cast_member={} sprite_type={} ink={} fore_color={} back_color={} pos_y={} pos_x={} height={} width={} blend={}", 
-                                data.cast_lib, data.cast_member, data.sprite_type, data.ink, data.fore_color, data.back_color, data.pos_y, data.pos_x, data.height, data.width, data.blend);
+                            debug!("frame_index={frame_index} channel_index={channel_index} cast_member={} sprite_type={} ink={} pos_y={} pos_x={} height={} width={} blend={}",
+                                data.cast_member, data.sprite_type, data.ink, data.pos_y, data.pos_x, data.height, data.width, data.blend);
                             frame_channel_data.push((frame_index, channel_index, data));
                         }
                     }
+                } else {
+                    // D6+: All channels use sprite_record_size bytes each
+                    for channel_index in 0..header.num_channels {
+                        let pos = frame_start + (channel_index as usize) * (header.sprite_record_size as usize);
+                        channel_reader.jmp(pos);
 
-                    channel_reader.jmp(pos);
-                    channel_reader.jmp(pos + header.sprite_record_size as usize);
+                        if channel_index == 3 || channel_index == 4 {
+                            let sound_data = SoundChannelData::read(&mut channel_reader)?;
+                            if sound_data.cast_member != 0 {
+                                debug!("Sound {} in frame {}: cast_member={}",
+                                    channel_index - 2, frame_index, sound_data.cast_member);
+                                sound_channel_data.push((frame_index, channel_index, sound_data));
+                            }
+                        } else if channel_index == 5 {
+                            let tempo_data = TempoChannelData::read(&mut channel_reader)?;
+                            if !tempo_data.is_default() && !tempo_data.is_empty() {
+                                debug!("Frame {} Tempo: fps={}", frame_index, tempo_data.tempo);
+                                tempo_channel_data.push((frame_index, tempo_data));
+                            }
+                        } else {
+                            let data = ScoreFrameChannelData::read_with_size(&mut channel_reader, header.sprite_record_size)?;
+
+                            let has_sprite_data = data.cast_member != 0
+                                || data.rotation != 0.0
+                                || data.skew != 0.0
+                                || data.blend != 0
+                                || data.width != 0
+                                || data.height != 0
+                                || data.pos_x != 0
+                                || data.pos_y != 0
+                                || data.ink != 0
+                                || data.sprite_type != 0
+                                || data.color_flag != 0
+                                || data.fore_color != 0
+                                || data.fore_color_g != 0
+                                || data.fore_color_b != 0
+                                || data.back_color != 0
+                                || data.back_color_g != 0
+                                || data.back_color_b != 0;
+
+                            if has_sprite_data {
+                                debug!("frame_index={frame_index} channel_index={channel_index} cast_lib={} cast_member={} sprite_type={} ink={} fore_color={} back_color={} pos_y={} pos_x={} height={} width={} blend={}",
+                                    data.cast_lib, data.cast_member, data.sprite_type, data.ink, data.fore_color, data.back_color, data.pos_y, data.pos_x, data.height, data.width, data.blend);
+                                frame_channel_data.push((frame_index, channel_index, data));
+                            }
+                        }
+                    }
                 }
             }
-            
-            debug!("🏁 Finished processing {} frames. Sprites: {}, Sounds: {}, Tempo changes: {}", 
-                header.frame_count, frame_channel_data.len(), sound_channel_data.len(), tempo_channel_data.len());
-            
+
+            console::log_1(&format!(
+                "🏁 Finished processing {} frames. Sprites: {}, Sounds: {}, Tempo changes: {}",
+                header.frame_count, frame_channel_data.len(), sound_channel_data.len(), tempo_channel_data.len()
+            ).into());
+
             (decompressed_data, frame_channel_data, sound_channel_data, tempo_channel_data)
         };
 
@@ -587,10 +742,16 @@ impl ScoreFrameData {
                 .map_err(|e| format!("Failed to skip u16: {:?}", e))?; // Skip
         }
 
+        console::log_1(&format!(
+            "ScoreFrameData::read_header: actual_length={}, unk1(frame1Offset)={}, frame_count={}, frames_version={}, sprite_record_size={}, num_channels={}, reader_len={}",
+            actual_length, unk1, frame_count, frames_version, sprite_record_size, num_channels, reader.length
+        ).into());
+
         Ok(ScoreFrameDataHeader {
             frame_count,
             sprite_record_size,
             num_channels,
+            frames_version,
         })
     }
 }
@@ -816,107 +977,128 @@ pub struct ScoreChunk {
 
 impl ScoreChunk {
     #[allow(unused_variables)]
-    pub fn read(reader: &mut BinaryReader, dir_version: u16) -> Result<Self, String> {
+    pub fn read(reader: &mut BinaryReader, dir_version: u16, after_burned: bool) -> Result<Self, String> {
+        // Use the same parsing logic for both afterburner and non-afterburner files.
+        // The VWSC chunk format is the same regardless of container format.
+        Self::read_standard(reader, dir_version)
+    }
+
+    /// Non-afterburner VWSC reading
+    /// For D6+ (version >= 600): reads the sprite detail table header, then extracts entries.
+    /// For D4/D5 (version >= 400): reads frame data directly from position 0.
+    fn read_standard(reader: &mut BinaryReader, dir_version: u16) -> Result<Self, String> {
         reader.set_endian(Endian::Big);
 
-        // Read and analyze header
-        let header = ScoreChunkHeader::read(reader)
-            .map_err(|e| format!("Failed to read ScoreChunkHeader: {}", e))?;
+        if dir_version >= 600 {
+            // D6+ format: sprite detail table + frame data
+            let frames_stream_size = reader.read_u32()
+                .map_err(|e| format!("Failed to read framesStreamSize: {:?}", e))?;
+            let ver = reader.read_u32()
+                .map_err(|e| format!("Failed to read ver: {:?}", e))?;
+            let list_start = reader.read_u32()
+                .map_err(|e| format!("Failed to read listStart: {:?}", e))? as usize;
 
-        // Read offsets table
-        let offsets_result: Result<Vec<usize>, String> = (0..header.entry_count + 1)
-            .map(|i| {
-                let offset = reader
-                    .read_u32()
-                    .map_err(|e| format!("Failed to read offset: {:?}", e))?
-                    as usize;
-                Ok(offset)
-            })
-            .collect();
-        let offsets = offsets_result?;
+            reader.jmp(list_start);
+            let num_entries = reader.read_u32()
+                .map_err(|e| format!("Failed to read numEntries: {:?}", e))? as usize;
+            let list_size = reader.read_u32()
+                .map_err(|e| format!("Failed to read listSize: {:?}", e))? as usize;
+            let max_data_len = reader.read_u32()
+                .map_err(|e| format!("Failed to read maxDataLen: {:?}", e))? as usize;
 
-        // Validate offsets
-        if offsets.len() != (header.entry_count + 1) as usize {
-            console::error_1(
-                &format!(
-                    "❌ Offsets count mismatch! Expected {}, Got {}",
-                    header.entry_count + 1,
-                    offsets.len()
-                )
-                .into(),
-            );
-            return Err("Offsets count mismatch.".to_string());
-        }
+            let index_start = list_start + 12; // After the 3 header u32s
+            let frame_data_offset = index_start + list_size * 4; // After the offset table
 
-        for j in 0..offsets.len().saturating_sub(1) {
-            if offsets[j] > offsets[j + 1] {
-                console::error_1(
-                    &format!(
-                        "❌ Offsets are not monotonic: offsets[{}] ({}) > offsets[{}] ({})",
-                        j,
-                        offsets[j],
-                        j + 1,
-                        offsets[j + 1]
-                    )
-                    .into(),
-                );
-                return Err("Offsets are not monotonic.".to_string());
+            console::log_1(&format!(
+                "VWSC D6+: framesStreamSize={}, ver={}, listStart=0x{:x}",
+                frames_stream_size, ver, list_start
+            ).into());
+            console::log_1(&format!(
+                "VWSC D6+: numEntries={}, listSize={}, maxDataLen=0x{:x}, indexStart={}, frameDataOffset={}",
+                num_entries, list_size, max_data_len, index_start, frame_data_offset
+            ).into());
+
+            // Read raw offsets (numEntries of them, relative to frameDataOffset)
+            let mut raw_offsets = Vec::with_capacity(num_entries);
+            for _ in 0..num_entries {
+                raw_offsets.push(reader.read_u32()
+                    .map_err(|e| format!("Failed to read sprite detail offset: {:?}", e))? as usize);
             }
-        }
 
-        // Read all entries
-        let entries_result: Result<Vec<Vec<u8>>, String> = (0..header.entry_count as usize)
-    .map(|index| {
-      let current_offset = offsets[index];
-      let next_offset = offsets[index + 1];
-      let length = next_offset - current_offset;
+            // Extract entries using consecutive offset pairs
+            // The last offset serves as sentinel for sizing the previous entry
+            // So we get numEntries - 1 usable entries
+            let entry_count = num_entries.saturating_sub(1);
+            let mut entries = Vec::with_capacity(entry_count);
 
-      if length > 0 {
-        if reader.pos + length > reader.length {
-          console::error_1(
-            &format!(
-              "❌ Calculated entry {} length ({}) + current pos ({}) exceeds total reader length ({}).",
-              index, length, reader.pos, reader.length
-            ).into()
-          );
-          return Err("Entry exceeds total reader length.".to_string());
-        }
+            for i in 0..entry_count {
+                let entry_start = frame_data_offset + raw_offsets[i];
+                let entry_end = frame_data_offset + raw_offsets[i + 1];
 
-        let bytes = reader
-          .read_bytes(length)
-          .map_err(|e| format!("Failed to read bytes: {:?}", e))?
-          .to_vec();
+                if entry_start > reader.length || entry_end > reader.length {
+                    console::warn_1(&format!(
+                        "VWSC: Entry {} out of bounds: start={}, end={}, stream_len={}",
+                        i, entry_start, entry_end, reader.length
+                    ).into());
+                    entries.push(Vec::new());
+                    continue;
+                }
 
-        Ok(bytes)
-      } else {
-        // empty entry
-        Ok(Vec::new())
-      }
-    }).collect();
+                reader.jmp(entry_start);
+                let len = entry_end.saturating_sub(entry_start);
+                if len > 0 {
+                    entries.push(reader.read_bytes(len)
+                        .map_err(|e| format!("Failed to read entry {}: {:?}", i, e))?
+                        .to_vec());
+                } else {
+                    entries.push(Vec::new());
+                }
+            }
 
-        let entries = entries_result?;
+            let entry_sizes: Vec<usize> = entries.iter().take(10).map(|e| e.len()).collect();
+            console::log_1(&format!(
+                "VWSC D6+: extracted {} entries, sizes: {:?}",
+                entries.len(), entry_sizes
+            ).into());
 
-        // Process frame data from first entry - this contains sprite positioning and frame script information
-        let frame_data = if !entries.is_empty() && !entries[0].is_empty() {
-            let mut delta_reader = BinaryReader::from_vec(&entries[0]);
-            delta_reader.set_endian(Endian::Big);
-            ScoreFrameData::read(&mut delta_reader)?
+            // Entry[0] = frame data (the main score data with channel deltas)
+            let frame_data = if !entries.is_empty() && !entries[0].is_empty() {
+                let mut delta_reader = BinaryReader::from_vec(&entries[0]);
+                delta_reader.set_endian(Endian::Big);
+                ScoreFrameData::read(&mut delta_reader)?
+            } else {
+                ScoreFrameData::default()
+            };
+
+            let frame_intervals = Self::analyze_behavior_attachment_entries(&entries)?;
+            let sprite_details = std::collections::HashMap::new();
+
+            Ok(ScoreChunk {
+                header: ScoreChunkHeader::default(),
+                entries,
+                frame_intervals,
+                frame_data,
+                sprite_details,
+            })
+        } else if dir_version >= 400 {
+            // D4/D5 format: frame data directly at position 0
+            console::log_1(&format!(
+                "VWSC D4/D5 standard: reading frame data directly (version {})",
+                dir_version
+            ).into());
+
+            let frame_data = ScoreFrameData::read(reader)?;
+
+            Ok(ScoreChunk {
+                header: ScoreChunkHeader::default(),
+                entries: vec![],
+                frame_intervals: vec![],
+                frame_data,
+                sprite_details: std::collections::HashMap::new(),
+            })
         } else {
-            ScoreFrameData::default()
-        };
-        let frame_intervals = Self::analyze_behavior_attachment_entries(&entries)?;
-
-        // Parse sprite detail offsets from Entry[1] (D6+)
-        // Entry[1] contains a table of offsets into the rest of Entry[1] where sprite detail data is stored
-        let sprite_details = Self::parse_sprite_details(&entries);
-
-        Ok(ScoreChunk {
-            header,
-            entries,
-            frame_intervals,
-            frame_data,
-            sprite_details,
-        })
+            Err(format!("Unsupported Director version for VWSC: {}", dir_version))
+        }
     }
 
     /// Parse sprite detail offsets from Entry[0] (D6+)
@@ -1192,6 +1374,15 @@ impl ScoreChunk {
             let sizes: Vec<usize> = entries.iter().map(|e| e.len()).collect();
             debug!(
                 "analyze_behavior_attachment_entries: {} entries, sizes: {:?}",
+                entries.len(), sizes
+            );
+        }
+
+        // Log all entry sizes for debugging filmloop behavior issues
+        if entries.len() > 2 && entries.len() < 50 {
+            let sizes: Vec<usize> = entries.iter().map(|e| e.len()).collect();
+            debug!(
+                "📊 analyze_behavior_attachment_entries: {} entries, sizes: {:?}",
                 entries.len(), sizes
             );
         }

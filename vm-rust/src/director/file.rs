@@ -91,8 +91,7 @@ impl DirectorFile {
         let mut ils_body_offset: usize = 0;
 
         if codec == FOURCC("MV93") || codec == FOURCC("MC95") {
-            // read memory map
-            return Err("read mmap not implemented".to_owned());
+            read_memory_map(reader, &mut chunk_container.chunk_info)?;
         } else if codec == FOURCC("FGDM") || codec == FOURCC("FGDC") {
             after_burned = true;
             ils_body_offset = read_after_burner_map(
@@ -194,7 +193,6 @@ fn read_casts(
         if cast_list.is_some() {
             let cast_list = cast_list.unwrap();
             for cast_entry in &cast_list.entries {
-                // info!("Cast: {} id: {}", &cast_entry.name, &cast_entry.id);
                 let cast = get_cast_chunk_for_cast(
                     reader,
                     chunk_container,
@@ -202,6 +200,15 @@ fn read_casts(
                     key_table,
                     &cast_entry.id,
                 );
+                if cast.is_none() && cast_entry.file_path.is_empty() {
+                    // Cast has no CAS* chunk AND no file_path - this is unusual
+                    // It should either be internal (has CAS*) or external (has file_path)
+                    #[cfg(target_arch = "wasm32")]
+                    web_sys::console::warn_1(&format!(
+                        "Cast '{}' (id={}) has no CAS* chunk and no file_path - data may be missing",
+                        &cast_entry.name, &cast_entry.id
+                    ).into());
+                }
                 if let Some(cast) = cast {
                     // TODO cast.populate(castEntry.name, castEntry.id, castEntry.minMember);
                     // info!("Cast {} member count: {}", cast_entry.name, cast.member_ids.len());
@@ -453,12 +460,19 @@ pub fn get_script_context_chunk(
     fourcc: u32,
     section_id: u32,
 ) -> Option<ScriptContextChunk> {
-    let chunk = get_chunk(reader, chunk_container, rifx, fourcc, section_id).unwrap();
+    let chunk = match get_chunk(reader, chunk_container, rifx, fourcc, section_id) {
+        Ok(chunk) => chunk,
+        Err(e) => {
+            console_warn!("get_script_context_chunk: Could not find chunk {} ${:x}: {}", fourcc_to_string(fourcc), section_id, e);
+            return None;
+        }
+    };
 
     if let Chunk::ScriptContext(context) = chunk {
         return Some(context);
     } else {
-        panic!("Not a cast chunk");
+        console_warn!("get_script_context_chunk: Chunk {} ${:x} is not a ScriptContext", fourcc_to_string(fourcc), section_id);
+        return None;
     }
 }
 
@@ -469,12 +483,19 @@ pub fn get_script_names_chunk(
     fourcc: u32,
     section_id: u32,
 ) -> Option<ScriptNamesChunk> {
-    let chunk = get_chunk(reader, chunk_container, rifx, fourcc, section_id).unwrap();
+    let chunk = match get_chunk(reader, chunk_container, rifx, fourcc, section_id) {
+        Ok(chunk) => chunk,
+        Err(e) => {
+            console_warn!("get_script_names_chunk: Could not find chunk {} ${:x}: {}", fourcc_to_string(fourcc), section_id, e);
+            return None;
+        }
+    };
 
     if let Chunk::ScriptNames(names) = chunk {
         return Some(names);
     } else {
-        panic!("Not a script names chunk");
+        console_warn!("get_script_names_chunk: Chunk {} ${:x} is not a ScriptNames", fourcc_to_string(fourcc), section_id);
+        return None;
     }
 }
 
@@ -702,6 +723,98 @@ fn read_after_burner_map(
     return Ok(ils_body_offset);
 }
 
+fn read_memory_map(
+    reader: &mut BinaryReader,
+    chunk_info: &mut HashMap<u32, ChunkInfo>,
+) -> Result<(), String> {
+    // Read imap chunk header
+    let imap_fourcc = reader.read_u32().unwrap();
+    if imap_fourcc != FOURCC("imap") {
+        return Err(format!(
+            "read_memory_map: Expected 'imap' but got '{}'",
+            fourcc_to_string(imap_fourcc)
+        ));
+    }
+    let _imap_length = reader.read_u32().unwrap();
+
+    // imap body: count (u32), mmapOffset (u32)
+    let imap_count = reader.read_u32().unwrap();
+    let mmap_offset = reader.read_u32().unwrap() as usize;
+
+    console_warn!(
+        "read_memory_map: imap count={} mmapOffset=0x{:x}",
+        imap_count, mmap_offset
+    );
+
+    // Seek to mmap
+    reader.jmp(mmap_offset);
+
+    let mmap_fourcc = reader.read_u32().unwrap();
+    if mmap_fourcc != FOURCC("mmap") {
+        return Err(format!(
+            "read_memory_map: Expected 'mmap' at offset 0x{:x} but got '{}'",
+            mmap_offset, fourcc_to_string(mmap_fourcc)
+        ));
+    }
+    let _mmap_length = reader.read_u32().unwrap();
+
+    // mmap header
+    let header_size = reader.read_u16().unwrap();
+    let entry_size = reader.read_u16().unwrap();
+    let _chunk_count_max = reader.read_u32().unwrap();
+    let chunk_count_used = reader.read_u32().unwrap();
+    let _junk_head_a = reader.read_u32().unwrap(); // 0xFFFFFFFF
+    let _junk_head_b = reader.read_u32().unwrap(); // 0xFFFFFFFF
+    let _free_head = reader.read_u32().unwrap();
+
+    console_warn!(
+        "read_memory_map: mmap headerSize={} entrySize={} chunkCountUsed={} chunkCountMax={}",
+        header_size, entry_size, chunk_count_used, _chunk_count_max
+    );
+
+    // Skip any extra header bytes beyond the 24 we already read
+    let header_bytes_read: u16 = 24; // 2+2+4+4+4+4+4
+    if header_size > header_bytes_read {
+        let extra = (header_size - header_bytes_read) as usize;
+        reader.read_bytes(extra).unwrap();
+    }
+
+    // Read mmap entries
+    for i in 0..chunk_count_used {
+        let entry_start = reader.pos;
+        let fourcc = reader.read_u32().unwrap();
+        let size = reader.read_u32().unwrap();
+        let offset = reader.read_u32().unwrap() as usize;
+        let _flags = reader.read_u16().unwrap();
+        let _unknown = reader.read_u16().unwrap();
+        let _next = reader.read_u32().unwrap();
+
+        // Skip any extra entry bytes beyond the 20 we already read
+        let entry_bytes_read: u16 = 20; // 4+4+4+2+2+4
+        if entry_size > entry_bytes_read {
+            let extra = (entry_size - entry_bytes_read) as usize;
+            reader.jmp(entry_start + extra);
+        }
+
+        // Skip free and junk entries
+        if fourcc == FOURCC("free") || fourcc == FOURCC("junk") {
+            continue;
+        }
+
+        let info = ChunkInfo {
+            id: i,
+            fourcc,
+            len: size as usize,
+            uncompressed_len: size as usize,
+            offset,
+            compression_id: NULL_COMPRESSION_GUID,
+        };
+        chunk_info.insert(i, info);
+    }
+
+    Ok(())
+}
+
 fn read_key_table(
     reader: &mut BinaryReader,
     chunk_container: &mut ChunkContainer,
@@ -751,9 +864,16 @@ fn get_first_chunk(
     fourcc: u32,
 ) -> Option<Chunk> {
     let info = get_first_chunk_info(&chunk_container.chunk_info, fourcc);
-    if info.is_some() {
-        let info = info.unwrap();
-        return Some(get_chunk(reader, chunk_container, rifx, info.fourcc, info.id).unwrap());
+    if let Some(info) = info {
+        let info_fourcc = info.fourcc;
+        let info_id = info.id;
+        match get_chunk(reader, chunk_container, rifx, info_fourcc, info_id) {
+            Ok(chunk) => return Some(chunk),
+            Err(e) => {
+                console_warn!("Failed to read '{}' chunk (id={}): {}", fourcc_to_string(info_fourcc), info_id, e);
+                return None;
+            }
+        }
     } else {
         return None;
     }
@@ -772,19 +892,24 @@ fn read_chunk_data(reader: &mut BinaryReader, fourcc: u32, len: u32) -> Result<V
     }
 
     // validate chunk
-    if fourcc != valid_fourcc || use_len != valid_len {
-        return Err(
-      format_args!(
-        "At offset ${offset} expected {} chunk with length ${use_len}, but got {} chunk with length ${valid_len}",
-        fourcc_to_string(fourcc),
-        fourcc_to_string(valid_fourcc),
-      ).to_string()
-    );
-    } else {
-        warn!(
-            "At offset ${offset} reading chunk '{}' with length ${use_len}",
-            fourcc_to_string(fourcc)
+    if fourcc != valid_fourcc {
+        return Err(format!(
+            "At offset 0x{:x} expected '{}' chunk but got '{}'",
+            offset,
+            fourcc_to_string(fourcc),
+            fourcc_to_string(valid_fourcc),
+        ));
+    }
+
+    if use_len != valid_len {
+        console_warn!(
+            "read_chunk_data: At offset 0x{:x} '{}' mmap size={} != header size={}, using header size",
+            offset,
+            fourcc_to_string(fourcc),
+            use_len,
+            valid_len,
         );
+        use_len = valid_len;
     }
 
     return Ok(reader.read_bytes(use_len as usize).unwrap().to_vec());
@@ -837,13 +962,16 @@ fn get_chunk_data(
                 if info.len == 0 && info.uncompressed_len == 0 {
                     chunk_container
                         .cached_chunk_views
-                        .insert(id, reader.read_bytes(info.len).unwrap().to_vec());
+                        .insert(id, reader.read_bytes(info.len)
+                            .map_err(|e| format!("Chunk {}: failed to read empty chunk: {}", id, e))?
+                            .to_vec());
                 } else if compression_implemented(&info.compression_id) {
                     let mut uncomp_buf: Option<Vec<u8>> = None;
                     if info.compression_id == ZLIB_COMPRESSION_GUID
                         || info.compression_id == ZLIB_COMPRESSION_GUID2
                     {
-                        uncomp_buf = Some(reader.read_zlib_bytes(info.len).unwrap());
+                        uncomp_buf = Some(reader.read_zlib_bytes(info.len)
+                            .map_err(|e| format!("Chunk {}: zlib decompression failed: {}", id, e))?);
                     } else if info.compression_id == SND_COMPRESSION_GUID {
                         // Handle Director SND compressed chunk
                         reader.jmp(info.offset + rifx.ils_body_offset);
@@ -912,13 +1040,16 @@ fn get_chunk_data(
                     }
                     chunk_container
                         .cached_chunk_views
-                        .insert(id, reader.read_bytes(info.len).unwrap().to_vec());
+                        .insert(id, reader.read_bytes(info.len)
+                            .map_err(|e| format!("Chunk {}: failed to read bytes: {}", id, e))?
+                            .to_vec());
                 }
             } else {
                 reader.jmp(info.offset);
+                let chunk_data = read_chunk_data(reader, fourcc, u32::MAX)?;
                 chunk_container
                     .cached_chunk_views
-                    .insert(id, read_chunk_data(reader, fourcc, id).unwrap());
+                    .insert(id, chunk_data);
             }
 
             return Ok(chunk_container
