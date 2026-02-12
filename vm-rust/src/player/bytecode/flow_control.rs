@@ -1,7 +1,7 @@
 use crate::{
     director::lingo::datum::{Datum, DatumType},
     player::{
-        HandlerExecutionResult, PLAYER_OPT, ScriptError, compare::datum_is_zero, datum_formatting::format_datum, handlers::datum_handlers::{
+        HandlerExecutionResult, PLAYER_OPT, ScriptError, compare::datum_is_zero, datum_formatting::format_datum, datum_ref::DatumRef, handlers::datum_handlers::{
             player_call_datum_handler, script_instance::ScriptInstanceUtils,
         }, player_call_script_handler_raw_args, player_ext_call, player_handle_scope_return, reserve_player_mut, reserve_player_ref, script::{get_current_handler_def, get_current_script, get_name}
     },
@@ -15,6 +15,7 @@ impl FlowControlBytecodeHandler {
     pub fn ret(ctx: &BytecodeHandlerContext) -> Result<HandlerExecutionResult, ScriptError> {
         reserve_player_mut(|player| {
             let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
+            scope.return_value = DatumRef::Void;
             scope.stack.clear();
         });
         Ok(HandlerExecutionResult::Stop)
