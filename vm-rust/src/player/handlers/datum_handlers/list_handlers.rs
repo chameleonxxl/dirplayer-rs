@@ -217,7 +217,9 @@ impl ListDatumHandlers {
                 .iter()
                 .position(|x| datum_equals(player.get_datum(&x), find, &player.allocator).unwrap())
                 .map(|x| x as i32);
-            Ok(player.alloc_datum(Datum::Int(position.unwrap_or(-1) + 1)))
+            let result = position.unwrap_or(-1) + 1;
+
+            Ok(player.alloc_datum(Datum::Int(result)))
         })
     }
 
