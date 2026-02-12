@@ -24,7 +24,7 @@ use super::datum_handlers::{
     prop_list::{PropListDatumHandlers, PropListUtils},
     rect::RectUtils,
     script_instance::ScriptInstanceDatumHandlers,
-    sound_channel::SoundStatus,
+    sound_channel::{SoundChannelDatumHandlers, SoundStatus},
 };
 
 pub struct TypeHandlers {}
@@ -1297,15 +1297,36 @@ impl TypeHandlers {
 
     pub fn sound(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
         reserve_player_mut(|player| {
-            let channel_num = player.get_datum(&args[0]).int_value()? as u16;
-            // Validate the channel exists
-            if channel_num == 0 || channel_num as usize > player.sound_manager.num_channels() {
-                return Err(ScriptError::new(format!(
-                    "Invalid sound channel: {}",
-                    channel_num
-                )));
+            let first_arg = player.get_datum(&args[0]).clone();
+            // Command form: sound(#verb, channelNum, ...args)
+            // e.g. sound #stop, 3  or  sound #play, 1, member("snd")
+            if let Datum::Symbol(verb) = &first_arg {
+                let verb = verb.to_lowercase();
+                let channel_num = if args.len() > 1 {
+                    player.get_datum(&args[1]).int_value()? as u16
+                } else {
+                    1 // default to channel 1
+                };
+                if channel_num == 0 || channel_num as usize > player.sound_manager.num_channels() {
+                    return Err(ScriptError::new(format!(
+                        "Invalid sound channel: {}",
+                        channel_num
+                    )));
+                }
+                let channel_datum = player.alloc_datum(Datum::SoundChannel(channel_num));
+                let remaining_args: Vec<DatumRef> = args[2..].to_vec();
+                SoundChannelDatumHandlers::call(player, &channel_datum, &verb, &remaining_args)
+            } else {
+                // Function form: sound(channelNum) - returns a SoundChannel datum
+                let channel_num = first_arg.int_value()? as u16;
+                if channel_num == 0 || channel_num as usize > player.sound_manager.num_channels() {
+                    return Err(ScriptError::new(format!(
+                        "Invalid sound channel: {}",
+                        channel_num
+                    )));
+                }
+                Ok(player.alloc_datum(Datum::SoundChannel(channel_num)))
             }
-            Ok(player.alloc_datum(Datum::SoundChannel(channel_num)))
         })
     }
 

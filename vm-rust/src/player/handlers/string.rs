@@ -45,10 +45,10 @@ impl StringHandlers {
         reserve_player_mut(|player| {
             let obj = player.get_datum(&args[0]);
             match obj {
-                Datum::String(s) => Ok(player.alloc_datum(Datum::Int(s.chars().count() as i32))),
+                Datum::String(s) => Ok(player.alloc_datum(Datum::Int(s.len() as i32))),
                 Datum::StringChunk(..) => {
                     let s = obj.string_value()?;
-                    Ok(player.alloc_datum(Datum::Int(s.chars().count() as i32)))
+                    Ok(player.alloc_datum(Datum::Int(s.len() as i32)))
                 }
                 _ => Err(ScriptError::new(
                     "Cannot get length of non-string".to_string(),
@@ -100,24 +100,26 @@ impl StringHandlers {
     pub fn char_to_num(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
         reserve_player_mut(|player| {
             let str_value = player.get_datum(&args[0]).string_value()?;
-            let mut chars = str_value.chars();
+            let utf8_bytes = str_value.as_bytes();
 
-            let char_val = if str_value.is_empty() {
+            let byte_val = if utf8_bytes.is_empty() {
                 0
             } else {
-                chars.nth(0).unwrap() as i32
+                utf8_bytes[0] as i32
             };
 
-            Ok(player.alloc_datum(Datum::Int(char_val)))
+            Ok(player.alloc_datum(Datum::Int(byte_val)))
         })
     }
 
     pub fn num_to_char(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
         reserve_player_mut(|player| {
             let num = player.get_datum(&args[0]).int_value()?;
-            let char_val = (num & 0xFF) as u8 as char;
+            let byte_val = (num & 0xFF) as u8;
 
-            let result_string = char_val.to_string();
+            // Build a single-byte string directly from raw bytes (Latin-1 1:1)
+            let result_string = unsafe { String::from_utf8_unchecked(vec![byte_val]) };
+
             Ok(player.alloc_datum(Datum::String(result_string)))
         })
     }
