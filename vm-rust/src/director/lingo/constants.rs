@@ -239,6 +239,34 @@ pub fn get_sprite_prop_name(name_id: u16) -> &'static str {
     sprite_prop_names().get(&name_id).unwrap().as_ref()
 }
 
+fn cast_member_prop_names() -> &'static HashMap<u16, Box<str>> {
+    static MAP: OnceLock<HashMap<u16, Box<str>>> = OnceLock::new();
+    MAP.get_or_init(|| {
+        HashMap::from([
+            (0x01, "name".into()),
+            (0x02, "text".into()),
+            (0x03, "fontStyle".into()),
+            (0x04, "font".into()),
+            (0x05, "height".into()),
+            (0x06, "alignment".into()),
+            (0x07, "fontSize".into()),
+            (0x08, "picture".into()),
+            (0x09, "hilite".into()),
+            (0x0a, "number".into()),
+            (0x0b, "size".into()),
+            (0x11, "foreColor".into()),
+            (0x12, "backColor".into()),
+        ])
+    })
+}
+
+pub fn get_cast_member_prop_name(name_id: u16) -> &'static str {
+    cast_member_prop_names()
+        .get(&name_id)
+        .map(|s| s.as_ref())
+        .unwrap_or("unknown")
+}
+
 pub fn get_sound_prop_name(property_id: u16) -> String {
     match property_id {
         0x01 => "volume".to_string(),

@@ -1,13 +1,18 @@
+use log::warn;
+
 use crate::{
     director::lingo::{
         constants::{
-            get_anim_prop_name, get_sprite_prop_name, movie_prop_names, sprite_prop_names, get_sound_prop_name,
+            get_anim_prop_name, get_cast_member_prop_name, get_sprite_prop_name, movie_prop_names, sprite_prop_names, get_sound_prop_name,
         },
         datum::{Datum, StringChunkType},
     },
     player::{
         allocator::DatumAllocatorTrait,
-        handlers::datum_handlers::string_chunk::StringChunkUtils,
+        handlers::datum_handlers::{
+            cast_member_ref::CastMemberRefHandlers,
+            string_chunk::StringChunkUtils,
+        },
         reserve_player_mut,
         score::{sprite_get_prop, sprite_set_prop},
         script::{
@@ -253,6 +258,54 @@ impl GetSetBytecodeHandler {
                     let prop_name = get_anim_prop_name(property_id as u16);
                     player.set_movie_prop(&prop_name, value)?;
                     Ok(HandlerExecutionResult::Advance)
+                }
+                0x0b => {
+                    // Sound channel property (the volume of sound X)
+                    let prop_name = get_sound_prop_name(property_id as u16);
+                    let channel_num_ref = {
+                        let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
+                        scope.stack.pop().unwrap()
+                    };
+                    let channel_num = player.get_datum(&channel_num_ref).int_value()?;
+                    // Channel 0 means global/default - treat as channel 1
+                    let channel_num = if channel_num == 0 { 1 } else { channel_num };
+                    let sound_channel_datum = player.alloc_datum(Datum::SoundChannel(channel_num as u16));
+                    SoundChannelDatumHandlers::set_prop(player, &sound_channel_datum, &prop_name, &value_ref)?;
+                    Ok(HandlerExecutionResult::Advance)
+                }
+                0x09 => {
+                    // Cast member property (kTheCast)
+                    // Stack has: [member_id, castLib(D5+), value(popped), prop_id(popped)]
+                    let cast_lib_datum = if player.movie.dir_version >= 500 {
+                        let r = {
+                            let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
+                            scope.stack.pop().unwrap()
+                        };
+                        Some(player.get_datum(&r).clone())
+                    } else {
+                        None
+                    };
+                    let member_id_ref = {
+                        let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
+                        scope.stack.pop().unwrap()
+                    };
+                    let member_id_datum = player.get_datum(&member_id_ref).clone();
+                    let prop_name = get_cast_member_prop_name(property_id as u16).to_string();
+                    let member_ref = player.movie.cast_manager.find_member_ref_by_identifiers(
+                        &member_id_datum,
+                        cast_lib_datum.as_ref(),
+                        &player.allocator,
+                    )?;
+                    match member_ref {
+                        Some(member_ref) => {
+                            CastMemberRefHandlers::set_prop(&member_ref, &prop_name, value)?;
+                            Ok(HandlerExecutionResult::Advance)
+                        }
+                        None => {
+                            warn!("set cast member prop '{}': member not found", prop_name);
+                            Ok(HandlerExecutionResult::Advance)
+                        }
+                    }
                 }
                 _ => Err(ScriptError::new(format!(
                     "Invalid propertyType/propertyID for kOpSet: {}",
@@ -552,7 +605,7 @@ impl GetSetBytecodeHandler {
                 crate::director::lingo::datum::DatumType::String => match prop_name.as_str() {
                     "length" => {
                         let len = if let Datum::String(s) = player.get_datum(&obj_ref) {
-                            s.chars().count() as i32
+                            s.len() as i32
                         } else {
                             unreachable!()
                         };
@@ -562,7 +615,7 @@ impl GetSetBytecodeHandler {
                         use crate::director::lingo::datum::{StringChunkExpr, StringChunkType};
                         let (s_len, s_clone) = if let Datum::String(s) = player.get_datum(&obj_ref)
                         {
-                            (s.chars().count() as i32, s.clone())
+                            (s.len() as i32, s.clone())
                         } else {
                             unreachable!()
                         };
@@ -754,8 +807,37 @@ impl GetSetBytecodeHandler {
                 };
                 Ok(player.alloc_datum(datum))
             } else if prop_type == 0x09 {
-                // anim prop (alternate type)
-                Ok(player.alloc_datum(player.get_anim_prop(prop_id as u16)?))
+                // Cast member property (kTheCast)
+                let cast_lib_datum = if player.movie.dir_version >= 500 {
+                    let r = {
+                        let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
+                        scope.stack.pop().unwrap()
+                    };
+                    Some(player.get_datum(&r).clone())
+                } else {
+                    None
+                };
+                let member_id_ref = {
+                    let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
+                    scope.stack.pop().unwrap()
+                };
+                let member_id_datum = player.get_datum(&member_id_ref).clone();
+                let prop_name = get_cast_member_prop_name(prop_id as u16).to_string();
+                let member_ref = player.movie.cast_manager.find_member_ref_by_identifiers(
+                    &member_id_datum,
+                    cast_lib_datum.as_ref(),
+                    &player.allocator,
+                )?;
+                match member_ref {
+                    Some(member_ref) => {
+                        let result = CastMemberRefHandlers::get_prop(player, &member_ref, &prop_name)?;
+                        Ok(player.alloc_datum(result))
+                    }
+                    None => {
+                        warn!("get cast member prop '{}': member not found", prop_name);
+                        Ok(player.alloc_datum(Datum::Void))
+                    }
+                }
             } else if prop_type == 0x0b {
                 // sound properties
                 if prop_id == 2 {
@@ -774,8 +856,11 @@ impl GetSetBytecodeHandler {
                         scope.stack.pop().unwrap()
                     };
                     let channel_num = player.get_datum(&datum_ref).int_value()?;
-                    
-                    if channel_num == 0 {
+
+                    // Channel 0 means global/default - treat as channel 1
+                    let channel_num = if channel_num == 0 { 1 } else { channel_num };
+
+                    if channel_num < 0 {
                         return Err(ScriptError::new(format!(
                             "Sound channel index must be >= 1 for property '{}'",
                             prop_name

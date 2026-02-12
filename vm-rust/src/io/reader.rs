@@ -49,9 +49,7 @@ impl DirectorExt for BinaryReader {
 
     fn read_string(&mut self, len: usize) -> Result<String, std::io::Error> {
         let bytes = self.read_bytes(len).unwrap();
-        // Use lossy conversion to handle legacy encodings (MacRoman/Windows-1252)
-        // that are common in Director files
-        return Ok(String::from_utf8_lossy(&bytes).into_owned());
+        return Ok(unsafe { String::from_utf8_unchecked(bytes.to_vec()).to_string() });
     }
 
     fn read_apple_float_80(&mut self) -> Result<f64, String> {
