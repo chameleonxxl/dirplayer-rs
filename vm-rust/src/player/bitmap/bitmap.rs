@@ -31,9 +31,16 @@ use super::{
 pub enum PaletteRef {
     BuiltIn(BuiltInPalette),
     Member(CastMemberRef),
+    /// Use the movie's default palette (first available custom palette, or system palette if none)
+    /// This is used when palette_id=0 (meaning "use default" rather than a specific member)
+    Default,
 }
 
 impl PaletteRef {
+    /// Create a PaletteRef from a parsed palette_id value.
+    ///
+    /// - i < 0: builtin palette enum value (e.g., -1=SystemMac, -3=GrayScale)
+    /// - i > 0: custom palette member number (1-indexed, e.g., 1=member #1)
     pub fn from(i: i16, cast_lib: u32) -> Self {
         if i < 0 {
             match BuiltInPalette::from_i16(i) {
@@ -46,10 +53,15 @@ impl PaletteRef {
                     PaletteRef::BuiltIn(BuiltInPalette::SystemWin)
                 }
             }
+        } else if i == 0 {
+            // i == 0 shouldn't happen with the new parsing logic, but handle it gracefully
+            // by using the system default palette
+            PaletteRef::BuiltIn(get_system_default_palette())
         } else {
+            // Custom palette: i is already the 1-indexed member number
             PaletteRef::Member(CastMemberRef {
                 cast_lib: cast_lib as i32,
-                cast_member: i as i32 + 1,
+                cast_member: i as i32,
             })
         }
     }
@@ -107,7 +119,7 @@ impl BuiltInPalette {
 }
 
 pub fn get_system_default_palette() -> BuiltInPalette {
-    // TODO check if win or mac
+    // TODO: Properly detect platform from movie file format
     BuiltInPalette::SystemWin
 }
 
@@ -123,6 +135,8 @@ pub struct Bitmap {
     pub use_alpha: bool,
     pub trim_white_space: bool,
     pub was_trimmed: bool,
+    /// Version counter for cache invalidation (incremented when bitmap data changes)
+    pub version: u32,
 }
 
 impl Bitmap {
@@ -164,7 +178,14 @@ impl Bitmap {
             use_alpha: false,
             trim_white_space: false,
             was_trimmed: false,
+            version: 0,
         }
+    }
+
+    /// Increment the version counter to indicate the bitmap data has changed.
+    /// This is used by the WebGL2 texture cache to know when to re-upload textures.
+    pub fn mark_dirty(&mut self) {
+        self.version = self.version.wrapping_add(1);
     }
 }
 
@@ -211,9 +232,11 @@ fn decode_bitmap_1bit(
     let mut result = vec![0; width as usize * height as usize];
     for y in 0..scan_height {
         for x in 0..scan_width {
-            let scan_index = (y * scan_width + x) as usize;
+            // Use usize arithmetic to avoid u16 overflow for large images
+            // e.g., y=152, scan_width=432 -> 152*432=65664 which overflows u16 (max 65535)
+            let scan_index = y as usize * scan_width as usize + x as usize;
             if x < width {
-                let pixel_index = (y * width + x) as usize;
+                let pixel_index = y as usize * width as usize + x as usize;
                 if scan_index >= scan_data.len() {
                     return Err(format!(
                         "decode_bitmap_1bit: scan_index {} >= scan_data.len() {}",
@@ -238,6 +261,7 @@ fn decode_bitmap_1bit(
         use_alpha: false,
         trim_white_space: false,
         was_trimmed: false,
+        version: 0,
     })
 }
 
@@ -299,6 +323,7 @@ fn decode_bitmap_2bit(
         use_alpha: false,
         trim_white_space: false,
         was_trimmed: false,
+        version: 0,
     })
 }
 
@@ -356,6 +381,7 @@ fn decode_bitmap_4bit(
         use_alpha: false,
         trim_white_space: false,
         was_trimmed: false,
+        version: 0,
     })
 }
 
@@ -422,6 +448,7 @@ fn decode_bitmap_16bit(
         use_alpha: false,
         trim_white_space: false,
         was_trimmed: false,
+        version: 0,
     })
 }
 
@@ -435,13 +462,23 @@ fn decode_generic_bitmap(
     palette_ref: PaletteRef,
     data: &[u8],
 ) -> Result<Bitmap, String> {
+    // Sanity check: prevent capacity overflow from garbage BitmapInfo values
+    const MAX_BITMAP_PIXELS: usize = 8192 * 8192; // 64 megapixels
+    let total_pixels = width as usize * height as usize;
+    if total_pixels > MAX_BITMAP_PIXELS {
+        return Err(format!(
+            "decode_generic_bitmap: bitmap {}x{} exceeds maximum size",
+            width, height
+        ));
+    }
+
     let bytes_per_pixel = bit_depth / 8;
-    if scan_width as usize * scan_height as usize * num_channels as usize * bytes_per_pixel as usize
-        != data.len()
-    {
+    let expected_size = scan_width as usize * scan_height as usize * num_channels as usize * bytes_per_pixel as usize;
+
+    if expected_size != data.len() {
         warn!(
             "decode_generic_bitmap: Expected {} bytes, got {}",
-            scan_width * scan_height * num_channels as u16 * bytes_per_pixel as u16,
+            expected_size,
             data.len()
         );
         let actual_bit_depth = bit_depth * num_channels;
@@ -512,6 +549,7 @@ fn decode_generic_bitmap(
             use_alpha: false,
             trim_white_space: false,
             was_trimmed: false,
+            version: 0,
         });
     }
 }
@@ -554,14 +592,18 @@ pub fn decompress_bitmap(
     let mut reader = BinaryReader::from_u8(data);
 
     let scan_height = info.height;
-    let mut scan_width = if info.width % alignment_width == 0 {
+    let mut scan_width = if info.pitch > 0 && info.bit_depth > 0 {
+        // Pitch is the row byte stride. Convert to pixel width:
+        // scan_width = pitch * 8 / bit_depth
+        (info.pitch as u32 * 8 / info.bit_depth as u32) as u16
+    } else if info.width % alignment_width == 0 {
         info.width
     } else {
         alignment_width * info.width.div_ceil(alignment_width)
     };
 
     let expected_len = if info.bit_depth == 32 && version >= 400 {
-        info.width as usize * scan_height as usize * num_channels as usize
+        scan_width as usize * scan_height as usize * num_channels as usize
     } else if info.bit_depth == 1 {
         // For 1-bit: scan_width is in pixels, each row is scan_width/8 bytes
         (scan_width as usize / 8) * scan_height as usize
@@ -576,7 +618,7 @@ pub fn decompress_bitmap(
     };
 
     let skip_compression = reader.length >= expected_len;
-    
+
     if skip_compression {
         result.extend_from_slice(&reader.data[..expected_len]);
     } else {
@@ -587,6 +629,7 @@ pub fn decompress_bitmap(
             };
 
             if control < 0x80 {
+                // Literal run: copy next (control + 1) bytes
                 let count = control + 1;
                 for _ in 0..count {
                     if result.len() >= expected_len {
@@ -597,7 +640,11 @@ pub fn decompress_bitmap(
                         Err(_) => break,
                     }
                 }
+            } else if control == 0x80 {
+                // No-op: skip this byte (PackBits standard)
+                continue;
             } else {
+                // Repeat run: repeat next byte (257 - control) times
                 let count = 257 - control;
                 let val = match reader.read_u8() {
                     Ok(v) => v,
@@ -613,10 +660,12 @@ pub fn decompress_bitmap(
         }
     }
 
-    if result.len() == info.width as usize * info.height as usize * num_channels as usize {
+    if info.pitch > 0 {
+        // Pitch was provided — keep the pitch-based scan_width
+    } else if result.len() == info.width as usize * info.height as usize * num_channels as usize {
         scan_width = info.width;
     } else if info.bit_depth == 32 && version >= 400 {
-        // For 32-bit D4+ format, always use actual width (no padding)
+        // For 32-bit D4+ format without pitch info, use actual width (no padding)
         scan_width = info.width;
     } else if info.width % alignment_width == 0 {
         scan_width = info.width;
@@ -705,6 +754,7 @@ pub fn decompress_bitmap(
                     use_alpha: info.use_alpha,
                     trim_white_space: info.trim_white_space,
                     was_trimmed: false,
+                    version: 0,
                 })
             } else {
                 // D4+ format: each scanline has channels laid out as A R G B sequentially
@@ -750,6 +800,7 @@ pub fn decompress_bitmap(
                     use_alpha: info.use_alpha,
                     trim_white_space: info.trim_white_space,
                     was_trimmed: false,
+                    version: 0,
                 })
             }
         }
@@ -765,6 +816,99 @@ pub fn decompress_bitmap(
     Ok(bitmap)
 }
 
+#[inline]
+fn lookup_builtin_palette(palette: &BuiltInPalette, color_index: u8, original_bit_depth: u8) -> Option<(u8, u8, u8)> {
+    match palette {
+        BuiltInPalette::GrayScale => {
+            // Uses 4-color palette for 2-bit images and 16-color palette for 4-bit images
+            if original_bit_depth == 2 {
+                GRAYSCALE_4_PALETTE.get(color_index as usize).copied()
+            } else if original_bit_depth == 4 {
+                GRAYSCALE_16_PALETTE.get(color_index as usize).copied()
+            } else {
+                GRAYSCALE_PALETTE.get(color_index as usize).copied()
+            }
+        }
+        BuiltInPalette::SystemMac => {
+            // Use 16-color palette for 4-bit images
+            if original_bit_depth == 4 {
+                MAC_16_PALETTE.get(color_index as usize).copied()
+            } else {
+                SYSTEM_MAC_PALETTE.get(color_index as usize).copied()
+            }
+        }
+        BuiltInPalette::SystemWin => {
+            // Use 16-color palette for 4-bit images
+            if original_bit_depth == 4 {
+                WIN_16_PALETTE.get(color_index as usize).copied()
+            } else {
+                SYSTEM_WIN_PALETTE.get(color_index as usize).copied()
+            }
+        }
+        BuiltInPalette::Rainbow => {
+            // Use 16-color palette for 4-bit images
+            if original_bit_depth == 4 {
+                RAINBOW16_PALETTE.get(color_index as usize).copied()
+            } else {
+                RAINBOW_PALETTE.get(color_index as usize).copied()
+            }
+        }
+        BuiltInPalette::Pastels => {
+            // Use 16-color palette for 4-bit images
+            if original_bit_depth == 4 {
+                PASTELS16_PALETTE.get(color_index as usize).copied()
+            } else {
+                PASTELS_PALETTE.get(color_index as usize).copied()
+            }
+        }
+        BuiltInPalette::Vivid => {
+            // Use 16-color palette for 4-bit images
+            if original_bit_depth == 4 {
+                VIVID16_PALETTE.get(color_index as usize).copied()
+            } else {
+                VIVID_PALETTE.get(color_index as usize).copied()
+            }
+        }
+        BuiltInPalette::Ntsc => {
+            // Use 16-color palette for 4-bit images
+            if original_bit_depth == 4 {
+                NTSC16_PALETTE.get(color_index as usize).copied()
+            } else {
+                NTSC_PALETTE.get(color_index as usize).copied()
+            }
+        }
+        BuiltInPalette::Metallic => {
+            // Use 16-color palette for 4-bit images
+            if original_bit_depth == 4 {
+                METALLIC16_PALETTE.get(color_index as usize).copied()
+            } else {
+                METALLIC_PALETTE.get(color_index as usize).copied()
+            }
+        }
+        BuiltInPalette::Web216 => WEB_216_PALETTE.get(color_index as usize).copied(),
+        // Vga and SystemWinDir4 fall back to SystemWin palette
+        BuiltInPalette::Vga | BuiltInPalette::SystemWinDir4 => {
+            if original_bit_depth == 4 {
+                WIN_16_PALETTE.get(color_index as usize).copied()
+            } else {
+                SYSTEM_WIN_PALETTE.get(color_index as usize).copied()
+            }
+        }
+    }
+}
+
+#[inline]
+fn color_fallback(color_index: u8) -> (u8, u8, u8) {
+    if color_index == 0 {
+        (255, 255, 255)
+    } else if color_index == 255 {
+        (0, 0, 0)
+    } else {
+        (255, 0, 255) // magenta for missing colors
+    }
+}
+
+#[inline]
 pub fn resolve_color_ref(
     palettes: &PaletteMap,
     color_ref: &ColorRef,
@@ -774,106 +918,31 @@ pub fn resolve_color_ref(
     match color_ref {
         ColorRef::Rgb(r, g, b) => (*r, *g, *b),
         ColorRef::PaletteIndex(color_index) => {
-            let color = match palette_ref {
-                PaletteRef::BuiltIn(palette) => match palette {
-                    BuiltInPalette::GrayScale => {
-                        // Uses 4-color palette for 2-bit images and 16-color palette for 4-bit images
-                        if original_bit_depth == 2 {
-                            GRAYSCALE_4_PALETTE.get(*color_index as usize).copied()
-                        } else if original_bit_depth == 4 {
-                            GRAYSCALE_16_PALETTE.get(*color_index as usize).copied()
-                        } else {
-                            GRAYSCALE_PALETTE.get(*color_index as usize).copied()
-                        }
-                    }
-                    BuiltInPalette::SystemMac => {
-                        // Use 16-color palette for 4-bit images
-                        if original_bit_depth == 4 {
-                            MAC_16_PALETTE.get(*color_index as usize).copied()
-                        } else {
-                            SYSTEM_MAC_PALETTE.get(*color_index as usize).copied()
-                        }
-                    }
-                    BuiltInPalette::SystemWin => {
-                        // Use 16-color palette for 4-bit images
-                        if original_bit_depth == 4 {
-                            WIN_16_PALETTE.get(*color_index as usize).copied()
-                        } else {
-                            SYSTEM_WIN_PALETTE.get(*color_index as usize).copied()
-                        }
-                    }
-                    BuiltInPalette::Rainbow => {
-                        // Use 16-color palette for 4-bit images
-                        if original_bit_depth == 4 {
-                            RAINBOW16_PALETTE.get(*color_index as usize).copied()
-                        } else {
-                            RAINBOW_PALETTE.get(*color_index as usize).copied()
-                        }
-                    }
-                    BuiltInPalette::Pastels => {
-                        // Use 16-color palette for 4-bit images
-                        if original_bit_depth == 4 {
-                            PASTELS16_PALETTE.get(*color_index as usize).copied()
-                        } else {
-                            PASTELS_PALETTE.get(*color_index as usize).copied()
-                        }
-                    }
-                    BuiltInPalette::Vivid => {
-                        // Use 16-color palette for 4-bit images
-                        if original_bit_depth == 4 {
-                            VIVID16_PALETTE.get(*color_index as usize).copied()
-                        } else {
-                            VIVID_PALETTE.get(*color_index as usize).copied()
-                        }
-                    }
-                    BuiltInPalette::Ntsc => {
-                        // Use 16-color palette for 4-bit images
-                        if original_bit_depth == 4 {
-                            NTSC16_PALETTE.get(*color_index as usize).copied()
-                        } else {
-                            NTSC_PALETTE.get(*color_index as usize).copied()
-                        }
-                    }
-                    BuiltInPalette::Metallic => {
-                        // Use 16-color palette for 4-bit images
-                        if original_bit_depth == 4 {
-                            METALLIC16_PALETTE.get(*color_index as usize).copied()
-                        } else {
-                            METALLIC_PALETTE.get(*color_index as usize).copied()
-                        }
-                    }
-                    BuiltInPalette::Web216 => WEB_216_PALETTE.get(*color_index as usize).copied(),
-                    _ => None,
-                },
-                PaletteRef::Member(palette_ref) => {
-                    let palette_member = CastMemberRefHandlers::get_cast_slot_number(
-                        palette_ref.cast_lib as u32,
-                        palette_ref.cast_member as u32,
+            let idx = *color_index;
+            match palette_ref {
+                PaletteRef::BuiltIn(palette) => {
+                    lookup_builtin_palette(palette, idx, original_bit_depth)
+                        .unwrap_or_else(|| color_fallback(idx))
+                }
+                PaletteRef::Member(member_ref) => {
+                    let slot_number = CastMemberRefHandlers::get_cast_slot_number(
+                        member_ref.cast_lib as u32,
+                        member_ref.cast_member as u32,
                     );
-                    let palette_member = palettes.get(palette_member as usize);
-                    match palette_member {
-                        Some(member) => member.colors.get(*color_index as usize).copied(),
-                        None => {
-                            // If a member is not found, use the system palette
-                            Some(resolve_color_ref(
-                                palettes,
-                                color_ref,
-                                &PaletteRef::BuiltIn(BuiltInPalette::SystemWin),
-                                original_bit_depth,
-                            ))
-                        }
+                    if let Some(member) = palettes.get(slot_number as usize) {
+                        member.colors.get(idx as usize).copied()
+                            .unwrap_or_else(|| color_fallback(idx))
+                    } else {
+                        // Palette not found - fall back to system palette directly
+                        lookup_builtin_palette(&get_system_default_palette(), idx, original_bit_depth)
+                            .unwrap_or_else(|| color_fallback(idx))
                     }
                 }
-            };
-
-            if let Some(color) = color {
-                return color.clone();
-            } else if *color_index == 0 {
-                return (255, 255, 255);
-            } else if *color_index == 255 {
-                return (0, 0, 0);
-            } else {
-                return (255, 0, 255); // magenta for missing colors
+                PaletteRef::Default => {
+                    // palette_id=0 means "no specific palette set" - use system default palette
+                    lookup_builtin_palette(&get_system_default_palette(), idx, original_bit_depth)
+                        .unwrap_or_else(|| color_fallback(idx))
+                }
             }
         }
     }
@@ -951,5 +1020,6 @@ pub fn decode_jpeg_bitmap(data: &[u8], info: &BitmapInfo) -> Result<Bitmap, Stri
         use_alpha: info.use_alpha,
         trim_white_space: info.trim_white_space,
         was_trimmed: false,
+        version: 0,
     })
 }
