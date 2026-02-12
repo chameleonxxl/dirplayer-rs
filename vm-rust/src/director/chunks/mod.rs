@@ -15,6 +15,7 @@ pub mod literal;
 pub mod media;
 pub mod palette;
 pub mod pfr_renderer;
+pub mod pfr1;
 pub mod score;
 pub mod score_order;
 pub mod script;
@@ -23,6 +24,7 @@ pub mod sound;
 pub mod text;
 pub mod thum;
 pub mod xmedia;
+pub mod xmedia_styled_text;
 
 use std::collections::HashMap;
 
@@ -223,7 +225,7 @@ pub fn make_chunk(
         }
         "VWSC" | "SCVW" => {
             return Ok(Chunk::Score(
-                ScoreChunk::read(&mut chunk_reader, version).unwrap(),
+                ScoreChunk::read(&mut chunk_reader, version, rifx.after_burned)?,
             ))
         }
         "VWLB" => {
