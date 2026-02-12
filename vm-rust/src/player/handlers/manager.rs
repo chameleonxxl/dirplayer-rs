@@ -8,6 +8,7 @@ use super::{
         point::PointDatumHandlers,
         prop_list::PropListDatumHandlers,
         script_instance::{ScriptInstanceDatumHandlers, ScriptInstanceUtils},
+        sound_channel::SoundChannelDatumHandlers,
     },
     movie::MovieHandlers,
     net::NetHandlers,
@@ -313,13 +314,8 @@ impl BuiltInHandlerManager {
             }
             
             // Director's random(n) returns a value from 1 to n (inclusive)
-            let random_int = match player.movie.next_random_int(max) {
-                Some(value) => value,
-                None => {
-                    let random_value = js_sys::Math::random() * (max as f64);
-                    random_value.floor() as i32 + 1
-                }
-            };
+            let random_value = js_sys::Math::random() * (max as f64);
+            let random_int = random_value.floor() as i32 + 1;
             
             Ok(player.alloc_datum(Datum::Int(random_int)))
         })
@@ -521,7 +517,7 @@ impl BuiltInHandlerManager {
             "castlib" => CastHandlers::cast_lib(args),
             "preloadnetthing" => NetHandlers::preload_net_thing(args),
             "netdone" => NetHandlers::net_done(args),
-            "movetofront" => Ok(DatumRef::Void),
+            "movetofront" | "preloadmember" | "preloadbuffer" | "unloadmember" | "beep" => Ok(DatumRef::Void),
             "puppettempo" => MovieHandlers::puppet_tempo(args),
             "objectp" => TypeHandlers::objectp(args),
             "voidp" => TypeHandlers::voidp(args),
@@ -614,6 +610,11 @@ impl BuiltInHandlerManager {
                     _ => Err(ScriptError::new("Cannot delete at non list".to_string())),
                 }
             }),
+            "deleteone" => {
+                let list = &args[0];
+                let args = &args[1..].to_vec();
+                ListDatumHandlers::delete_one(list, &args)
+            }
             "getone" => reserve_player_mut(|player| {
                 let list = &args[0];
                 let args = &args[1..].to_vec();
@@ -755,6 +756,16 @@ impl BuiltInHandlerManager {
             "dontpassevent" => Self::dont_pass_event(args),
             "frameready" => Self::frame_ready(args),
             "marker" => Self::marker(args),
+            "play" => {
+                // play member("name") - play a sound on channel 1
+                if args.is_empty() {
+                    return Ok(DatumRef::Void);
+                }
+                reserve_player_mut(|player| {
+                    let channel_datum = player.alloc_datum(Datum::SoundChannel(1));
+                    SoundChannelDatumHandlers::call(player, &channel_datum, &"play".to_string(), args)
+                })
+            }
             _ => {
                 let formatted_args = reserve_player_ref(|player| {
                     let mut s = String::new();
