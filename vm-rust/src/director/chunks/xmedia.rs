@@ -1,8 +1,12 @@
 use binary_reader::{BinaryReader, Endian};
 use log::{debug, warn};
 
-// Import the PFR vector renderer
-use super::pfr_renderer::render_pfr_font;
+// Import the new PFR1 parser
+use super::pfr1;
+use super::pfr1::types::Pfr1ParsedFont;
+
+// Import the XMED styled text parser
+pub use super::xmedia_styled_text::XmedStyledText;
 
 pub struct XMediaChunk {
     pub raw_data: Vec<u8>,
@@ -10,11 +14,8 @@ pub struct XMediaChunk {
 
 pub struct PfrFont {
     pub font_name: String,
-    pub char_width: u16,
-    pub char_height: u16,
-    pub glyph_data: Vec<u8>,
-    pub grid_columns: u8,
-    pub grid_rows: u8,
+    pub parsed: Pfr1ParsedFont,
+    pub raw_data: Vec<u8>,
 }
 
 impl XMediaChunk {
@@ -41,450 +42,96 @@ impl XMediaChunk {
 
         // Check for "PFR1" magic (0x50 0x46 0x52 0x31)
         if self.raw_data.len() >= 4 && &self.raw_data[0..4] == b"PFR1" {
-            debug!("✓ Found PFR1 magic header");
+            debug!("Found PFR1 magic header");
             return true;
-        }
-
-        // Reject styled text XMedia chunks (start with "FFFF")
-        if self.raw_data.len() >= 4 && &self.raw_data[0..4] == b"FFFF" {
-            debug!("✗ This is styled text data (FFFF header), not a font");
-            return false;
         }
 
         false
     }
 
-    pub fn extract_font_name(&self) -> Option<String> {
-        // Look for null-terminated strings that might be font names
-        let mut i = 0;
-        while i < self.raw_data.len() - 20 {
-            // Check if this looks like a font name (starts with printable ASCII)
-            if self.raw_data[i].is_ascii_alphabetic() {
-                let mut name = Vec::new();
-                let mut j = i;
+    pub fn is_styled_text(&self) -> bool {
+        if self.raw_data.len() < 12 {
+            web_sys::console::log_1(&format!("XMED data too small ({} bytes)", self.raw_data.len()).into());
+            return false;
+        }
 
-                // Collect until null or non-printable
-                while j < self.raw_data.len()
-                    && self.raw_data[j] != 0
-                    && (self.raw_data[j].is_ascii_alphanumeric()
-                        || self.raw_data[j] == b' '
-                        || self.raw_data[j] == b'*'
-                        || self.raw_data[j] == b'_')
-                {
-                    name.push(self.raw_data[j]);
-                    j += 1;
+        // Check for "FFFF" magic (styled text XMED format)
+        if &self.raw_data[0..4] == b"FFFF" {
+            debug!("Found FFFF styled text header");
+            web_sys::console::log_1(&"Found FFFF styled text header".into());
+            return true;
+        }
+
+        web_sys::console::log_1(&format!(
+            "Not FFFF header: {:02X} {:02X} {:02X} {:02X}",
+            self.raw_data[0], self.raw_data[1], self.raw_data[2], self.raw_data[3]
+        ).into());
+        false
+    }
+
+    pub fn parse_styled_text(&self) -> Option<XmedStyledText> {
+        if !self.is_styled_text() {
+            return None;
+        }
+
+        debug!("Parsing XMED styled text format...");
+        web_sys::console::log_1(&"Parsing XMED styled text format...".into());
+
+        match super::xmedia_styled_text::parse_xmed(&self.raw_data) {
+            Ok(styled_text) => {
+                debug!("  Text: {} chars", styled_text.text.len());
+                debug!("  Spans: {}", styled_text.styled_spans.len());
+                debug!("  Alignment: {:?}", styled_text.alignment);
+
+                web_sys::console::log_1(&format!(
+                    "XMED parsed: text='{}' ({} chars), spans={}, alignment={:?}",
+                    styled_text.text, styled_text.text.len(), styled_text.styled_spans.len(), styled_text.alignment
+                ).into());
+
+                // Log each styled span
+                for (idx, span) in styled_text.styled_spans.iter().enumerate() {
+                    web_sys::console::log_1(&format!(
+                        "  Span {}: text='{}', font={:?}, size={:?}, bold={}, italic={}, underline={}",
+                        idx, span.text,
+                        span.style.font_face, span.style.font_size,
+                        span.style.bold, span.style.italic, span.style.underline
+                    ).into());
                 }
 
-                if name.len() > 3 {
-                    let name_str = String::from_utf8_lossy(&name).to_string();
-                    if name_str.contains("FFF") || name_str.contains("Reaction") {
-                        return Some(name_str);
-                    }
-                }
+                Some(styled_text)
             }
-            i += 1;
+            Err(e) => {
+                warn!("Failed to parse XMED styled text: {}", e);
+                web_sys::console::log_1(&format!("Failed to parse XMED: {}", e).into());
+                None
+            }
         }
-        None
     }
 
-    fn looks_like_bitmap_data(data: &[u8], bytes_per_glyph: usize) -> bool {
-        // Check if this looks like real bitmap data
-        // Real 1-bit bitmap fonts have bytes where each bit is a pixel
-        // So values are typically in range 0x00-0xFF but distributed normally
-        // Vector commands use lots of high bytes (0x80+) as opcodes
-
-        if data.len() < bytes_per_glyph * 80 {
-            debug!("      Fail: Not enough data for 80 glyphs");
-            return false;
-        }
-
-        // Real bitmap data should have LOW bytes dominating
-        // Count bytes in different ranges
-        let sample_size = data.len().min(512);
-        let very_low = data[0..sample_size].iter().filter(|&&b| b < 0x40).count();
-        let low = data[0..sample_size].iter().filter(|&&b| b < 0x80).count();
-        let high = data[0..sample_size].iter().filter(|&&b| b >= 0x80).count();
-
-        let very_low_ratio = very_low as f32 / sample_size as f32;
-        let low_ratio = low as f32 / sample_size as f32;
-
-        // Real bitmap data should have >40% very low bytes (0x00-0x3F)
-        // and >60% low bytes (0x00-0x7F)
-        if very_low_ratio < 0.4 {
-            debug!(
-                "      Fail: Only {:.1}% very low bytes (need >40%)",
-                very_low_ratio * 100.0
-            );
-            return false;
-        }
-
-        if low_ratio < 0.6 {
-            debug!(
-                "      Fail: Only {:.1}% low bytes (need >60%)",
-                low_ratio * 100.0
-            );
-            return false;
-        }
-
-        // Check it's not all the same value
-        let first_byte = data[0];
-        let all_same = data[0..sample_size].iter().all(|&b| b == first_byte);
-        if all_same {
-            debug!("      Fail: All bytes are 0x{:02X}", first_byte);
-            return false;
-        }
-
-        debug!(
-            "      Pass: {:.1}% very_low, {:.1}% low, {:.1}% high bytes",
-            very_low_ratio * 100.0,
-            low_ratio * 100.0,
-            high as f32 / sample_size as f32 * 100.0
-        );
-        true
-    }
-
+    /// Parse PFR font using the new PFR1 parser
     pub fn parse_pfr_font(&self) -> Option<PfrFont> {
         if !self.is_pfr_font() {
             return None;
         }
 
-        debug!("🔍 Parsing PFR1 font format...");
+        debug!("Parsing PFR font with PFR1 parser ({} bytes)...", self.raw_data.len());
 
-        // Extract font name
-        let font_name = self
-            .extract_font_name()
-            .unwrap_or_else(|| format!("Unknown_PFR_Font"));
+        match pfr1::parse_pfr1_font(&self.raw_data) {
+            Ok(parsed) => {
+                let font_name = parsed.font_name.clone();
+                debug!("PFR1 font parsed: name='{}', {} outline glyphs, {} bitmap glyphs",
+                    font_name, parsed.glyphs.len(), parsed.bitmap_glyphs.len());
 
-        debug!("  Font name: '{}'", font_name);
-
-        // Character dimensions are stored as single bytes:
-        // Width at offset 0x56, Height at offset 0x58
-        let char_width = if self.raw_data.len() > 0x56 {
-            let w = self.raw_data[0x56] as u16;
-            if w > 0 && w <= 32 {
-                w
-            } else {
-                8
+                Some(PfrFont {
+                    font_name,
+                    parsed,
+                    raw_data: self.raw_data.clone(),
+                })
             }
-        } else {
-            8
-        };
-
-        let char_height = if self.raw_data.len() > 0x58 {
-            let h = self.raw_data[0x58] as u16;
-            if h > 0 && h <= 32 {
-                h
-            } else {
-                8
-            }
-        } else {
-            8
-        };
-
-        debug!("  Char dimensions: {}×{} pixels", char_width, char_height);
-
-        // Grid is 16×8 for 128 characters
-        let grid_columns = 16u8;
-        let grid_rows = 8u8;
-
-        // Calculate expected data size
-        let bytes_per_row = (char_width as usize + 7) / 8;
-        let bytes_per_glyph = bytes_per_row * char_height as usize;
-        let total_glyphs = grid_columns as usize * grid_rows as usize;
-        let expected_bitmap_bytes = bytes_per_glyph * total_glyphs;
-
-        debug!(
-            "  Expected: {} bytes/glyph, {} total bytes needed",
-            bytes_per_glyph, expected_bitmap_bytes
-        );
-
-        // Try multiple offsets to find the bitmap data
-        let candidate_offsets = vec![
-            0x200,                                                     // Common PFR glyph data offset
-            0x400,                                                     // 1KB boundary
-            0x800,                                                     // 2KB boundary
-            0xC00,                                                     // 3KB boundary
-            self.raw_data.len().saturating_sub(expected_bitmap_bytes), // End of file
-        ];
-
-        debug!(
-            "  Searching for bitmap data at {} candidate offsets...",
-            candidate_offsets.len()
-        );
-
-        let mut glyph_data = None;
-        let mut found_offset = 0;
-
-        // First try the known offsets
-        for &offset in &candidate_offsets {
-            if offset + expected_bitmap_bytes <= self.raw_data.len() {
-                let candidate = &self.raw_data[offset..offset + expected_bitmap_bytes];
-
-                // Log what we're checking
-                debug!(
-                    "  Checking offset 0x{:04X}: first 16 bytes: {:02X?}",
-                    offset,
-                    &candidate[0..16.min(candidate.len())]
-                );
-
-                // Check 'H' character (ASCII 72) specifically
-                let h_offset = 72 * bytes_per_glyph;
-                if h_offset + bytes_per_glyph <= candidate.len() {
-                    let h_glyph = &candidate[h_offset..h_offset + bytes_per_glyph];
-                    debug!("    'H' (glyph #72): {:02X?}", h_glyph);
-                }
-
-                // Also check space for reference
-                let space_offset = 32 * bytes_per_glyph;
-                if space_offset + bytes_per_glyph <= candidate.len() {
-                    let space_glyph = &candidate[space_offset..space_offset + bytes_per_glyph];
-                    debug!("    Space (glyph #32): {:02X?}", space_glyph);
-                }
-
-                if Self::looks_like_bitmap_data(candidate, bytes_per_glyph) {
-                    debug!("  ✓ Found bitmap data at offset 0x{:04X}!", offset);
-                    glyph_data = Some(candidate.to_vec());
-                    found_offset = offset;
-                    break;
-                } else {
-                    debug!("    ✗ Validation failed");
-                }
-            } else {
-                debug!(
-                    "  Skipping offset 0x{:04X}: not enough data (need {}, have {})",
-                    offset,
-                    expected_bitmap_bytes,
-                    self.raw_data.len().saturating_sub(offset)
-                );
+            Err(e) => {
+                warn!("PFR1 parsing failed: {}", e);
+                None
             }
         }
-
-        // If none of the standard offsets worked, try a brute force scan
-        // looking for sections where bytes are mostly in the 0x00-0x7F range
-        if glyph_data.is_none() {
-            debug!("  No bitmap at standard offsets, trying brute-force scan...");
-
-            let mut best_offset = 0;
-            let mut best_score = 0.0;
-
-            // Scan every 8-byte boundary
-            let mut scan_offset = 0x100;
-            while scan_offset + expected_bitmap_bytes <= self.raw_data.len() {
-                let candidate = &self.raw_data[scan_offset..scan_offset + expected_bitmap_bytes];
-
-                // Score based on how "bitmap-like" it looks
-                let sample_size = candidate.len().min(256);
-                let low_bytes = candidate[0..sample_size]
-                    .iter()
-                    .filter(|&&b| b < 0x80)
-                    .count();
-                let score = low_bytes as f32 / sample_size as f32;
-
-                if score > best_score {
-                    best_score = score;
-                    best_offset = scan_offset;
-                }
-
-                scan_offset += 8;
-            }
-
-            if best_score > 0.5 {
-                debug!(
-                    "  ✓ Brute-force found candidate at offset 0x{:04X} (score: {:.1}%)",
-                    best_offset,
-                    best_score * 100.0
-                );
-
-                let candidate = &self.raw_data[best_offset..best_offset + expected_bitmap_bytes];
-                glyph_data = Some(candidate.to_vec());
-                found_offset = best_offset;
-            }
-        }
-
-        if glyph_data.is_none() {
-            debug!("  ✗ No pre-rendered bitmap data found.");
-            debug!("  🎨 Attempting to render from PFR vector data...");
-
-            // Try to render using the vector renderer
-            let glyph_data_offset = 0x200; // Vector data starts here
-            if glyph_data_offset < self.raw_data.len() {
-                let vector_data = &self.raw_data[glyph_data_offset..];
-
-                debug!(
-                    "  📐 Rendering {} glyphs at {}×{} from {} bytes of vector data",
-                    total_glyphs,
-                    char_width,
-                    char_height,
-                    vector_data.len()
-                );
-
-                let rendered_bitmap = render_pfr_font(
-                    vector_data,
-                    char_width as usize,
-                    char_height as usize,
-                    total_glyphs,
-                );
-
-                if rendered_bitmap.len() >= expected_bitmap_bytes {
-                    debug!("  ✅ Successfully rendered PFR vector font!");
-                    glyph_data = Some(rendered_bitmap[..expected_bitmap_bytes].to_vec());
-                    found_offset = glyph_data_offset;
-                } else {
-                    debug!(
-                        "  ⚠️  Rendered {} bytes, expected {}",
-                        rendered_bitmap.len(),
-                        expected_bitmap_bytes
-                    );
-                }
-            }
-        }
-
-        if glyph_data.is_none() {
-            warn!("  ✗ Could not render PFR font.");
-            warn!("  ");
-            warn!("  ═══════════════════════════════════════════════════════");
-            warn!("  ⚠️  PFR RENDERING FAILED");
-            warn!("  ═══════════════════════════════════════════════════════");
-            warn!("  System font will be used as fallback.");
-            warn!("  ═══════════════════════════════════════════════════════");
-            return None;
-        }
-
-        let glyph_data = glyph_data.unwrap();
-
-        debug!(
-            "  ✅ Extracted {} bytes of bitmap data from offset 0x{:04X}",
-            glyph_data.len(),
-            found_offset
-        );
-
-        // Log first glyph of space character for verification
-        let space_offset = 32 * bytes_per_glyph;
-        if space_offset + bytes_per_glyph <= glyph_data.len() {
-            debug!(
-                "  📋 Space char (glyph #32): {:02X?}",
-                &glyph_data[space_offset..space_offset + bytes_per_glyph.min(8)]
-            );
-        }
-
-        Some(PfrFont {
-            font_name,
-            char_width,
-            char_height,
-            glyph_data,
-            grid_columns,
-            grid_rows,
-        })
-    }
-
-    pub fn decode_pfr_rle_bitmap(
-        glyph_data: &[u8],
-        expected_width: u16,
-        expected_height: u16,
-    ) -> Vec<u8> {
-        debug!(
-            "🔧 Decoding PFR RLE bitmap: {} bytes → {}×{} pixels",
-            glyph_data.len(),
-            expected_width,
-            expected_height
-        );
-
-        let total_pixels = expected_width as usize * expected_height as usize;
-        let mut bitmap = vec![0u8; total_pixels / 8]; // 1 bit per pixel
-        let mut bit_pos = 0;
-        let mut pos = 0;
-
-        // PFR RLE encoding uses command bytes:
-        // 0x00-0x7F: literal byte follows
-        // 0x80-0xFF: repeat next byte (count = value - 0x80)
-        // OR: pairs of (count, value)
-
-        // Try simple RLE: byte pairs (count, value)
-        while pos < glyph_data.len() - 1 && bit_pos < total_pixels {
-            let count = glyph_data[pos] as usize;
-            let value = glyph_data[pos + 1];
-
-            // Write 'count' bits of 'value'
-            for _ in 0..count.min(8) {
-                if bit_pos >= total_pixels {
-                    break;
-                }
-
-                let byte_idx = bit_pos / 8;
-                let bit_idx = 7 - (bit_pos % 8);
-
-                if byte_idx < bitmap.len() {
-                    if value > 0 {
-                        bitmap[byte_idx] |= 1 << bit_idx;
-                    }
-                }
-
-                bit_pos += 1;
-            }
-
-            pos += 2;
-        }
-
-        debug!(
-            "   Decoded {} pixels ({} bits, {} bytes)",
-            bit_pos,
-            bit_pos,
-            bitmap.len()
-        );
-
-        bitmap
-    }
-
-    pub fn parse_pfr_font_with_rle(&self) -> Option<PfrFont> {
-        if !self.is_pfr_font() {
-            return None;
-        }
-
-        debug!("🔍 Parsing PFR1 font format with RLE...");
-
-        // ... (same font name extraction as before) ...
-
-        let char_width = 8u16;
-        let char_height = 12u16;
-        let grid_columns = 16u8;
-        let grid_rows = 8u8;
-
-        let bitmap_width = char_width * grid_columns as u16;
-        let bitmap_height = char_height * grid_rows as u16;
-
-        // Extract RLE data starting from offset 0x200 or detected offset
-        let glyph_data_offset = 0x200;
-        let rle_data = if glyph_data_offset < self.raw_data.len() {
-            &self.raw_data[glyph_data_offset..]
-        } else {
-            &self.raw_data[..]
-        };
-
-        // Decode RLE to raw bitmap
-        let decoded_bitmap = Self::decode_pfr_rle_bitmap(rle_data, bitmap_width, bitmap_height);
-
-        debug!(
-            "  ✅ PFR font: {}×{} chars, grid {}×{}, {} bytes decoded bitmap",
-            char_width,
-            char_height,
-            grid_columns,
-            grid_rows,
-            decoded_bitmap.len()
-        );
-
-        let font_name = self
-            .extract_font_name()
-            .unwrap_or_else(|| format!("Unknown_PFR_Font"));
-
-        debug!("  Font name: '{}'", font_name);
-
-        Some(PfrFont {
-            font_name,
-            char_width,
-            char_height,
-            glyph_data: decoded_bitmap,
-            grid_columns,
-            grid_rows,
-        })
     }
 }
