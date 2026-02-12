@@ -8,7 +8,7 @@ use crate::{
     player::{
         font::{bitmap_font_copy_char, BitmapFont},
         geometry::IntRect,
-        sprite::ColorRef,
+        sprite::{ColorRef, is_skew_flip},
         bitmap::bitmap::{get_system_default_palette, PaletteRef},
         bitmap::palette::SYSTEM_WIN_PALETTE, Sprite, Score,
         reserve_player_mut,
@@ -29,6 +29,7 @@ pub struct CopyPixelsParams<'a> {
     pub mask_image: Option<&'a BitmapMask>,
     pub is_text_rendering: bool,
     pub rotation: f64,
+    pub skew: f64,
     pub sprite: Option<&'a Sprite>,
     pub original_dst_rect: Option<IntRect>,
 }
@@ -43,6 +44,7 @@ impl CopyPixelsParams<'_> {
             mask_image: None,
             is_text_rendering: false,
             rotation: 0.0,
+            skew: 0.0,
             sprite: None,
             original_dst_rect: None,
         }
@@ -165,6 +167,26 @@ fn blend_pixel(
                 let r = ((dst.0 as u32 + src.0 as u32).min(255)) as u8;
                 let g = ((dst.1 as u32 + src.1 as u32).min(255)) as u8;
                 let b = ((dst.2 as u32 + src.2 as u32).min(255)) as u8;
+
+                // Apply blend factor
+                if blend_alpha >= 0.999 {
+                    (r, g, b)
+                } else {
+                    blend_color_alpha(dst, (r, g, b), blend_alpha)
+                }
+            }
+        }
+        // 35 = Sub Pin (Director-style subtractive, pinned to 0)
+        // bg_color pixels are transparent
+        // Subtractive: subtract source RGB from destination
+        35 => {
+            if src == bg_color {
+                dst
+            } else {
+                // Subtractive: subtract source from destination
+                let r = (dst.0 as i32 - src.0 as i32).max(0) as u8;
+                let g = (dst.1 as i32 - src.1 as i32).max(0) as u8;
+                let b = (dst.2 as i32 - src.2 as i32).max(0) as u8;
 
                 // Apply blend factor
                 if blend_alpha >= 0.999 {
@@ -622,6 +644,12 @@ impl Bitmap {
             .and_then(|x| x.float_value().ok())
             .unwrap_or(0.0);
 
+        // Extract skew parameter (defaults to 0.0 if not provided)
+        let skew = param_list
+            .get("skew")
+            .and_then(|x| x.float_value().ok())
+            .unwrap_or(0.0);
+
         // Check if is_text_rendering parameter exists and is true
         // This is typically NOT set from Lingo scripts, only internally
         let is_text_rendering = param_list
@@ -667,6 +695,7 @@ impl Bitmap {
             color,
             is_text_rendering,
             rotation,
+            skew,
             sprite,
             original_dst_rect,
         };
@@ -757,6 +786,8 @@ impl Bitmap {
         let ink = params.ink;
         let alpha = params.blend as f32 / 100.0;
         let mask_image = params.mask_image;
+        // Sprite foreColor/backColor palette indices are resolved against the bitmap's palette,
+        // so they work together correctly (e.g., index 248/255 in a custom 256-color palette).
         let bg_color_resolved = if src.original_bit_depth == 32 && !src.use_alpha && ink != 0 {
             match &params.bg_color {
                 ColorRef::Rgb(r, g, b) => (*r, *g, *b),
@@ -857,6 +888,9 @@ impl Bitmap {
         } else {
             (1.0, 0.0)
         };
+
+        // Check for skew-based flip (skew=±180° combined with rotation produces a mirror)
+        let has_skew_flip = is_skew_flip(params.skew);
 
         // ----------------------------------------------------------
         // Director-style draw bounds (allow rotated overflow)
@@ -1012,17 +1046,25 @@ impl Bitmap {
                 }
 
                 // ----------------------------------------------------------
-                // SPRITE ROTATION: Apply rotation to destination coordinates
+                // SPRITE ROTATION & SKEW: Apply transforms to destination coordinates
                 // ----------------------------------------------------------
-                let (rotated_x, rotated_y) = if has_sprite_rotation {
+                let (rotated_x, rotated_y) = if has_sprite_rotation || has_skew_flip {
                     // Translate to center
                     let dx = dst_x as f64 - center_x as f64;
-                    let dy = dst_y as f64 - center_y as f64;
-                    
+                    let mut dy = dst_y as f64 - center_y as f64;
+
+                    // Apply skew flip (negate Y before rotation)
+                    // When combined with rotation=180, this produces a vertical flip (mirror)
+                    // rotation=180 alone: (dx, dy) -> (-dx, -dy) = upside down
+                    // rotation=180 + skew=180: (dx, -dy) -> (-dx, dy) = vertical flip
+                    if has_skew_flip {
+                        dy = -dy;
+                    }
+
                     // Apply inverse rotation matrix
                     let rx = dx * cos_theta - dy * sin_theta;
                     let ry = dx * sin_theta + dy * cos_theta;
-                    
+
                     // Translate back
                     (rx + center_x as f64, ry + center_y as f64)
                 } else {
@@ -1198,6 +1240,74 @@ impl Bitmap {
                     }
 
                     let src_color = (r, g, b);
+                    let dst_color = self.get_pixel_color(palettes, dst_x as u16, dst_y as u16);
+
+                    let blended = if alpha >= 0.999 {
+                        src_color
+                    } else {
+                        blend_color_alpha(dst_color, src_color, alpha)
+                    };
+
+                    self.set_pixel(dst_x, dst_y, blended, palettes);
+                    continue;
+                }
+
+                // 32-bit bitmap ink 36 color-key transparency
+                // PFR font bitmaps are decoded to 32-bit RGBA; background is white, glyphs are black.
+                if ink == 36 && src.original_bit_depth == 32 {
+                    let (r, g, b, a) = src.get_pixel_color_with_alpha(palettes, sx, sy);
+
+                    // Skip fully transparent pixels (use_alpha bitmaps like text member images)
+                    if src.use_alpha && a == 0 {
+                        continue;
+                    }
+
+                    // Skip pixel if it matches the sprite's bgColor (transparent background)
+                    if (r, g, b) == bg_color_resolved {
+                        continue;
+                    }
+
+                    // Colorize foreground (black/dark) pixels with the sprite's foreColor
+                    let src_color = if (r, g, b) == (0, 0, 0) {
+                        fg_color_resolved
+                    } else {
+                        (r, g, b)
+                    };
+
+                    // For text rendering to intermediate bitmap: write colorized RGB with
+                    // per-pixel alpha directly. set_pixel always writes alpha=255 which
+                    // destroys anti-aliasing information needed by WebGL2 compositing.
+                    if params.is_text_rendering && src.use_alpha && a < 255 && self.bit_depth == 32 {
+                        if dst_x >= 0 && dst_y >= 0 && dst_x < self.width as i32 && dst_y < self.height as i32 {
+                            let idx = (dst_y as usize * self.width as usize + dst_x as usize) * 4;
+                            if idx + 3 < self.data.len() {
+                                let (sr, sg, sb) = src_color;
+                                let dest_a = self.data[idx + 3];
+                                if dest_a == 0 {
+                                    self.data[idx] = sr;
+                                    self.data[idx + 1] = sg;
+                                    self.data[idx + 2] = sb;
+                                    self.data[idx + 3] = a;
+                                } else {
+                                    // Composite src over dest using "over" operator
+                                    let sa = a as f32 / 255.0;
+                                    let da = dest_a as f32 / 255.0;
+                                    let out_a = sa + da * (1.0 - sa);
+                                    if out_a > 0.001 {
+                                        let out_r = (sr as f32 * sa + self.data[idx] as f32 * da * (1.0 - sa)) / out_a;
+                                        let out_g = (sg as f32 * sa + self.data[idx + 1] as f32 * da * (1.0 - sa)) / out_a;
+                                        let out_b = (sb as f32 * sa + self.data[idx + 2] as f32 * da * (1.0 - sa)) / out_a;
+                                        self.data[idx] = out_r.round().min(255.0) as u8;
+                                        self.data[idx + 1] = out_g.round().min(255.0) as u8;
+                                        self.data[idx + 2] = out_b.round().min(255.0) as u8;
+                                        self.data[idx + 3] = (out_a * 255.0).round().min(255.0) as u8;
+                                    }
+                                }
+                            }
+                        }
+                        continue;
+                    }
+
                     let dst_color = self.get_pixel_color(palettes, dst_x as u16, dst_y as u16);
 
                     let blended = if alpha >= 0.999 {
@@ -1536,9 +1646,8 @@ impl Bitmap {
                 &params,
             );
 
-            // Use the font's actual char_width, not char_width + 1
-            // PFR fonts already have proper spacing built in
-            x += font.char_width as i32;
+            // Use per-character advance width when available (PFR/proportional fonts)
+            x += font.get_char_advance(char_num as u8) as i32;
         }
     }
 
