@@ -233,6 +233,8 @@ impl CastManager {
             } else {
                 None
             }
+        } else if let Some(Datum::CastLib(cast_lib)) = cast_name_or_num {
+            self.get_cast_or_null(*cast_lib as u32)
         } else {
             panic!(
                 "Cast number or name invalid: {}",
