@@ -88,7 +88,7 @@ use crate::{
         events::{player_invoke_event_to_instances, player_dispatch_event_beginsprite,
         dispatch_event_to_all_behaviors, player_invoke_frame_and_movie_scripts, dispatch_system_event_to_timeouts},
     },
-    rendering::with_canvas_renderer_mut,
+    rendering::with_renderer_mut,
     utils::{get_base_url, get_basename_no_extension, get_elapsed_ticks},
 };
 
@@ -239,7 +239,7 @@ impl DirPlayer {
                 cast_manager: CastManager::empty(),
                 score: Score::empty(),
                 current_frame: 1,
-                puppet_tempo: 30,
+                puppet_tempo: 0,
                 random_seed: None,
                 exit_lock: false,
                 dir_version: 0,
@@ -254,6 +254,9 @@ impl DirPlayer {
                 update_lock: false,
                 mouse_down_script: None,
                 mouse_up_script: None,
+                key_down_script: None,
+                key_up_script: None,
+                timeout_script: None,
                 allow_custom_caching: false,
                 trace_script: false,
                 trace_log_file: String::new(),
@@ -378,8 +381,9 @@ impl DirPlayer {
             .cast_manager
             .load_fonts_into_manager(&mut self.font_manager);
 
-        with_canvas_renderer_mut(|renderer| {
-            if let Some(renderer) = renderer.as_mut() {
+        with_renderer_mut(|renderer_opt| {
+            if let Some(renderer) = renderer_opt {
+                use crate::rendering_gpu::Renderer;
                 renderer.set_size(
                     self.movie.rect.width() as u32,
                     self.movie.rect.height() as u32,
@@ -399,6 +403,9 @@ impl DirPlayer {
         }
         self.is_playing = true;
         self.is_script_paused = false;
+
+        use crate::js_api::safe_string;
+        web_sys::console::log_1(&format!("Loading Movie: {} (version: {})", safe_string(&self.movie.file_name), self.movie.dir_version).into());
 
         async_std::task::spawn_local(async move {
             // Relay prepareMovie to timeout targets
@@ -622,14 +629,15 @@ impl DirPlayer {
                     }
                     processed_film_loops.insert(member_ref_clone.clone());
 
-                    let film_loop = self
+                    let film_loop = match self
                         .movie
                         .cast_manager
                         .find_mut_member_by_ref(member_ref.unwrap())
-                        .unwrap()
-                        .member_type
-                        .as_film_loop_mut()
-                        .unwrap();
+                        .and_then(|m| m.member_type.as_film_loop_mut())
+                    {
+                        Some(fl) => fl,
+                        None => continue,
+                    };
                     // Use filmloop's own current_frame instead of movie's current_frame
                     let current_frame = film_loop.current_frame;
                     film_loop.score.begin_sprites(ScoreRef::FilmLoop(member_ref_clone), current_frame);
@@ -658,14 +666,15 @@ impl DirPlayer {
             match member_type {
                 Some(CastMemberTypeId::FilmLoop) => {
                     let score_ref = ScoreRef::FilmLoop(member_ref.unwrap().clone());
-                    let film_loop = self
+                    let film_loop = match self
                         .movie
                         .cast_manager
                         .find_mut_member_by_ref(member_ref.unwrap())
-                        .unwrap()
-                        .member_type
-                        .as_film_loop_mut()
-                        .unwrap();
+                        .and_then(|m| m.member_type.as_film_loop_mut())
+                    {
+                        Some(fl) => fl,
+                        None => continue,
+                    };
 
                     // Calculate filmloop's next frame
                     let filmloop_current_frame = film_loop.current_frame;
@@ -1157,6 +1166,27 @@ impl DirPlayer {
             "colorDepth" => Ok(Datum::Int(32)),
             "fullColorPermit" => Ok(Datum::Int(1)), // Full color mode is permitted
             "timer" => Ok(Datum::Int(get_elapsed_ticks(self.start_time))),
+            "timeoutLength" | "timeoutKeyDown" | "timeoutMouse" | "timeoutPlay" => Ok(Datum::Int(0)),
+            "timeoutLapsed" => Ok(Datum::Int(0)),
+            "soundEnabled" => Ok(Datum::Int(1)),
+            "soundLevel" => Ok(Datum::Int(7)), // max volume
+            "beepOn" | "centerStage" | "fixStageSize" => Ok(Datum::Int(0)),
+            "exitLock" => Ok(datum_bool(self.movie.exit_lock)),
+            "key" => Ok(Datum::String(self.keyboard_manager.key())),
+            "keyCode" => Ok(Datum::Int(self.keyboard_manager.key_code() as i32)),
+            "stageColor" => Ok(Datum::Int(0)),
+            "doubleClick" => Ok(datum_bool(self.is_double_click)),
+            "lastClick" | "lastEvent" | "lastKey" | "lastRoll" => {
+                Ok(Datum::Int(get_elapsed_ticks(self.start_time)))
+            }
+            "multiSound" => Ok(Datum::Int(1)),
+            "pauseState" => Ok(datum_bool(self.is_script_paused)),
+            "selStart" => Ok(Datum::Int(self.text_selection_start as i32)),
+            "selEnd" => Ok(Datum::Int(self.text_selection_end as i32)),
+            "switchColorDepth" | "imageDirect" | "colorQD" | "quickTimePresent"
+            | "videoForWindowsPresent" | "netPresent" | "safePlayer"
+            | "soundKeepDevice" | "soundMixMedia" | "preLoadRAM"
+            | "buttonStyle" | "checkBoxAccess" | "checkboxType" => Ok(Datum::Int(0)),
             _ => Err(ScriptError::new(format!("Unknown anim prop {}", prop_name))),
         }
     }
@@ -1604,7 +1634,7 @@ pub fn player_handle_scope_return(scope: &ScopeResult) {
     }
 }
 
-async fn player_call_global_handler(
+pub async fn player_call_global_handler(
     handler_name: &String,
     args: &Vec<DatumRef>,
 ) -> Result<DatumRef, ScriptError> {

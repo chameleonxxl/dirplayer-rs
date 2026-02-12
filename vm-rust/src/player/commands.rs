@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use async_std::channel::Receiver;
+use async_std::{channel::Receiver, task::spawn_local};
 use chrono::Local;
 use log::{warn, debug};
 use manual_future::ManualFuture;
@@ -21,7 +21,7 @@ use super::{
     datum_ref::DatumRef,
     events::{
         player_dispatch_callback_event, player_dispatch_event_to_sprite,
-        player_dispatch_targeted_event, player_wait_available,
+        player_dispatch_movie_callback, player_dispatch_targeted_event, player_wait_available,
         player_dispatch_event_to_sprite_targeted, player_invoke_frame_and_movie_scripts,
     },
     font::player_load_system_font,
@@ -334,6 +334,8 @@ pub async fn run_player_command(command: PlayerVMCommand) -> Result<DatumRef, Sc
                 player_call_script_handler(receiver, handler, &args).await?;
             }
 
+            player_dispatch_movie_callback("mouseDown").await?;
+
             return Ok(DatumRef::Void);
         }
         PlayerVMCommand::MouseUp((x, y)) => {
@@ -458,6 +460,8 @@ pub async fn run_player_command(command: PlayerVMCommand) -> Result<DatumRef, Sc
                 player_call_script_handler(receiver, handler, &args).await?;
                 debug!("✓ Handler executed successfully");
             }
+
+            player_dispatch_movie_callback("mouseUp").await?;
 
             reserve_player_mut(|player| {
                 player.is_double_click = false;
