@@ -12,10 +12,11 @@ use crate::{
 };
 
 use super::{
+    allocator::ScriptInstanceAllocatorTrait,
     cast_lib::CastMemberRef, handlers::datum_handlers::script_instance::ScriptInstanceUtils,
     player_call_script_handler, player_semaphone, reserve_player_ref, script::ScriptInstanceId,
-    script_ref::ScriptInstanceRef, DatumRef, ScriptError, ScriptErrorCode, PLAYER_EVENT_TX,
-    score::ScoreRef,
+    script_ref::ScriptInstanceRef, DatumRef, ScriptError, ScriptErrorCode, ScriptReceiver,
+    PLAYER_EVENT_TX, score::ScoreRef,
 };
 
 pub enum PlayerVMEvent {
@@ -346,6 +347,46 @@ pub async fn player_invoke_global_event(
     Ok(DatumRef::Void)
 }
 
+pub async fn player_dispatch_movie_callback(
+    handler_name: &str,
+) -> Result<(), ScriptError> {
+    let call_params = reserve_player_ref(|player| {
+        let callback = match handler_name {
+            "mouseDown" => &player.movie.mouse_down_script,
+            "mouseUp" => &player.movie.mouse_up_script,
+            "keyDown" => &player.movie.key_down_script,
+            "keyUp" => &player.movie.key_up_script,
+            _ => return None,
+        };
+        let callback = callback.as_ref()?;
+        match callback {
+            ScriptReceiver::ScriptInstance(instance_ref) => {
+                let script_instance = player.allocator.get_script_instance(instance_ref);
+                let script = player.movie.cast_manager.get_script_by_ref(&script_instance.script)?;
+                let handler = script.get_own_handler_ref(&handler_name.to_string())?;
+                Some((Some(instance_ref.clone()), handler))
+            }
+            ScriptReceiver::Script(script_ref) => {
+                let script = player.movie.cast_manager.get_script_by_ref(script_ref)?;
+                let handler = script.get_own_handler_ref(&handler_name.to_string())?;
+                Some((None, handler))
+            }
+            ScriptReceiver::ScriptText(text) => {
+                if text.trim().starts_with("--") || text.trim().is_empty() {
+                    None
+                } else {
+                    warn!("Script text execution not yet implemented for {}: {}", handler_name, text);
+                    None
+                }
+            }
+        }
+    });
+    if let Some((receiver, handler)) = call_params {
+        player_call_script_handler(receiver, handler, &vec![]).await?;
+    }
+    Ok(())
+}
+
 pub async fn run_event_loop(rx: Receiver<PlayerVMEvent>) {
     warn!("Starting event loop");
     while !rx.is_closed() {
@@ -389,7 +430,6 @@ pub async fn player_dispatch_event_beginsprite(
     handler_name: &String,
     args: &Vec<DatumRef>
 ) -> Result<Vec<(ScoreRef, u32)>, ScriptError> {
-    // Include ScoreRef to track which score context each sprite belongs to
     let (mut sprite_instances, mut frame_instances, all_channels) =
         reserve_player_mut(|player| {
             let mut sprite_instances: Vec<(ScoreRef, usize, ScriptInstanceRef)> = Vec::new();
@@ -519,12 +559,13 @@ pub async fn player_dispatch_event_beginsprite(
                 player.on_script_error(&err);
             });
         }
-
-        // Reset the score context to Stage after each invocation
-        reserve_player_mut(|player| {
-            player.current_score_context = ScoreRef::Stage;
-        });
     }
+
+    // Reset the score context to Stage after each invocation
+    reserve_player_mut(|player| {
+        player.current_score_context = ScoreRef::Stage;
+    });
+
     Ok(all_channels)
 }
 

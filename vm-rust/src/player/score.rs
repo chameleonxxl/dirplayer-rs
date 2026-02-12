@@ -6,6 +6,7 @@ use wasm_bindgen::JsValue;
 use std::collections::{HashMap, HashSet};
 
 use crate::{
+    console_warn,
     director::{
         chunks::score::{FrameLabel, ScoreFrameChannelData, SoundChannelData, TempoChannelData},
         file::DirectorFile,
@@ -568,7 +569,9 @@ impl Score {
                     };
                 }
 
-                reserve_player_ref(|player| {
+                // Get bitmap's palette for RGB<->index conversion
+                // Use the bitmap's actual palette instead of SYSTEM_WIN_PALETTE
+                let bitmap_palette: Option<Vec<(u8, u8, u8)>> = reserve_player_ref(|player| {
                     if let Some(member_ref) = &sprite.member {
                         if let Some(member) = player.movie.cast_manager.find_member_by_ref(member_ref) {
                             if let CastMemberType::Bitmap(bitmap_member) = &member.member_type {
@@ -577,74 +580,112 @@ impl Score {
 
                                 sprite.bitmap_size_owned_by_sprite =
                                     sprite.width != bw || sprite.height != bh;
+
+                                // Get the bitmap's palette colors
+                                let bitmap = player.bitmap_manager.get_bitmap(bitmap_member.image_ref);
+                                if let Some(bitmap) = bitmap {
+                                    use crate::player::bitmap::bitmap::{PaletteRef, BuiltInPalette};
+                                    use crate::player::bitmap::palette::{
+                                        SYSTEM_MAC_PALETTE, GRAYSCALE_PALETTE, PASTELS_PALETTE,
+                                        VIVID_PALETTE, NTSC_PALETTE, METALLIC_PALETTE, WEB_216_PALETTE,
+                                        RAINBOW_PALETTE,
+                                    };
+                                    use crate::player::handlers::datum_handlers::cast_member_ref::CastMemberRefHandlers;
+
+                                    match &bitmap.palette_ref {
+                                        PaletteRef::BuiltIn(builtin) => {
+                                            let palette: &[(u8, u8, u8)] = match builtin {
+                                                BuiltInPalette::SystemMac => &SYSTEM_MAC_PALETTE,
+                                                BuiltInPalette::SystemWin | BuiltInPalette::SystemWinDir4 | BuiltInPalette::Vga => &SYSTEM_WIN_PALETTE,
+                                                BuiltInPalette::GrayScale => &GRAYSCALE_PALETTE,
+                                                BuiltInPalette::Pastels => &PASTELS_PALETTE,
+                                                BuiltInPalette::Vivid => &VIVID_PALETTE,
+                                                BuiltInPalette::Ntsc => &NTSC_PALETTE,
+                                                BuiltInPalette::Metallic => &METALLIC_PALETTE,
+                                                BuiltInPalette::Web216 => &WEB_216_PALETTE,
+                                                BuiltInPalette::Rainbow => &RAINBOW_PALETTE,
+                                            };
+                                            return Some(palette.to_vec());
+                                        }
+                                        PaletteRef::Member(palette_member_ref) => {
+                                            let slot_number = CastMemberRefHandlers::get_cast_slot_number(
+                                                palette_member_ref.cast_lib as u32,
+                                                palette_member_ref.cast_member as u32,
+                                            );
+                                            let palettes = player.movie.cast_manager.palettes();
+                                            if let Some(palette_member) = palettes.get(slot_number as usize) {
+                                                return Some(palette_member.colors.clone());
+                                            }
+                                        }
+                                        PaletteRef::Default => {
+                                            // Use system default
+                                        }
+                                    }
+                                }
                             }
                         }
                     }
+                    None
                 });
+
+                // Use bitmap's palette if available, otherwise fall back to SYSTEM_WIN_PALETTE
+                let palette_for_index: &[(u8, u8, u8)] = bitmap_palette.as_deref().unwrap_or(&SYSTEM_WIN_PALETTE);
 
                 match data.color_flag {
                     // fore + back are palette indexes
                     0 => {
-                        // Foreground
                         sprite.fore_color = data.fore_color as i32;
                         sprite.color = ColorRef::PaletteIndex(data.fore_color);
 
-                        // Background
                         sprite.back_color = data.back_color as i32;
                         sprite.bg_color = ColorRef::PaletteIndex(data.back_color);
                     }
 
                     // foreColor is RGB, backColor is palette index
                     1 => {
-                        // Foreground (RGB → map to palette)
                         sprite.color = ColorRef::Rgb(
                             data.fore_color,
                             data.fore_color_g,
                             data.fore_color_b,
                         );
                         sprite.fore_color =
-                            sprite.color.to_index(&SYSTEM_WIN_PALETTE) as i32;
+                            sprite.color.to_index(palette_for_index) as i32;
 
-                        // Background (palette index)
                         sprite.back_color = data.back_color as i32;
                         sprite.bg_color = ColorRef::PaletteIndex(data.back_color);
                     }
 
                     // foreColor is palette index, backColor is RGB
                     2 => {
-                        // Foreground (palette index)
                         sprite.fore_color = data.fore_color as i32;
                         sprite.color = ColorRef::PaletteIndex(data.fore_color);
 
-                        // Background (RGB → map to palette)
                         sprite.bg_color = ColorRef::Rgb(
                             data.back_color,
                             data.back_color_g,
                             data.back_color_b,
                         );
                         sprite.back_color =
-                            sprite.bg_color.to_index(&SYSTEM_WIN_PALETTE) as i32;
+                            sprite.bg_color.to_index(palette_for_index) as i32;
                     }
 
                     // both fore + back are RGB
                     3 => {
-                        // Foreground (RGB → map to palette)
                         sprite.color = ColorRef::Rgb(
                             data.fore_color,
                             data.fore_color_g,
                             data.fore_color_b,
                         );
                         sprite.fore_color =
-                            sprite.color.to_index(&SYSTEM_WIN_PALETTE) as i32;
+                            sprite.color.to_index(palette_for_index) as i32;
 
-                        // Background (RGB → map to palette)
                         sprite.bg_color = ColorRef::Rgb(
                             data.back_color,
                             data.back_color_g,
                             data.back_color_b,
                         );
                         sprite.back_color =
-                            sprite.bg_color.to_index(&SYSTEM_WIN_PALETTE) as i32;
+                            sprite.bg_color.to_index(palette_for_index) as i32;
                     }
 
                     _ => {
@@ -994,10 +1035,10 @@ impl Score {
         // NOTE: spriteListIdx references the MAIN MOVIE's sprite detail table, not local filmloop tables
         //
         // Log summary of available sprite_details for diagnosis
-        let sprite_details_info = reserve_player_ref(|player| {
+        let (sprite_details_info, dir_version) = reserve_player_ref(|player| {
             let count = player.movie.score.sprite_details.len();
             let max_idx = player.movie.score.sprite_details.keys().max().cloned();
-            (count, max_idx)
+            ((count, max_idx), player.movie.dir_version)
         });
         debug!(
             "🔍 begin_sprites: main movie has {} sprite_details, max index: {:?}, score_ref: {:?}",
@@ -1018,22 +1059,15 @@ impl Score {
                 (info, count)
             });
 
-            // Log when spriteListIdx doesn't find a match - helps diagnose missing behaviors
-            if detail_info_opt.is_none() && sprite_list_idx != 0 {
-                debug!(
-                    "⚠️ spriteListIdx {} (channel {}) not found in sprite_details ({} entries)",
-                    sprite_list_idx, span.channel_number, details_count
-                );
-            }
-
             if let Some(detail_info) = detail_info_opt {
+                // D6+ path: spriteListIdx references the sprite detail table
                 if detail_info.behaviors.is_empty() {
                     continue;
                 }
 
                 let channel_num = span.channel_number;
                 debug!(
-                    "📋 Attaching {} behaviors from spriteListIdx {} to channel {}",
+                    "Attaching {} behaviors from spriteListIdx {} to channel {}",
                     detail_info.behaviors.len(), sprite_list_idx, channel_num
                 );
 
@@ -1108,6 +1142,84 @@ impl Score {
                     })
                     .expect("Failed to attach spriteDetail behavior to sprite");
                 }
+            } else if data.sprite_list_idx_lo != 0 && dir_version < 600 {
+                // D5 path: sprite_list_idx_hi/lo are scriptId castLib/member
+                let script_cast_lib = data.sprite_list_idx_hi as i32;
+                let script_member = data.sprite_list_idx_lo as i32;
+                let channel_num = span.channel_number;
+
+                // Resolve cast_lib 0 or 65535 to default
+                let resolved_cast_lib = if script_cast_lib == 0 || script_cast_lib == 65535 {
+                    default_cast_lib.unwrap_or(1)
+                } else {
+                    script_cast_lib
+                };
+
+                debug!(
+                    "D5 sprite script: channel {} -> cast {}/{}",
+                    channel_num, resolved_cast_lib, script_member
+                );
+
+                let behavior_result = Self::create_behavior(
+                    resolved_cast_lib,
+                    script_member,
+                    default_cast_lib,
+                );
+
+                let (script_instance_ref, datum_ref) = match behavior_result {
+                    Some(result) => result,
+                    None => {
+                        debug!("Skipping D5 sprite script cast {}/{} - script not found",
+                            resolved_cast_lib, script_member);
+                        continue;
+                    }
+                };
+
+                let actual_instance_ref = reserve_player_mut(|player| {
+                    let datum = player.get_datum(&datum_ref);
+                    match datum {
+                        Datum::ScriptInstanceRef(ref instance_ref) => Ok(instance_ref.clone()),
+                        _ => Err(ScriptError::new("Expected ScriptInstanceRef".to_string())),
+                    }
+                })
+                .expect("Failed to extract ScriptInstanceRef");
+
+                reserve_player_mut(|player| {
+                    let sprite_num_ref = player.alloc_datum(Datum::Int(channel_num as i32));
+                    let _ = script_set_prop(
+                        player,
+                        &actual_instance_ref,
+                        &"spriteNum".to_string(),
+                        &sprite_num_ref,
+                        false,
+                    );
+                });
+
+                let score_ref_clone = score_ref.clone();
+                reserve_player_mut(|player| {
+                    let sprite_num = channel_num as i16;
+
+                    let sprite = match &score_ref_clone {
+                        ScoreRef::Stage => {
+                            player.movie.score.get_sprite_mut(sprite_num)
+                        }
+                        ScoreRef::FilmLoop(member_ref) => {
+                            if let Some(member) = player.movie.cast_manager.find_mut_member_by_ref(member_ref) {
+                                if let super::cast_member::CastMemberType::FilmLoop(film_loop) = &mut member.member_type {
+                                    film_loop.score.get_sprite_mut(sprite_num)
+                                } else {
+                                    player.movie.score.get_sprite_mut(sprite_num)
+                                }
+                            } else {
+                                player.movie.score.get_sprite_mut(sprite_num)
+                            }
+                        }
+                    };
+
+                    sprite.script_instance_list.push(actual_instance_ref.clone());
+                    Ok::<(), ScriptError>(())
+                })
+                .expect("Failed to attach D5 sprite script to sprite");
             }
         }
 
@@ -1307,6 +1419,14 @@ impl Score {
             .collect();
 
         for (channel_num, data) in &sprites_to_init {
+            // Debug: Log channels 20-25 initialization (second loop)
+            if *channel_num >= 20 && *channel_num <= 25 {
+                web_sys::console::log_1(&format!(
+                    "[Score] Frame {} Ch {} SECOND INIT: cast_lib={} cast_member={}",
+                    frame_num, channel_num, data.cast_lib, data.cast_member
+                ).into());
+            }
+
             let sprite = self.get_sprite_mut(*channel_num);
             sprite.entered = true;
 
@@ -1364,7 +1484,8 @@ impl Score {
                 };
             }
 
-            reserve_player_ref(|player| {
+            // Get bitmap's palette for RGB<->index conversion
+            let bitmap_palette: Option<Vec<(u8, u8, u8)>> = reserve_player_ref(|player| {
                 if let Some(member_ref) = &sprite.member {
                     if let Some(member) = player.movie.cast_manager.find_member_by_ref(member_ref) {
                         if let CastMemberType::Bitmap(bitmap_member) = &member.member_type {
@@ -1373,74 +1494,113 @@ impl Score {
 
                             sprite.bitmap_size_owned_by_sprite =
                                 sprite.width != bw || sprite.height != bh;
+
+                            // Get the bitmap's palette colors
+                            let bitmap = player.bitmap_manager.get_bitmap(bitmap_member.image_ref);
+                            if let Some(bitmap) = bitmap {
+                                use crate::player::bitmap::bitmap::{PaletteRef, BuiltInPalette};
+                                use crate::player::bitmap::palette::{
+                                    SYSTEM_MAC_PALETTE, GRAYSCALE_PALETTE, PASTELS_PALETTE,
+                                    VIVID_PALETTE, NTSC_PALETTE, METALLIC_PALETTE, WEB_216_PALETTE,
+                                    RAINBOW_PALETTE,
+                                };
+                                use crate::player::handlers::datum_handlers::cast_member_ref::CastMemberRefHandlers;
+
+                                match &bitmap.palette_ref {
+                                    PaletteRef::BuiltIn(builtin) => {
+                                        let palette: &[(u8, u8, u8)] = match builtin {
+                                            BuiltInPalette::SystemMac => &SYSTEM_MAC_PALETTE,
+                                            BuiltInPalette::SystemWin | BuiltInPalette::SystemWinDir4 | BuiltInPalette::Vga => &SYSTEM_WIN_PALETTE,
+                                            BuiltInPalette::GrayScale => &GRAYSCALE_PALETTE,
+                                            BuiltInPalette::Pastels => &PASTELS_PALETTE,
+                                            BuiltInPalette::Vivid => &VIVID_PALETTE,
+                                            BuiltInPalette::Ntsc => &NTSC_PALETTE,
+                                            BuiltInPalette::Metallic => &METALLIC_PALETTE,
+                                            BuiltInPalette::Web216 => &WEB_216_PALETTE,
+                                            BuiltInPalette::Rainbow => &RAINBOW_PALETTE,
+                                        };
+                                        return Some(palette.to_vec());
+                                    }
+                                    PaletteRef::Member(palette_member_ref) => {
+                                        let slot_number = CastMemberRefHandlers::get_cast_slot_number(
+                                            palette_member_ref.cast_lib as u32,
+                                            palette_member_ref.cast_member as u32,
+                                        );
+                                        let palettes = player.movie.cast_manager.palettes();
+                                        if let Some(palette_member) = palettes.get(slot_number as usize) {
+                                            return Some(palette_member.colors.clone());
+                                        }
+                                    }
+                                    PaletteRef::Default => {
+                                        // Use system default
+                                    }
+                                }
+                            }
                         }
                     }
                 }
+                None
             });
+
+            // Use bitmap's palette if available, otherwise fall back to SYSTEM_WIN_PALETTE
+            let palette_for_index: &[(u8, u8, u8)] = bitmap_palette.as_deref().unwrap_or(&SYSTEM_WIN_PALETTE);
 
             match data.color_flag {
                 // fore + back are palette indexes
                 0 => {
-                    // Foreground
                     sprite.fore_color = data.fore_color as i32;
                     sprite.color = ColorRef::PaletteIndex(data.fore_color);
 
-                    // Background
                     sprite.back_color = data.back_color as i32;
                     sprite.bg_color = ColorRef::PaletteIndex(data.back_color);
                 }
 
                 // foreColor is RGB, backColor is palette index
                 1 => {
-                    // Foreground (RGB → map to palette)
                     sprite.color = ColorRef::Rgb(
                         data.fore_color,
                         data.fore_color_g,
                         data.fore_color_b,
                     );
                     sprite.fore_color =
-                        sprite.color.to_index(&SYSTEM_WIN_PALETTE) as i32;
+                        sprite.color.to_index(palette_for_index) as i32;
 
-                    // Background (palette index)
                     sprite.back_color = data.back_color as i32;
                     sprite.bg_color = ColorRef::PaletteIndex(data.back_color);
                 }
 
                 // foreColor is palette index, backColor is RGB
                 2 => {
-                    // Foreground (palette index)
                     sprite.fore_color = data.fore_color as i32;
                     sprite.color = ColorRef::PaletteIndex(data.fore_color);
 
-                    // Background (RGB → map to palette)
                     sprite.bg_color = ColorRef::Rgb(
                         data.back_color,
                         data.back_color_g,
                         data.back_color_b,
                     );
                     sprite.back_color =
-                        sprite.bg_color.to_index(&SYSTEM_WIN_PALETTE) as i32;
+                        sprite.bg_color.to_index(palette_for_index) as i32;
                 }
 
                 // both fore + back are RGB
                 3 => {
-                    // Foreground (RGB → map to palette)
                     sprite.color = ColorRef::Rgb(
                         data.fore_color,
                         data.fore_color_g,
                         data.fore_color_b,
                     );
                     sprite.fore_color =
-                        sprite.color.to_index(&SYSTEM_WIN_PALETTE) as i32;
+                        sprite.color.to_index(palette_for_index) as i32;
 
-                    // Background (RGB → map to palette)
+                    // Background (RGB → map to palette using bitmap's palette)
                     sprite.bg_color = ColorRef::Rgb(
                         data.back_color,
                         data.back_color_g,
                         data.back_color_b,
                     );
                     sprite.back_color =
-                        sprite.bg_color.to_index(&SYSTEM_WIN_PALETTE) as i32;
+                        sprite.bg_color.to_index(palette_for_index) as i32;
                 }
 
                 _ => {
@@ -1696,7 +1856,7 @@ impl Score {
     }
 
     pub fn get_channel_count(&self) -> usize {
-        return self.channels.len() - 1;
+        return self.channels.len().saturating_sub(1);
     }
 
     pub fn set_channel_count(&mut self, new_count: usize) {
@@ -1738,6 +1898,7 @@ impl Score {
     pub fn load_from_score_chunk(
         &mut self,
         score_chunk: &crate::director::chunks::score::ScoreChunk,
+        dir_version: u16,
     ) {
         self.set_channel_count(score_chunk.frame_data.header.num_channels as usize);
 
@@ -1774,7 +1935,7 @@ impl Score {
         // For filmloops (and any score with empty frame_intervals), generate
         // sprite_spans from frame_channel_data to ensure sprites can be rendered
         if self.sprite_spans.is_empty() && !self.channel_initialization_data.is_empty() {
-            self.generate_sprite_spans_from_channel_data();
+            self.generate_sprite_spans_from_channel_data(dir_version);
         }
 
         // Copy sprite detail behaviors (D6+)
@@ -1782,16 +1943,28 @@ impl Score {
     }
 
     /// Generate sprite_spans from channel_initialization_data.
-    /// This is used for filmloops which don't have frame_intervals but do have
-    /// frame_channel_data with sprite information.
-    fn generate_sprite_spans_from_channel_data(&mut self) {
+    /// This is used for filmloops and D5 movies which don't have frame_intervals
+    /// but do have frame_channel_data with sprite and frame script information.
+    fn generate_sprite_spans_from_channel_data(&mut self, dir_version: u16) {
         use std::collections::HashMap;
 
         // Group by channel: find min/max frame for each channel with data
         let mut channel_frames: HashMap<u32, (u32, u32)> = HashMap::new();
 
+        // Collect frame script data (channel 0) separately
+        // Each frame may have a different script, so we track per-frame
+        let mut frame_scripts: Vec<(u32, u16, u16)> = Vec::new(); // (frame_num, cast_lib, cast_member)
+
         for (frame_idx, channel_idx, data) in &self.channel_initialization_data {
-            // Skip effect channels (channels 0-5 in raw data)
+            if *channel_idx == 0 {
+                // D5 path: channel 0 holds frame scripts
+                if dir_version < 600 && data.cast_member != 0 {
+                    let frame_num = *frame_idx + 1; // 0-based → 1-based
+                    frame_scripts.push((frame_num, data.cast_lib, data.cast_member));
+                }
+                continue;
+            }
+            // Skip other effect channels (1-5)
             if *channel_idx < 6 {
                 continue;
             }
@@ -1825,6 +1998,36 @@ impl Score {
                 scripts: Vec::new(), // Filmloop sprites don't have behavior scripts in this context
             };
             self.sprite_spans.push(sprite_span);
+        }
+
+        // Create frame script spans (channel 0)
+        // Merge consecutive frames with the same script into a single span
+        frame_scripts.sort_by_key(|(frame_num, _, _)| *frame_num);
+        let mut i = 0;
+        while i < frame_scripts.len() {
+            let (start_frame, cast_lib, cast_member) = frame_scripts[i];
+            let mut end_frame = start_frame;
+            // Extend span while next frame has the same script
+            while i + 1 < frame_scripts.len() {
+                let (next_frame, next_lib, next_member) = frame_scripts[i + 1];
+                if next_frame == end_frame + 1 && next_lib == cast_lib && next_member == cast_member {
+                    end_frame = next_frame;
+                    i += 1;
+                } else {
+                    break;
+                }
+            }
+            self.sprite_spans.push(ScoreSpriteSpan {
+                channel_number: 0,
+                start_frame,
+                end_frame,
+                scripts: vec![ScoreBehaviorReference {
+                    cast_lib,
+                    cast_member,
+                    parameter: Vec::new(),
+                }],
+            });
+            i += 1;
         }
 
         web_sys::console::log_1(&format!(
@@ -1941,12 +2144,15 @@ impl Score {
     }
 
     pub fn load_from_dir(&mut self, dir: &DirectorFile) {
-        let score_chunk = dir.score.as_ref().unwrap();
         let frame_labels_chunk = dir.frame_labels.as_ref();
         if frame_labels_chunk.is_some() {
             self.frame_labels = frame_labels_chunk.unwrap().labels.clone();
         }
-        self.load_from_score_chunk(score_chunk);
+        if let Some(score_chunk) = dir.score.as_ref() {
+            self.load_from_score_chunk(score_chunk, dir.version);
+        } else {
+            console_warn!("No score chunk found in movie - score will be empty");
+        }
         JsApi::dispatch_score_changed();
     }
 
@@ -1991,6 +2197,8 @@ impl Score {
                     && x.sprite.visible
             })
             .sorted_by(|a, b| {
+                // Sort by loc_z ascending (lower values first, drawn first/behind)
+                // Sprites with higher loc_z are drawn later and appear on top
                 let res = a.sprite.loc_z.cmp(&b.sprite.loc_z);
                 if res == std::cmp::Ordering::Equal {
                     a.number.cmp(&b.number)
@@ -2013,11 +2221,13 @@ impl Score {
 
     pub fn get_frame_tempo(&self, frame: u32) -> Option<u32> {
         // Search through tempo_channel_data to find the most recent tempo change
-        // at or before the requested frame
+        // at or before the requested frame.
+        // Note: frame_idx is 0-based (from score parsing), frame is 1-based (current_frame).
+        // frame_idx 0 = Director frame 1, so we need frame_idx < frame.
         self.tempo_channel_data
             .iter()
             .rev() // Search backwards from the end (most recent first)
-            .find(|(frame_idx, _)| *frame_idx <= frame)
+            .find(|(frame_idx, _)| *frame_idx < frame)
             .map(|(_, tempo_data)| tempo_data.tempo as u32)
     }
 }
@@ -2097,6 +2307,9 @@ pub fn sprite_get_prop(
                 .collect();
             Ok(Datum::List(DatumType::List, instance_ids, false))
         }
+        "memberNum" => Ok(Datum::Int(sprite.map_or(0, |x| {
+            x.member.as_ref().map_or(0, |y| y.cast_member)
+        }))),
         "castNum" => Ok(Datum::Int(sprite.map_or(0, |x| {
             x.member.as_ref().map_or(0, |y| {
                 CastMemberRefHandlers::get_cast_slot_number(y.cast_lib as u32, y.cast_member as u32)
@@ -2112,13 +2325,13 @@ pub fn sprite_get_prop(
                 .map(|script_instance| script_instance.script.cast_member);
             Ok(Datum::Int(script_num.unwrap_or(0)))
         }
-        "visible" => Ok(datum_bool(sprite.map_or(true, |sprite| sprite.visible))),
+        "visible" | "visibility" => Ok(datum_bool(sprite.map_or(true, |sprite| sprite.visible))),
         "puppet" => Ok(datum_bool(sprite.map_or(false, |sprite| sprite.puppet))),
-        "foreColor" => Ok(Datum::Int(
-            sprite.map_or(255, |sprite| sprite.color.to_index(&SYSTEM_WIN_PALETTE)) as i32,
+        "foreColor" | "forecolor" => Ok(Datum::Int(
+            sprite.map_or(255, |sprite| sprite.fore_color) as i32,
         )),
-        "backColor" => Ok(Datum::Int(
-            sprite.map_or(0, |sprite| sprite.bg_color.to_index(&SYSTEM_WIN_PALETTE)) as i32,
+        "backColor" | "backcolor" => Ok(Datum::Int(
+            sprite.map_or(0, |sprite| sprite.back_color) as i32,
         )),
         "cursor" => {
             let cursor_ref = sprite.and_then(|sprite| sprite.cursor_ref.clone());
@@ -2213,7 +2426,7 @@ where
 
 pub fn sprite_set_prop(sprite_id: i16, prop_name: &str, value: Datum) -> Result<(), ScriptError> {
     let result = match prop_name {
-        "visible" => borrow_sprite_mut(
+        "visible" | "visibility" => borrow_sprite_mut(
             sprite_id,
             |_| {},
             |sprite, _| {
@@ -2233,7 +2446,8 @@ pub fn sprite_set_prop(sprite_id: i16, prop_name: &str, value: Datum) -> Result<
             sprite_id,
             |player| value.int_value(),
             |sprite, value| {
-                sprite.loc_h = value?;
+                let val = value?;
+                sprite.loc_h = val;
                 Ok(())
             },
         ),
@@ -2241,18 +2455,25 @@ pub fn sprite_set_prop(sprite_id: i16, prop_name: &str, value: Datum) -> Result<
             sprite_id,
             |player| value.int_value(),
             |sprite, value| {
-                sprite.loc_v = value?;
+                let val = value?;
+                sprite.loc_v = val;
                 Ok(())
             },
         ),
-        "locZ" => borrow_sprite_mut(
-            sprite_id,
-            |player| value.int_value(),
-            |sprite, value| {
-                sprite.loc_z = value?;
-                Ok(())
-            },
-        ),
+        "locZ" => {
+            // Handle Void as a no-op (Director behavior when setting locZ = VOID)
+            if matches!(value, Datum::Void) {
+                return Ok(());
+            }
+            borrow_sprite_mut(
+                sprite_id,
+                |player| value.int_value(),
+                |sprite, value| {
+                    sprite.loc_z = value?;
+                    Ok(())
+                },
+            )
+        }
         "width" => borrow_sprite_mut(
             sprite_id,
             |player| value.int_value(),
@@ -2335,7 +2556,7 @@ pub fn sprite_set_prop(sprite_id: i16, prop_name: &str, value: Datum) -> Result<
                 Ok(())
             },
         ),
-        "backColor" => borrow_sprite_mut(
+        "backColor" | "backcolor" => borrow_sprite_mut(
             sprite_id,
             |_| (),
             |sprite, _| {
@@ -2356,7 +2577,7 @@ pub fn sprite_set_prop(sprite_id: i16, prop_name: &str, value: Datum) -> Result<
                 Ok(())
             },
         ),
-        "foreColor" => borrow_sprite_mut(
+        "foreColor" | "forecolor" => borrow_sprite_mut(
             sprite_id,
             |_| (),
             |sprite, _| {
@@ -2429,15 +2650,17 @@ pub fn sprite_set_prop(sprite_id: i16, prop_name: &str, value: Datum) -> Result<
                 // Assign the new member
                 sprite.member = mem_ref.clone();
 
-                // Initialize size ONLY if:
+                // Initialize size and reset rotation/skew ONLY if:
                 //  - member actually changed
-                if member_changed && !sprite.has_size_changed {
-                    if let Some((w, h)) = intrinsic_size {
-                        if w > 0 && h > 0 {
-                            sprite.width = w;
-                            sprite.height = h;
-                            sprite.base_width = w;
-                            sprite.base_height = h;
+                if member_changed {
+                    if !sprite.has_size_changed {
+                        if let Some((w, h)) = intrinsic_size {
+                            if w > 0 && h > 0 {
+                                sprite.width = w;
+                                sprite.height = h;
+                                sprite.base_width = w;
+                                sprite.base_height = h;
+                            }
                         }
                     }
                 }
@@ -2471,8 +2694,17 @@ pub fn sprite_set_prop(sprite_id: i16, prop_name: &str, value: Datum) -> Result<
             |player| value.int_value(),
             |sprite, value| {
                 let value = value?;
+                // Check if value looks like a slot number (cast_lib << 16 | cast_member)
+                // Director's castNum getter returns slot numbers, and some scripts
+                // incorrectly pass castNum to memberNum setter
+                let actual_member_num = if value > 65535 {
+                    // Value is a slot number, extract just the member part (lower 16 bits)
+                    (value as u32 & 0xFFFF) as i32
+                } else {
+                    value
+                };
                 let new_member_ref = match &sprite.member {
-                    Some(member_ref) => cast_member_ref(member_ref.cast_lib, value),
+                    Some(member_ref) => cast_member_ref(member_ref.cast_lib, actual_member_num),
                     None => CastMemberRefHandlers::member_ref_from_slot_number(value as u32),
                 };
                 sprite.member = Some(new_member_ref);
@@ -2713,6 +2945,41 @@ pub fn concrete_sprite_hit_test(player: &DirPlayer, sprite: &Sprite, x: i32, y: 
     // If the entire rect is in negative space, it's intentionally hidden
     if rect.right < 0 || rect.bottom < 0 {
         return false;
+    }
+
+    // Check for rotation or skew that requires coordinate transformation
+    let has_rotation = sprite.rotation.abs() > 0.1;
+    let has_skew_flip = sprite.has_skew_flip();
+
+    if has_rotation || has_skew_flip {
+        // Transform mouse coordinates using INVERSE transform
+        // to check against the original (untransformed) sprite rect
+        let center_x = sprite.loc_h as f64;
+        let center_y = sprite.loc_v as f64;
+
+        // Translate to registration point
+        let dx = x as f64 - center_x;
+        let dy = y as f64 - center_y;
+
+        // Apply inverse rotation (negate the angle)
+        let theta = -sprite.rotation * std::f64::consts::PI / 180.0;
+        let cos_theta = theta.cos();
+        let sin_theta = theta.sin();
+
+        let rx = dx * cos_theta - dy * sin_theta;
+        let mut ry = dx * sin_theta + dy * cos_theta;
+
+        // Apply inverse skew flip (negate y after inverse rotation)
+        if has_skew_flip {
+            ry = -ry;
+        }
+
+        // Translate back
+        let transformed_x = (rx + center_x) as i32;
+        let transformed_y = (ry + center_y) as i32;
+
+        return transformed_x >= rect.left && transformed_x < rect.right
+            && transformed_y >= rect.top && transformed_y < rect.bottom;
     }
 
     let left = rect.left;
@@ -3009,21 +3276,41 @@ pub fn get_concrete_sprite_rect(player: &DirPlayer, sprite: &Sprite) -> IntRect 
         CastMemberType::Shape(shape_member) => {
             let reg_x = shape_member.shape_info.reg_point.0;
             let reg_y = shape_member.shape_info.reg_point.1;
+            // Apply registration point offset (same as bitmaps)
+            let draw_x = sprite.loc_h - reg_x as i32;
+            let draw_y = sprite.loc_v - reg_y as i32;
             IntRect::from(
-                sprite.loc_h - reg_x as i32,
-                sprite.loc_v - reg_y as i32,
-                sprite.width + sprite.loc_h - reg_x as i32,
-                sprite.height + sprite.loc_v - reg_y as i32,
+                draw_x,
+                draw_y,
+                sprite.width + draw_x,
+                sprite.height + draw_y,
             )
         }
-        CastMemberType::Field(field_member) => {
-            IntRect::from_size(sprite.loc_h, sprite.loc_v, field_member.width as i32, 12)
-        } // TODO
+        CastMemberType::Field(_field_member) => {
+            IntRect::from_size(sprite.loc_h, sprite.loc_v, sprite.width, sprite.height)
+        }
         CastMemberType::Text(text_member) => {
-            IntRect::from_size(sprite.loc_h, sprite.loc_v, text_member.width as i32, 12)
-        } // TODO
+            // Calculate draw position based on registration point from TextInfo
+            let (draw_x, draw_y) = if let Some(info) = &text_member.info {
+                if info.center_reg_point {
+                    // When center_reg_point is enabled, loc is the center of the sprite
+                    let half_width = sprite.width / 2;
+                    let half_height = sprite.height / 2;
+                    (sprite.loc_h - half_width, sprite.loc_v - half_height)
+                } else if info.reg_x != 0 || info.reg_y != 0 {
+                    // Use custom registration point offset
+                    (sprite.loc_h - info.reg_x, sprite.loc_v - info.reg_y)
+                } else {
+                    // Default: loc is top-left corner
+                    (sprite.loc_h, sprite.loc_v)
+                }
+            } else {
+                // No TextInfo available, use default positioning
+                (sprite.loc_h, sprite.loc_v)
+            };
+            IntRect::from_size(draw_x, draw_y, sprite.width, sprite.height)
+        }
         CastMemberType::FilmLoop(film_loop) => {
-            // For filmloops, use info.reg_point to calculate dimensions.
             // The filmloop's rect is stored in info as:
             // - reg_point = (left, top) coordinates of the rect
             // - width = right coordinate
@@ -3035,29 +3322,20 @@ pub fn get_concrete_sprite_rect(player: &DirPlayer, sprite: &Sprite) -> IntRect 
             let info_width = (rect_right - rect_left).max(1);
             let info_height = (rect_bottom - rect_top).max(1);
 
-            // Check if sprite has been explicitly sized (different from info dimensions)
-            let has_explicit_size = sprite.width != info_width || sprite.height != info_height;
+            // Use sprite dimensions if available, otherwise info dimensions
+            let use_width = if sprite.width > 0 { sprite.width } else { info_width };
+            let use_height = if sprite.height > 0 { sprite.height } else { info_height };
 
-            if has_explicit_size && sprite.width > 0 && sprite.height > 0 {
-                // Sprite was explicitly sized (e.g., pandapang) - use sprite dimensions directly
-                IntRect::from(
-                    sprite.loc_h,
-                    sprite.loc_v,
-                    sprite.loc_h + sprite.width,
-                    sprite.loc_v + sprite.height,
-                )
-            } else {
-                // Default filmloop behavior: registration point is center of content
-                let reg_x = info_width / 2;
-                let reg_y = info_height / 2;
+            // Film loops always use center registration (loc is the center point)
+            let reg_x = use_width / 2;
+            let reg_y = use_height / 2;
 
-                IntRect::from(
-                    sprite.loc_h - reg_x,
-                    sprite.loc_v - reg_y,
-                    sprite.loc_h - reg_x + info_width,
-                    sprite.loc_v - reg_y + info_height,
-                )
-            }
+            IntRect::from(
+                sprite.loc_h - reg_x,
+                sprite.loc_v - reg_y,
+                sprite.loc_h - reg_x + use_width,
+                sprite.loc_v - reg_y + use_height,
+            )
         }
         _ => IntRect::from_size(sprite.loc_h, sprite.loc_v, sprite.width, sprite.height),
     }
