@@ -1163,6 +1163,9 @@ fn concrete_datum_to_js_bridge(datum: &Datum, player: &DirPlayer, depth: u8) -> 
             }
             map.str_set("values", &vec_array);
         }
+        Datum::Media(_) => {
+            map.str_set("type", &safe_js_string("media"));
+        }
     }
     return map.to_js_object();
 }

@@ -1140,7 +1140,7 @@ impl DirPlayer {
         match prop.as_str() {
             "itemDelimiter" => {
                 let value = self.get_datum(value);
-                self.movie.item_delimiter = (value.string_value()?).as_bytes()[0] as char;
+                self.movie.item_delimiter = (value.string_value()?).chars().next().unwrap();
                 Ok(())
             }
             "traceScript" => {

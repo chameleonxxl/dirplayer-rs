@@ -3,12 +3,7 @@ use std::sync::Arc;
 use num_derive::FromPrimitive;
 
 use crate::player::{
-    bitmap::{bitmap::PaletteRef, manager::BitmapRef, mask::BitmapMask},
-    cast_lib::CastMemberRef,
-    datum_ref::DatumRef,
-    script_ref::ScriptInstanceRef,
-    sprite::{ColorRef, CursorRef},
-    ScriptError, DirPlayer,
+    DirPlayer, ScriptError, bitmap::{bitmap::PaletteRef, manager::BitmapRef, mask::BitmapMask}, cast_lib::CastMemberRef, cast_member::Media, datum_ref::DatumRef, script_ref::ScriptInstanceRef, sprite::{ColorRef, CursorRef}
 };
 
 #[allow(dead_code)]
@@ -54,6 +49,7 @@ pub enum DatumType {
     DateRef,
     MathRef,
     Vector,
+    Media,
 }
 
 #[derive(Clone, PartialEq, FromPrimitive)]
@@ -162,6 +158,7 @@ pub enum Datum {
     DateRef(u32),
     MathRef(u32),
     Vector([f64; 3]),
+    Media(Media),
     Null,
 }
 
@@ -208,6 +205,7 @@ impl DatumType {
             DatumType::DateRef => "date".to_string(),
             DatumType::MathRef => "math".to_string(),
             DatumType::Vector => "vector".to_string(),
+            DatumType::Media => "media".to_string(),
         }
     }
 }
@@ -250,6 +248,7 @@ impl Datum {
             Datum::DateRef(_) => DatumType::DateRef,
             Datum::MathRef(_) => DatumType::MathRef,
             Datum::Vector(_) => DatumType::Vector,
+            Datum::Media(_) => DatumType::Media,
             Datum::Null => DatumType::Null,
         }
     }
@@ -328,6 +327,16 @@ impl Datum {
             Datum::Void => Ok(false),
             _ => Err(ScriptError::new(format!(
                 "Cannot convert datum of type {} to bool",
+                self.type_str()
+            ))),
+        }
+    }
+
+    pub fn media_value(&self) -> Result<Media, ScriptError> {
+        match self {
+            Datum::Media(media) => Ok(media.clone()),
+            _ => Err(ScriptError::new(format!(
+                "Cannot convert datum of type {} to media",
                 self.type_str()
             ))),
         }

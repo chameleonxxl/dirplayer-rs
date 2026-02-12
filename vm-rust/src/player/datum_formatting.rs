@@ -164,6 +164,9 @@ pub fn format_concrete_datum(datum: &Datum, player: &DirPlayer) -> String {
         Datum::DateRef(_) => {
             format!("<date>")
         }
+        Datum::Media(_) => {
+            format!("<media>")
+        }
     }
 }
 

@@ -32,6 +32,11 @@ pub struct CastMember {
     pub bg_color: ColorRef,
 }
 
+#[derive(Clone)]
+pub enum Media {
+    Field(FieldMember),
+}
+
 #[derive(Clone, Default)]
 pub struct FieldMember {
     pub text: String,

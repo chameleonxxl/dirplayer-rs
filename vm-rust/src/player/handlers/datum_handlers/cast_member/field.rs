@@ -1,14 +1,9 @@
 use crate::{
-    director::lingo::datum::{datum_bool, Datum, StringChunkType},
+    director::lingo::datum::{Datum, DatumType, StringChunkType, datum_bool},
     player::{
-        bitmap::bitmap::{Bitmap, BuiltInPalette, PaletteRef},
-        bitmap::drawing::CopyPixelsParams,
-        cast_lib::CastMemberRef,
-        font::{measure_text, BitmapFont},
-        handlers::datum_handlers::{
+        ColorRef, DatumRef, DirPlayer, ScriptError, bitmap::{bitmap::{Bitmap, BuiltInPalette, PaletteRef}, drawing::CopyPixelsParams}, cast_lib::CastMemberRef, cast_member::Media, font::{BitmapFont, measure_text}, handlers::datum_handlers::{
             cast_member_ref::borrow_member_mut, string_chunk::StringChunkUtils,
-        },
-        ColorRef, DatumRef, DirPlayer, ScriptError,
+        }
     },
 };
 
@@ -203,6 +198,7 @@ impl FieldMemberHandlers {
                     _ => unreachable!(),
                 }
             }
+            "media" => Ok(Datum::Media(Media::Field(field.clone()))),
             _ => Err(ScriptError::new(format!(
                 "Cannot get castMember property {} for field",
                 prop
@@ -357,6 +353,18 @@ impl FieldMemberHandlers {
                 |player| value.int_value(),
                 |cast_member, value| {
                     cast_member.member_type.as_field_mut().unwrap().back_color = value? as u16;
+                    Ok(())
+                },
+            ),
+            "media" => borrow_member_mut(
+                member_ref,
+                |player| value.media_value(),
+                |cast_member, value| {
+                    let field = cast_member.member_type.as_field_mut().unwrap();
+                    match value? {
+                        Media::Field(new_field) => field.clone_from(&new_field),
+                        _ => return Err(ScriptError::new("Invalid media value for field".to_string())),
+                    };
                     Ok(())
                 },
             ),
