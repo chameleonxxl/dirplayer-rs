@@ -42,10 +42,19 @@ impl RectDatumHandlers {
             "getAt" => Self::get_at(datum, args),
             "setAt" => Self::set_at(datum, args),
             "intersect" => Self::intersect(datum, args),
+            "duplicate" => Self::duplicate(datum, args),
             _ => Err(ScriptError::new(format!(
                 "No handler {handler_name} for rect"
             ))),
         }
+    }
+
+    pub fn duplicate(datum: &DatumRef, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+        reserve_player_mut(|player| {
+            let rect = player.get_datum(datum);
+            let new_rect = rect.clone();
+            Ok(player.alloc_datum(new_rect))
+        })
     }
 
     pub fn intersect(datum: &DatumRef, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
