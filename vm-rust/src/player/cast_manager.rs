@@ -18,6 +18,7 @@ use crate::{
 };
 
 use crate::player::FontManager;
+use crate::player::font::FontRef;
 
 use super::{
     allocator::DatumAllocator,
@@ -34,6 +35,9 @@ pub struct CastManager {
     pub casts: Vec<CastLib>,
     pub movie_script_cache: RefCell<Option<Vec<Rc<Script>>>>,
     pub palette_cache: RefCell<Option<Rc<PaletteMap>>>,
+    /// Version counter incremented when palette cache is invalidated.
+    /// Used by renderers to know when to clear texture caches.
+    pub palette_version: RefCell<u32>,
 }
 
 const IS_WEB: bool = false;
@@ -50,6 +54,7 @@ impl CastManager {
             casts: Vec::new(),
             movie_script_cache: RefCell::new(None),
             palette_cache: RefCell::new(None),
+            palette_version: RefCell::new(0),
         }
     }
 
@@ -68,6 +73,7 @@ impl CastManager {
         for index in 0..dir.cast_entries.len() {
             let cast_entry = &dir.cast_entries[index];
             let cast_def = dir.casts.iter().find(|cast| cast.id == cast_entry.id);
+
             let mut cast = CastLib {
                 name: cast_entry.name.to_owned(),
                 file_name: normalize_cast_lib_path(&net_manager.base_path, &cast_entry.file_path)
@@ -112,7 +118,7 @@ impl CastManager {
     ) {
         for cast in self.casts.iter_mut() {
             if cast.is_external && cast.state == CastLibState::None && !cast.file_name.is_empty() {
-                web_sys::console::log_1(&format!("Cast File {} - Preload Mode: {}", cast.file_name, cast.preload_mode).into());
+                web_sys::console::log_1(&wasm_bindgen::JsValue::from_str(&format!("Cast {} ({}) - Preload Mode: {}", cast.number, ascii_safe(&cast.file_name), cast.preload_mode)));
                 match cast.preload_mode {
                     0 => {
                         // Preload: When Needed
@@ -173,6 +179,13 @@ impl CastManager {
 
     pub fn invalidate_palette_cache(&self) {
         self.palette_cache.replace(None);
+        // Increment version counter so renderers know to clear texture caches
+        *self.palette_version.borrow_mut() += 1;
+    }
+
+    /// Get the current palette version counter
+    pub fn palette_version(&self) -> u32 {
+        *self.palette_version.borrow()
     }
 
     pub fn palettes(&self) -> Rc<PaletteMap> {
@@ -236,12 +249,13 @@ impl CastManager {
         } else if let Some(Datum::CastLib(cast_lib)) = cast_name_or_num {
             self.get_cast_or_null(*cast_lib as u32)
         } else {
-            panic!(
+            warn!(
                 "Cast number or name invalid: {}",
                 cast_name_or_num
                     .map(|x| x.type_str())
                     .unwrap_or("None".to_string())
-            )
+            );
+            None
         };
 
         let member_ref = match (&member_name_or_num, cast_lib.as_ref()) {
@@ -304,6 +318,15 @@ impl CastManager {
     }
 
     pub fn find_member_by_ref(&self, member_ref: &CastMemberRef) -> Option<&CastMember> {
+        // Direct lookup without slot number conversion for explicit cast_lib references
+        if member_ref.cast_lib > 0 {
+            let cast = self.get_cast_or_null(member_ref.cast_lib as u32);
+            if let Some(cast) = cast {
+                return cast.find_member_by_number(member_ref.cast_member as u32);
+            }
+            return None;
+        }
+        // Fall back to slot number lookup for global references
         let slot_number = CastMemberRefHandlers::get_cast_slot_number(
             member_ref.cast_lib as u32,
             member_ref.cast_member as u32,
@@ -358,6 +381,18 @@ impl CastManager {
         }
     }
 
+    /// Search for a script by member number across all cast libraries.
+    /// Returns the first script found with the given member number, along with its cast_lib.
+    pub fn find_script_in_all_casts(&self, cast_member: i32) -> Option<(i32, &Rc<Script>)> {
+        for (idx, cast) in self.casts.iter().enumerate() {
+            let cast_lib = (idx + 1) as i32; // Cast libraries are 1-indexed
+            if let Some(script) = cast.get_script_for_member(cast_member as u32) {
+                return Some((cast_lib, script));
+            }
+        }
+        None
+    }
+
     pub fn get_field_value_by_identifiers(
         &self,
         member_name_or_num: &Datum,
@@ -370,8 +405,10 @@ impl CastManager {
             Some(member) => {
                 if let CastMemberType::Field(field) = &member.member_type {
                     Ok(field.text.to_owned())
+                } else if let CastMemberType::Text(text) = &member.member_type {
+                    Ok(text.text.to_owned())
                 } else {
-                    Err(ScriptError::new(format!("Cast member is not a field")))
+                    Err(ScriptError::new(format!("Cast member is not a field or text member")))
                 }
             }
             None => Err(ScriptError::new(format!("Cast member not found"))),
@@ -413,29 +450,25 @@ impl CastManager {
         cell
     }
 
+    fn has_pfr_bitmap(font_manager: &FontManager, bitmap_ref: u32) -> Option<FontRef> {
+        font_manager
+            .fonts
+            .iter()
+            .find_map(|(font_ref, f)| (f.bitmap_ref == bitmap_ref).then_some(*font_ref))
+    }
+
     /// Load all font cast members into the font manager
     pub fn load_fonts_into_manager(&self, font_manager: &mut FontManager) {
         use web_sys::console;
-
-        debug!("🎨 Starting font loading from cast members...");
 
         let mut loaded_count = 0;
         let mut skipped_count = 0;
 
         for cast_lib in &self.casts {
-            debug!(
-                "   Scanning cast lib {} ({} members)",
-                cast_lib.number,
-                cast_lib.members.len()
-            );
-
             for member in cast_lib.members.values() {
                 if let CastMemberType::Font(font_data) = &member.member_type {
-                    if !font_data.preview_text.is_empty() {
-                        warn!(
-                            "   ⏭️  Skipping font member #{}: '{}' (has preview text, not a real font)",
-                            member.number, member.name
-                        );
+                    // Skip font display members (preview text, no bitmap) but NOT PFR fonts
+                    if !font_data.preview_text.is_empty() && font_data.bitmap_ref.is_none() {
                         skipped_count += 1;
                         continue;
                     }
@@ -444,6 +477,7 @@ impl CastManager {
                     let font_size = font_data.font_info.size;
                     let font_style = font_data.font_info.style;
                     let font_id = font_data.font_info.font_id;
+                    let member_number = member.number;
 
                     debug!(
                         "   📋 Found font member #{}: '{}' (id={}, size={}, style={})",
@@ -452,18 +486,26 @@ impl CastManager {
 
                     // Skip empty font names
                     if font_name.is_empty() {
-                        warn!("⊘ Skipping font member {} with empty name", member.number);
                         skipped_count += 1;
                         continue;
                     }
 
-                    debug!(
-                        "📝 Loading font '{}' from cast (id: {}, size: {}, style: {}, member: {})",
-                        font_name, font_id, font_size, font_style, member.number
-                    );
-
-                    // Check if this is a PFR font with bitmap_ref
                     if let Some(bitmap_ref) = font_data.bitmap_ref {
+                        // DEDUPE: if this bitmap font already exists, just ensure id mappings and skip
+                        if let Some(existing_ref) = Self::has_pfr_bitmap(font_manager, bitmap_ref as u32) {
+                            // Don't overwrite existing mappings; only insert if missing
+                            if font_id > 0 {
+                                font_manager.font_by_id.entry(font_id).or_insert(existing_ref);
+                            }
+                            font_manager
+                                .font_by_id
+                                .entry(member_number as u16)
+                                .or_insert(existing_ref);
+
+                            skipped_count += 1;
+                            continue;
+                        }
+
                         // This is a PFR font - use its actual dimensions!
                         let char_width = font_data.char_width.unwrap_or(8);
                         let char_height = font_data.char_height.unwrap_or(12);
@@ -483,55 +525,79 @@ impl CastManager {
                             grid_rows,
                             grid_cell_width: char_width,
                             grid_cell_height: char_height,
-                            first_char_num: 32,
+                            first_char_num: font_data.first_char_num.unwrap_or(32),
                             char_offset_x: 0,
                             char_offset_y: 0,
                             font_name: font_name.clone(),
                             font_size,
                             font_style,
+                            char_widths: font_data.char_widths.clone(),
                         };
 
                         let rc_font = Rc::new(font);
 
-                        // Create cache keys for different lookup scenarios
-                        let full_key = format!("{}_{}_{}", font_name, font_size, font_style);
-                        let size_key = format!("{}_{}_0", font_name, font_size);
-                        let name_key = font_name.clone();
-
-                        // Store in cache
-                        font_manager
-                            .font_cache
-                            .insert(full_key.clone(), Rc::clone(&rc_font));
-                        font_manager
-                            .font_cache
-                            .insert(name_key.clone(), Rc::clone(&rc_font));
-                        font_manager
-                            .font_cache
-                            .insert(size_key.clone(), Rc::clone(&rc_font));
+                        // Collect all name aliases for this font
+                        let mut aliases: Vec<String> = Vec::new();
+                        aliases.push(font_name.clone());
+                        aliases.push(format!("{}_{}_{}", font_name, font_size, font_style));
+                        aliases.push(format!("{}_{}_0", font_name, font_size));
 
                         // Also cache font_info.name if different
                         if !font_data.font_info.name.is_empty()
                             && font_data.font_info.name != *font_name
                         {
+                            let pfr_name = &font_data.font_info.name;
+                            aliases.push(pfr_name.clone());
+                            aliases.push(format!("{}_{}_{}", pfr_name, font_size, font_style));
+                            aliases.push(format!("{}_{}_0", pfr_name, font_size));
+
+                            // Add alias with underscores replaced by spaces
+                            let spaced = pfr_name.replace('_', " ");
+                            if spaced != *pfr_name {
+                                aliases.push(spaced);
+                            }
+
+                            // Add alias with asterisks replaced by underscores/spaces
+                            let unstarred = pfr_name.replace('*', "_");
+                            if unstarred != *pfr_name {
+                                aliases.push(unstarred.clone());
+                                aliases.push(unstarred.replace('_', " "));
+                            }
+
+                            // Add prefix-only alias (before first underscore/asterisk/space)
+                            if let Some(prefix_end) = pfr_name.find(|c: char| c == '_' || c == '*' || c == ' ') {
+                                let prefix = &pfr_name[..prefix_end];
+                                if prefix.len() > 1 && prefix != *font_name {
+                                    aliases.push(prefix.to_string());
+                                }
+                            }
+                        }
+
+                        // Store all aliases in cache
+                        for alias in &aliases {
                             font_manager
                                 .font_cache
-                                .insert(font_data.font_info.name.clone(), Rc::clone(&rc_font));
+                                .entry(alias.clone())
+                                .or_insert_with(|| Rc::clone(&rc_font));
                         }
 
                         // Store by FontRef
                         let font_ref = font_manager.font_counter;
                         font_manager.font_counter += 1;
-                        font_manager.fonts.insert(font_ref, rc_font);
+                        font_manager.fonts.insert(font_ref, Rc::clone(&rc_font));
 
-                        // Map the font_id to this FontRef
+                        // Map font_id and member number to this FontRef
                         if font_id > 0 {
-                            font_manager.font_by_id.insert(font_id, font_ref);
+                            font_manager.font_by_id.entry(font_id).or_insert(font_ref);
                         }
+                        // Also map by member number (STXT formatting runs reference fonts by member number)
+                        font_manager.font_by_id.entry(member_number as u16).or_insert(font_ref);
 
-                        debug!(
-                            "      ✅ Loaded PFR: ref={}, char_size={}x{}",
-                            font_ref, char_width, char_height
-                        );
+                        console::log_1(&format!(
+                            "Loaded PFR font '{}': ref={}, id={}, member={}, char_size={}x{}, first_char={}",
+                            font_name, font_ref, font_id, member_number, char_width, char_height,
+                            font_data.first_char_num.unwrap_or(32)
+                        ).into());
 
                         loaded_count += 1;
                     } else {
@@ -569,20 +635,42 @@ impl CastManager {
                             let rc_font = Rc::new(font_data_clone.clone());
 
                             // Create cache keys
-                            let full_key = format!("{}_{}_{}", font_name, font_size, font_style);
-                            let size_key = format!("{}_{}_0", font_name, font_size);
-                            let name_key = font_name.clone();
+                            let full_key = format!("{}_{}_{}", font_name.clone().to_ascii_lowercase(), font_size, font_style);
+                            let size_key = format!("{}_{}_0", font_name.clone().to_ascii_lowercase(), font_size);
+                            let name_key = font_name.clone().to_ascii_lowercase();
+
+                            // DEDUPE: already cached => don't create a new FontRef
+                            if let Some(existing_font) = font_manager.font_cache.get(&full_key) {
+                                // Find its FontRef so ids can map to it
+                                let existing_ref = font_manager
+                                    .fonts
+                                    .iter()
+                                    .find_map(|(r, f)| Rc::ptr_eq(f, existing_font).then_some(*r));
+
+                                if let Some(existing_ref) = existing_ref {
+                                    if font_id > 0 {
+                                        font_manager.font_by_id.entry(font_id).or_insert(existing_ref);
+                                    }
+                                    font_manager
+                                        .font_by_id
+                                        .entry(member_number as u16)
+                                        .or_insert(existing_ref);
+
+                                    skipped_count += 1;
+                                    continue;
+                                }
+                            }
 
                             // Store in cache
                             font_manager
                                 .font_cache
-                                .insert(full_key, Rc::clone(&rc_font));
+                                .entry(full_key).or_insert_with(|| Rc::clone(&rc_font));
                             font_manager
                                 .font_cache
-                                .insert(name_key, Rc::clone(&rc_font));
+                                .entry(name_key).or_insert_with(|| Rc::clone(&rc_font));
                             font_manager
                                 .font_cache
-                                .insert(size_key, Rc::clone(&rc_font));
+                                .entry(size_key).or_insert_with(|| Rc::clone(&rc_font));
 
                             // Store by FontRef
                             let font_ref = font_manager.font_counter;
@@ -590,16 +678,15 @@ impl CastManager {
                             font_manager.fonts.insert(font_ref, rc_font);
 
                             if font_id > 0 {
-                                font_manager.font_by_id.insert(font_id, font_ref);
+                                font_manager.font_by_id.entry(font_id).or_insert(font_ref);
                             }
+                            font_manager.font_by_id.entry(member_number as u16).or_insert(font_ref);
 
-                            debug!(
-                                "      ✅ Loaded (scaled): ref={}, scale={:.2}x, char_size={}x{}",
-                                font_ref,
-                                scale_factor,
-                                font_data_clone.char_width,
-                                font_data_clone.char_height
-                            );
+                            console::log_1(&format!(
+                                "Loaded scaled font '{}': ref={}, member={}, char_size={}x{}",
+                                font_name, font_ref, member_number,
+                                font_data_clone.char_width, font_data_clone.char_height
+                            ).into());
 
                             loaded_count += 1;
                         } else {
@@ -614,29 +701,21 @@ impl CastManager {
             }
         }
 
-        debug!(
-            "Font loading complete: {} loaded, {} skipped",
-            loaded_count, skipped_count
-        );
-        debug!(
-            "   Cache: {} entries, {} font_id mappings",
-            font_manager.font_cache.len(),
-            font_manager.font_by_id.len()
-        );
-        debug!("   Cached fonts: {:?}", font_manager.font_cache.keys());
+        if loaded_count > 0 {
+            console::log_1(&format!(
+                "Font loading complete: {} loaded, {} skipped, {} cache entries, {} id mappings",
+                loaded_count, skipped_count,
+                font_manager.font_cache.len(),
+                font_manager.font_by_id.len()
+            ).into());
 
-        // Log all cached fonts for debugging
-        debug!("   Cached fonts:");
-        for (key, font) in &font_manager.font_cache {
-            debug!(
-                "      '{}' -> {} ({}pt, style={}, {}x{})",
-                key,
-                font.font_name,
-                font.font_size,
-                font.font_style,
-                font.char_width,
-                font.char_height
-            )
+            // Log all cached font keys to browser console
+            let keys: Vec<&String> = font_manager.font_cache.keys().collect();
+            console::log_1(&format!("Font cache keys: {:?}", keys).into());
+
+            // Log font_by_id mappings
+            let id_mappings: Vec<(&u16, &crate::player::font::FontRef)> = font_manager.font_by_id.iter().collect();
+            console::log_1(&format!("Font by_id mappings: {:?}", id_mappings).into());
         }
     }
 }

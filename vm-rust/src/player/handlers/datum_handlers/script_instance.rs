@@ -585,4 +585,44 @@ impl ScriptInstanceDatumHandlers {
             }
         }
     }
+
+    /// Director's forget() method removes the script instance from the actorList.
+    /// This is commonly used with script-based timeouts (like _TIMER_) that are stored in actorList.
+    fn forget(datum: &DatumRef, _args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+        reserve_player_mut(|player| {
+            // Get the actorList
+            let actor_list_ref = player.globals.get("actorList").cloned();
+
+            if let Some(actor_list_ref) = actor_list_ref {
+                let actor_list = player.get_datum(&actor_list_ref).clone();
+                if let Datum::List(dtype, items, sorted) = actor_list {
+                    // Get the instance ID we're looking for
+                    let target_id = match player.get_datum(datum) {
+                        Datum::ScriptInstanceRef(ref instance_ref) => Some(**instance_ref),
+                        _ => None,
+                    };
+
+                    if let Some(target_id) = target_id {
+                        // Find and remove the instance from the list
+                        let new_items: Vec<DatumRef> = items.iter()
+                            .filter(|item| {
+                                match player.get_datum(item) {
+                                    Datum::ScriptInstanceRef(ref item_ref) => **item_ref != target_id,
+                                    _ => true, // Keep non-script-instance items
+                                }
+                            })
+                            .cloned()
+                            .collect();
+
+                        // Update the actorList with the filtered list
+                        let new_list = Datum::List(dtype, new_items, sorted);
+                        let new_list_ref = player.alloc_datum(new_list);
+                        player.globals.insert("actorList".to_string(), new_list_ref);
+                    }
+                }
+            }
+
+            Ok(DatumRef::Void)
+        })
+    }
 }

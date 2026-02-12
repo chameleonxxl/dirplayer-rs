@@ -315,7 +315,10 @@ impl JsApi {
     pub fn dispatch_cast_member_list_changed(cast_number: u32) {
         async_std::task::spawn_local(async move {
             let player = unsafe { PLAYER_OPT.as_ref().unwrap() };
-            let cast = player.movie.cast_manager.get_cast(cast_number).unwrap();
+            let cast = match player.movie.cast_manager.get_cast(cast_number) {
+                Ok(cast) => cast,
+                Err(_) => return,
+            };
             let members_iter = cast.members.values().into_iter();
 
             let member_list = js_sys::Map::new();
@@ -383,9 +386,17 @@ impl JsApi {
 
     pub fn dispatch_channel_changed(channel: i16) {
         let selected_channel = RENDERER_LOCK.with(|x| {
-            x.borrow()
-                .as_ref()
-                .and_then(|y| y.debug_selected_channel_num)
+            let borrowed = x.borrow();
+            let dynamic = borrowed.as_ref();
+            // Check Canvas2D renderer first, then WebGL2
+            dynamic
+                .and_then(|d| d.as_canvas2d())
+                .and_then(|canvas2d| canvas2d.debug_selected_channel_num)
+                .or_else(|| {
+                    dynamic
+                        .and_then(|d| d.as_webgl2())
+                        .and_then(|webgl2| webgl2.debug_selected_channel_num)
+                })
         });
 
         if selected_channel == Some(channel) {
@@ -646,12 +657,13 @@ impl JsApi {
         }
         let member = member.unwrap();
 
+        // Use safe_string to handle non-ASCII characters (e.g., Japanese)
         if !channel.name.is_empty() {
-            return Some(channel.name.clone());
+            return Some(safe_string(&channel.name));
         } else if !channel.sprite.name.is_empty() {
-            return Some(channel.sprite.name.clone());
+            return Some(safe_string(&channel.sprite.name));
         } else if !member.name.is_empty() {
-            return Some(member.name.clone());
+            return Some(safe_string(&member.name));
         } else {
             return None;
         }
@@ -663,6 +675,10 @@ impl JsApi {
 
         let member_ref = &channel.sprite.member.as_ref();
         if member_ref.is_none() || !member_ref.unwrap().is_valid() {
+            web_sys::console::log_1(&format!(
+                "get_channel_snapshot: ch{} member_ref is None or invalid, puppet={}",
+                channel_num, channel.sprite.puppet
+            ).into());
             return result;
         }
         let member_ref = member_ref.unwrap();
@@ -1221,6 +1237,7 @@ impl ToJsValue for PaletteRef {
                 )
                 .as_str(),
             ),
+            PaletteRef::Default => safe_js_string("#default"),
         }
     }
 }
