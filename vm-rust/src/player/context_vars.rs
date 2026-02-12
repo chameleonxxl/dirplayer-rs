@@ -158,7 +158,6 @@ pub fn player_set_context_var(
             {
                 match &mut member.member_type {
                     CastMemberType::Field(field) => {
-                        // Apply the put_type operation
                         match put_type {
                             PutType::Into => field.text = new_value,
                             PutType::Before => {
@@ -172,12 +171,26 @@ pub fn player_set_context_var(
                         }
                         Ok(())
                     }
+                    CastMemberType::Text(text) => {
+                        match put_type {
+                            PutType::Into => text.text = new_value,
+                            PutType::Before => {
+                                let mut combined = new_value;
+                                combined.push_str(&text.text);
+                                text.text = combined;
+                            }
+                            PutType::After => {
+                                text.text.push_str(&new_value);
+                            }
+                        }
+                        Ok(())
+                    }
                     other => {
                         console::log_1(
-                            &format!("❌ Member exists but is not a Field: {:?}", other).into(),
+                            &format!("Member exists but is not a Field or Text: {:?}", other).into(),
                         );
                         Err(ScriptError::new(
-                            "Cast member exists but is not a Field".to_string(),
+                            "Cast member exists but is not a Field or Text".to_string(),
                         ))
                     }
                 }

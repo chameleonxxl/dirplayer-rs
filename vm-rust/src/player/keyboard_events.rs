@@ -1,6 +1,7 @@
 use super::{
-    cast_member::CastMemberType, events::player_dispatch_targeted_event, player_is_playing,
-    reserve_player_mut, DatumRef, DirPlayer, ScriptError,
+    cast_member::CastMemberType,
+    events::{player_dispatch_targeted_event, player_dispatch_movie_callback, player_invoke_frame_and_movie_scripts},
+    player_is_playing, reserve_player_mut, DatumRef, DirPlayer, ScriptError,
 };
 
 fn get_next_focus_sprite_id(player: &DirPlayer, after: i16) -> i16 {
@@ -36,6 +37,7 @@ pub async fn player_key_down(key: String, code: u16) -> Result<DatumRef, ScriptE
             if let Some(sprite) = sprite {
                 let instance_list = sprite.script_instance_list.clone();
                 let member_ref = sprite.member.clone();
+                let member_ref_clone = member_ref.clone();
                 let member =
                     member_ref.and_then(|x| player.movie.cast_manager.find_mut_member_by_ref(&x));
                 if let Some(member) = member {
@@ -55,6 +57,15 @@ pub async fn player_key_down(key: String, code: u16) -> Result<DatumRef, ScriptE
                         }
                         _ => {}
                     }
+                } else {
+                    // Debug: Log when member is not found
+                    #[cfg(target_arch = "wasm32")]
+                    if let Some(ref mref) = member_ref_clone {
+                        web_sys::console::warn_1(&format!(
+                            "DEBUG: Keyboard input - member not found for sprite {} (cast={}, num={})",
+                            sprite_id, mref.cast_lib, mref.cast_member
+                        ).into());
+                    }
                 }
                 Some(instance_list)
             } else {
@@ -65,6 +76,8 @@ pub async fn player_key_down(key: String, code: u16) -> Result<DatumRef, ScriptE
         }
     });
     player_dispatch_targeted_event(&"keyDown".to_string(), &vec![], instance_ids.as_ref());
+    player_invoke_frame_and_movie_scripts(&"keyDown".to_string(), &vec![]).await?;
+    player_dispatch_movie_callback("keyDown").await?;
     Ok(DatumRef::Void)
 }
 
@@ -83,5 +96,7 @@ pub async fn player_key_up(key: String, code: u16) -> Result<DatumRef, ScriptErr
         }
     });
     player_dispatch_targeted_event(&"keyUp".to_string(), &vec![], instance_ids.as_ref());
+    player_invoke_frame_and_movie_scripts(&"keyUp".to_string(), &vec![]).await?;
+    player_dispatch_movie_callback("keyUp").await?;
     Ok(DatumRef::Void)
 }

@@ -37,6 +37,9 @@ pub struct Movie {
     pub update_lock: bool,
     pub mouse_down_script: Option<ScriptReceiver>,
     pub mouse_up_script: Option<ScriptReceiver>,
+    pub key_down_script: Option<ScriptReceiver>,
+    pub key_up_script: Option<ScriptReceiver>,
+    pub timeout_script: Option<ScriptReceiver>,
     pub allow_custom_caching: bool,
     pub trace_script: bool,
     pub trace_log_file: String,
@@ -47,17 +50,6 @@ pub struct Movie {
 }
 
 impl Movie {
-    pub fn next_random_int(&mut self, max: i32) -> Option<i32> {
-        let seed = self.random_seed?;
-        let seed_u32 = seed as u32;
-
-        // Note: This does not match the Director implementation exactly - there is no public knowledge of the seed algorithm.
-        let next_seed = seed_u32.wrapping_mul(214013).wrapping_add(2531011);
-        self.random_seed = Some(next_seed as i32);
-        let value = (next_seed % (max as u32)) as i32 + 1;
-        Some(value)
-    }
-
     pub async fn load_from_file(
         &mut self,
         file: DirectorFile,
@@ -153,13 +145,21 @@ impl Movie {
             "movieName" => Ok(Datum::String(self.file_name.to_owned())),
             "updateLock" => Ok(Datum::Int(if self.update_lock { 1 } else { 0 })),
             "path" => Ok(Datum::String(self.base_path.to_owned())),
-            "mouseDownScript" => match self.mouse_down_script.to_owned() {
-                Some(ScriptReceiver::Script(script_ref)) => Ok(Datum::ScriptRef(script_ref)),
-                Some(ScriptReceiver::ScriptInstance(script_instance_id)) => {
-                    Ok(Datum::ScriptInstanceRef(script_instance_id))
+            "mouseDownScript" | "mouseUpScript" | "keyDownScript" | "keyUpScript" | "timeoutScript" => {
+                let script = match prop {
+                    "mouseDownScript" => &self.mouse_down_script,
+                    "mouseUpScript" => &self.mouse_up_script,
+                    "keyDownScript" => &self.key_down_script,
+                    "keyUpScript" => &self.key_up_script,
+                    "timeoutScript" => &self.timeout_script,
+                    _ => unreachable!(),
+                };
+                match script.to_owned() {
+                    Some(ScriptReceiver::Script(script_ref)) => Ok(Datum::ScriptRef(script_ref)),
+                    Some(ScriptReceiver::ScriptInstance(id)) => Ok(Datum::ScriptInstanceRef(id)),
+                    Some(ScriptReceiver::ScriptText(text)) => Ok(Datum::String(text)),
+                    None => Ok(Datum::Int(0)),
                 }
-                Some(ScriptReceiver::ScriptText(text)) => Ok(Datum::String(text)),
-                None => Ok(Datum::Int(0)),
             }
             "allowCustomCaching" => Ok(datum_bool(self.allow_custom_caching)),
             "timer" => {
@@ -174,6 +174,13 @@ impl Movie {
             }
             "mouseDown" => Ok(datum_bool(self.mouse_down)),
             "traceScript" => Ok(datum_bool(self.trace_script)),
+            "activeWindow" => Ok(Datum::Stage),
+            "rollOver" => {
+                reserve_player_ref(|player| {
+                    let sprite = super::score::get_sprite_at(player, player.mouse_loc.0, player.mouse_loc.1, false);
+                    Ok(Datum::Int(sprite.unwrap_or(0) as i32))
+                })
+            }
             "randomSeed" => Ok(Datum::Int(self.random_seed.unwrap_or(0))),
             "activeWindow" => Ok(Datum::Stage),
             "maxInteger" => Ok(Datum::Int(i32::MAX)),
@@ -202,7 +209,7 @@ impl Movie {
                 self.exit_lock = value.int_value()? == 1;
             }
             "itemDelimiter" => {
-                self.item_delimiter = (value.string_value()?).chars().next().unwrap();
+                self.item_delimiter = (value.string_value()?).as_bytes()[0] as char;
             }
             "debugPlaybackEnabled" => {
                 // TODO
@@ -235,36 +242,38 @@ impl Movie {
             "updateLock" => {
                 self.update_lock = value.int_value()? != 0;
             }
-            "mouseDownScript" => {
+            "mouseDownScript" | "mouseUpScript" | "keyDownScript" | "keyUpScript" | "timeoutScript" => {
+                let target = match prop {
+                    "mouseDownScript" => &mut self.mouse_down_script,
+                    "mouseUpScript" => &mut self.mouse_up_script,
+                    "keyDownScript" => &mut self.key_down_script,
+                    "keyUpScript" => &mut self.key_up_script,
+                    "timeoutScript" => &mut self.timeout_script,
+                    _ => unreachable!(),
+                };
                 return match value {
                     Datum::Int(0) | Datum::Void => {
-                        self.mouse_down_script = None;
+                        *target = None;
                         Ok(())
                     }
                     Datum::String(script_text) => {
-                        // In a real implementation, you might want to parse/compile this
-                        // For now, you could store it or just ignore comment-only scripts
                         if script_text.trim().starts_with("--") {
-                            // It's a comment, effectively disabling mouse input
-                            self.mouse_down_script = None;
+                            *target = None;
                         } else {
-                            // Store the script text - you'll need to add String variant
-                            // to ScriptReceiver or handle it differently
-                            // For now, just accept it:
-                            self.mouse_down_script = None; // TODO: handle script strings
+                            *target = Some(ScriptReceiver::ScriptText(script_text));
                         }
                         Ok(())
                     }
                     Datum::ScriptRef(script_ref) => {
-                        self.mouse_down_script = Some(ScriptReceiver::Script(script_ref));
+                        *target = Some(ScriptReceiver::Script(script_ref));
                         Ok(())
                     }
                     Datum::ScriptInstanceRef(script_instance_id) => {
-                        self.mouse_down_script = Some(ScriptReceiver::ScriptInstance(script_instance_id));
+                        *target = Some(ScriptReceiver::ScriptInstance(script_instance_id));
                         Ok(())
                     }
                     _ => Err(ScriptError::new(
-                        "String, object or 0 expected for mouseDownScript value".to_string(),
+                        format!("String, object or 0 expected for {} value", prop),
                     )),
                 }
             }
@@ -273,6 +282,14 @@ impl Movie {
             }
             "puppetTempo" => {
                 self.puppet_tempo = value.int_value()? as u32;
+            }
+            "colorDepth" | "useFastQuads" | "romanLingo" | "allowSaveLocal" => {
+                // Read-only / no-op in practice; ignore sets like Director does
+            }
+            "timeoutLength" | "timeoutKeyDown" | "timeoutMouse" | "timeoutPlay"
+            | "timeoutLapsed" | "soundEnabled" | "soundLevel"
+            | "beepOn" | "centerStage" | "exitLock" | "fixStageSize" | "stageColor" => {
+                // Anim props that are set via property_type 0x07 - accept silently
             }
             "randomSeed" => {
                 self.random_seed = Some(value.int_value()?);
