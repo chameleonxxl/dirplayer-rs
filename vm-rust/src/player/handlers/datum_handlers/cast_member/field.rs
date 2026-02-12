@@ -82,15 +82,66 @@ impl FieldMemberHandlers {
             "width" => Ok(Datum::Int(field.width as i32)),
             "alignment" => Ok(Datum::String(field.alignment.to_owned())),
             "wordWrap" => Ok(datum_bool(field.word_wrap)),
-            "fixedLineSpace" => Ok(Datum::Int(field.fixed_line_space as i32)),
+            "fixedLineSpace" | "lineHeight" => Ok(Datum::Int(field.fixed_line_space as i32)),
             "topSpacing" => Ok(Datum::Int(field.top_spacing as i32)),
             "boxType" => Ok(Datum::String(field.box_type.to_owned())),
             "antialias" => Ok(datum_bool(field.anti_alias)),
             "autoTab" => Ok(datum_bool(field.auto_tab)),
             "editable" => Ok(datum_bool(field.editable)),
             "border" => Ok(Datum::Int(field.border as i32)),
-            "backColor" => Ok(Datum::Int(field.back_color as i32)),
-            "rect" | "height" | "image" => {
+            "margin" => Ok(Datum::Int(field.margin as i32)),
+            "boxDropShadow" => Ok(Datum::Int(field.box_drop_shadow as i32)),
+            "dropShadow" => Ok(Datum::Int(field.drop_shadow as i32)),
+            "scrollTop" => Ok(Datum::Int(field.scroll_top as i32)),
+            "hilite" => Ok(datum_bool(field.hilite)),
+            "lineCount" => {
+                if field.text.is_empty() {
+                    Ok(Datum::Int(0))
+                } else {
+                    Ok(Datum::Int(field.text.lines().count().max(1) as i32))
+                }
+            }
+            "pageHeight" => {
+                // pageHeight = total height of the text content
+                let text_clone = field.text.clone();
+                let font_name = field.font.clone();
+                let font_size = Some(field.font_size);
+                let fixed_line_space = field.fixed_line_space;
+                let top_spacing = field.top_spacing;
+
+                let font = if !font_name.is_empty() {
+                    player.font_manager.get_font_with_cast_and_bitmap(
+                        &font_name,
+                        &player.movie.cast_manager,
+                        &mut player.bitmap_manager,
+                        font_size,
+                        None,
+                    )
+                } else {
+                    None
+                };
+                let font = font.or_else(|| player.font_manager.get_system_font())
+                    .ok_or_else(|| ScriptError::new("System font not available".to_string()))?;
+
+                let (_, measured_h) =
+                    measure_text(&text_clone, &font, None, fixed_line_space, top_spacing);
+                Ok(Datum::Int(measured_h as i32))
+            }
+            "foreColor" => {
+                match &field.fore_color {
+                    Some(ColorRef::Rgb(r, _, _)) => Ok(Datum::Int(*r as i32)),
+                    Some(ColorRef::PaletteIndex(idx)) => Ok(Datum::Int(*idx as i32)),
+                    None => Ok(Datum::Int(255)), // default: palette index 255 = black
+                }
+            }
+            "backColor" => {
+                match &field.back_color {
+                    Some(ColorRef::Rgb(r, _, _)) => Ok(Datum::Int(*r as i32)),
+                    Some(ColorRef::PaletteIndex(idx)) => Ok(Datum::Int(*idx as i32)),
+                    None => Ok(Datum::Int(0)), // default: palette index 0 = white
+                }
+            }
+            "rect" | "height" | "image" | "picture" => {
                 // Clone data to avoid borrow issues
                 let text_clone = field.text.clone();
                 let font_name = field.font.clone();
@@ -100,9 +151,10 @@ impl FieldMemberHandlers {
 
                 // Try to get custom font, fall back to system font
                 let font = if !font_name.is_empty() {
-                    player.font_manager.get_font_with_cast(
+                    player.font_manager.get_font_with_cast_and_bitmap(
                         &font_name,
-                        Some(&player.movie.cast_manager),
+                        &player.movie.cast_manager,
+                        &mut player.bitmap_manager,
                         font_size,
                         None,
                     )
@@ -119,16 +171,18 @@ impl FieldMemberHandlers {
                         .ok_or_else(|| ScriptError::new("System font not available".to_string()))?
                 };
 
-                web_sys::console::log_1(
-                    &format!(
-                        "Field using font: '{}' (size: {})",
-                        font.font_name, font.font_size
-                    )
-                    .into(),
-                );
-
-                let (width, height) =
+                let (measured_w, measured_h) =
                     measure_text(&text_clone, &font, None, fixed_line_space, top_spacing);
+                let width = if field.width > 0 {
+                    field.width.max(measured_w)
+                } else {
+                    measured_w
+                };
+                let height = if field.fixed_line_space > 0 {
+                    field.fixed_line_space.max(measured_h)
+                } else {
+                    measured_h
+                };
 
                 match prop.as_str() {
                     "rect" => Ok(Datum::Rect([
@@ -138,7 +192,7 @@ impl FieldMemberHandlers {
                         player.alloc_datum(Datum::Int(height as i32))
                     ])),
                     "height" => Ok(Datum::Int(height as i32)),
-                    "image" => {
+                    "image" | "picture" => {
                         let mut bitmap = Bitmap::new(
                             width,
                             height,
@@ -176,6 +230,7 @@ impl FieldMemberHandlers {
                             mask_image: None,
                             is_text_rendering: true,
                             rotation: 0.0,
+                            skew: 0.0,
                             sprite: None,
                             original_dst_rect: None,
                         };
@@ -235,7 +290,14 @@ impl FieldMemberHandlers {
                 |cast_member, rect_values: Result<(i32, i32, i32, i32), ScriptError>| {
                     let (x1, y1, x2, y2) = rect_values?;
                     let field_data = cast_member.member_type.as_field_mut().unwrap();
-                    field_data.width = x2 as u16;
+                    let w = (x2 - x1).max(0) as u16;
+                    let h = (y2 - y1).max(0) as u16;
+                    if w > 0 {
+                        field_data.width = w;
+                    }
+                    if h > 0 {
+                        field_data.fixed_line_space = h;
+                    }
 
                     Ok(())
                 }
@@ -264,6 +326,14 @@ impl FieldMemberHandlers {
                     Ok(())
                 },
             ),
+            "height" => borrow_member_mut(
+                member_ref,
+                |player| value.int_value(),
+                |cast_member, value| {
+                    cast_member.member_type.as_field_mut().unwrap().fixed_line_space = value? as u16;
+                    Ok(())
+                },
+            ),
             "font" => borrow_member_mut(
                 member_ref,
                 |player| value.string_value(),
@@ -276,7 +346,13 @@ impl FieldMemberHandlers {
                 member_ref,
                 |player| value.int_value(),
                 |cast_member, value| {
-                    cast_member.member_type.as_field_mut().unwrap().font_size = value? as u16;
+                    let font_size = value? as u16;
+                    let field = cast_member.member_type.as_field_mut().unwrap();
+                    field.font_size = font_size;
+                    // Keep line height at least as large as font size for visibility.
+                    if field.fixed_line_space < font_size {
+                        field.fixed_line_space = font_size;
+                    }
                     Ok(())
                 },
             ),
@@ -288,9 +364,9 @@ impl FieldMemberHandlers {
                     Ok(())
                 },
             ),
-            "fixedLineSpace" => borrow_member_mut(
+            "fixedLineSpace" | "lineHeight" => borrow_member_mut(
                 member_ref,
-                |player| value.bool_value(),
+                |player| value.int_value(),
                 |cast_member, value| {
                     cast_member
                         .member_type
@@ -348,11 +424,61 @@ impl FieldMemberHandlers {
                     Ok(())
                 },
             ),
+            "margin" => borrow_member_mut(
+                member_ref,
+                |player| value.int_value(),
+                |cast_member, value| {
+                    cast_member.member_type.as_field_mut().unwrap().margin = value? as u16;
+                    Ok(())
+                },
+            ),
+            "boxDropShadow" => borrow_member_mut(
+                member_ref,
+                |player| value.int_value(),
+                |cast_member, value| {
+                    cast_member.member_type.as_field_mut().unwrap().box_drop_shadow = value? as u16;
+                    Ok(())
+                },
+            ),
+            "dropShadow" => borrow_member_mut(
+                member_ref,
+                |player| value.int_value(),
+                |cast_member, value| {
+                    cast_member.member_type.as_field_mut().unwrap().drop_shadow = value? as u16;
+                    Ok(())
+                },
+            ),
+            "scrollTop" => borrow_member_mut(
+                member_ref,
+                |player| value.int_value(),
+                |cast_member, value| {
+                    cast_member.member_type.as_field_mut().unwrap().scroll_top = value? as u16;
+                    Ok(())
+                },
+            ),
+            "hilite" => borrow_member_mut(
+                member_ref,
+                |player| value.bool_value(),
+                |cast_member, value| {
+                    cast_member.member_type.as_field_mut().unwrap().hilite = value?;
+                    Ok(())
+                },
+            ),
+            "foreColor" => borrow_member_mut(
+                member_ref,
+                |player| value.int_value(),
+                |cast_member, value| {
+                    let v = value? as u8;
+                    cast_member.member_type.as_field_mut().unwrap().fore_color = Some(ColorRef::PaletteIndex(v));
+                    Ok(())
+                },
+            ),
             "backColor" => borrow_member_mut(
                 member_ref,
                 |player| value.int_value(),
                 |cast_member, value| {
-                    cast_member.member_type.as_field_mut().unwrap().back_color = value? as u16;
+                    let v = value? as u8;
+                    cast_member.member_type.as_field_mut().unwrap().back_color = Some(ColorRef::PaletteIndex(v));
                     Ok(())
                 },
             ),

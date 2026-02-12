@@ -15,9 +15,9 @@ use super::{
     ScriptError,
 };
 use crate::director::{
-    chunks::{cast_member::CastMemberDef, score::ScoreChunk, xmedia::PfrFont, xmedia::XMediaChunk, sound::SoundChunk, Chunk, cast_member::CastMemberChunk},
+    chunks::{cast_member::CastMemberDef, score::{ScoreChunk, ScoreChunkHeader, ScoreFrameData}, xmedia::PfrFont, xmedia::XMediaChunk, sound::SoundChunk, Chunk, cast_member::CastMemberChunk},
     enums::{
-        BitmapInfo, FilmLoopInfo, FontInfo, MemberType, ScriptType, ShapeInfo, TextMemberData, SoundInfo, FieldInfo,
+        BitmapInfo, FilmLoopInfo, FontInfo, MemberType, ScriptType, ShapeInfo, TextMemberData, SoundInfo, FieldInfo, TextInfo,
     },
     lingo::script::ScriptContext,
 };
@@ -45,6 +45,7 @@ pub struct FieldMember {
     pub font: String,
     pub font_style: String,
     pub font_size: u16,
+    pub font_id: Option<u16>, // STXT font ID for lookup by ID
     pub fixed_line_space: u16,
     pub top_spacing: i16,
     pub box_type: String,
@@ -53,12 +54,19 @@ pub struct FieldMember {
     pub auto_tab: bool, // Tabbing order depends on sprite number order, not position on the Stage.
     pub editable: bool,
     pub border: u16,
-    pub back_color: u16,
+    pub margin: u16,
+    pub box_drop_shadow: u16,
+    pub drop_shadow: u16,
+    pub scroll_top: u16,
+    pub hilite: bool,
+    pub fore_color: Option<ColorRef>,  // From STXT formatting run color (>> 8)
+    pub back_color: Option<ColorRef>,  // From FieldInfo bg RGB (& 0xff)
 }
 
 #[derive(Clone)]
 pub struct TextMember {
     pub text: String,
+    pub html_source: String,  // Original HTML string when set via html property
     pub alignment: String,
     pub box_type: String,
     pub word_wrap: bool,
@@ -69,7 +77,9 @@ pub struct TextMember {
     pub fixed_line_space: u16,
     pub top_spacing: i16,
     pub width: u16,
+    pub height: u16,
     pub html_styled_spans: Vec<StyledSpan>,
+    pub info: Option<TextInfo>,
 }
 
 pub struct PfrBitmap {
@@ -78,6 +88,8 @@ pub struct PfrBitmap {
     pub char_height: u16,
     pub grid_columns: u8,
     pub grid_rows: u8,
+    pub char_widths: Option<Vec<u16>>,
+    pub first_char: u8,
 }
 
 impl CastMember {
@@ -101,6 +113,7 @@ impl FieldMember {
             font: "Arial".to_string(),
             font_style: "plain".to_string(),
             font_size: 12,
+            font_id: None,
             fixed_line_space: 0,
             top_spacing: 0,
             box_type: "adjust".to_string(),
@@ -109,11 +122,24 @@ impl FieldMember {
             auto_tab: false,
             editable: false,
             border: 0,
-            back_color: 0,
+            margin: 0,
+            box_drop_shadow: 0,
+            drop_shadow: 0,
+            scroll_top: 0,
+            hilite: false,
+            fore_color: None,
+            back_color: None,
         }
     }
 
-    pub fn from_field_info(field_info: FieldInfo) -> FieldMember {
+    pub fn from_field_info(field_info: &FieldInfo) -> FieldMember {
+        let (bg_r, bg_g, bg_b) = field_info.bg_color_rgb();
+        // bgpal all zeros = "no background color set" (transparent), not black
+        let back_color = if field_info.bgpal_r == 0 && field_info.bgpal_g == 0 && field_info.bgpal_b == 0 {
+            None
+        } else {
+            Some(ColorRef::Rgb(bg_r, bg_g, bg_b))
+        };
         FieldMember {
             text: "".to_string(),
             alignment: field_info.alignment_str(),
@@ -121,6 +147,7 @@ impl FieldMember {
             font: field_info.font_name().to_string(),
             font_style: "plain".to_string(),
             font_size: 12,
+            font_id: None,
             fixed_line_space: field_info.height as u16,
             top_spacing: field_info.scroll_top as i16,
             box_type: field_info.box_type_str(),
@@ -129,7 +156,13 @@ impl FieldMember {
             auto_tab: field_info.auto_tab(),
             editable: field_info.editable(),
             border: field_info.border as u16,
-            back_color: field_info.bg_color(),
+            margin: field_info.margin as u16,
+            box_drop_shadow: field_info.box_drop_shadow as u16,
+            drop_shadow: field_info.drop_shadow as u16,
+            scroll_top: field_info.scroll_top as u16,
+            hilite: false,
+            fore_color: None, // Set later from STXT formatting run
+            back_color,
         }
     }
 }
@@ -138,6 +171,7 @@ impl TextMember {
     pub fn new() -> TextMember {
         TextMember {
             text: "".to_string(),
+            html_source: String::new(),
             alignment: "left".to_string(),
             word_wrap: true,
             font: "Arial".to_string(),
@@ -148,7 +182,9 @@ impl TextMember {
             box_type: "adjust".to_string(),
             anti_alias: false,
             width: 100,
+            height: 20,
             html_styled_spans: Vec::new(),
+            info: None,
         }
     }
 
@@ -235,7 +271,11 @@ pub struct FontMember {
     pub char_height: Option<u16>,
     pub grid_columns: Option<u8>,
     pub grid_rows: Option<u8>,
+    pub char_widths: Option<Vec<u16>>,
+    pub first_char_num: Option<u8>,
     pub alignment: TextAlignment,
+    pub pfr_parsed: Option<crate::director::chunks::pfr1::types::Pfr1ParsedFont>,
+    pub pfr_data: Option<Vec<u8>>,
 }
 
 #[allow(dead_code)]
@@ -708,7 +748,7 @@ impl CastMember {
                 end += 1;
             }
 
-            // if 03 not found → no valid text block
+            // if 03 not found â†’ no valid text block
             if end >= data.len() {
                 return None;
             }
@@ -771,27 +811,15 @@ impl CastMember {
             })
     }
 
-    fn find_pfr_name(member_def: &CastMemberDef) -> Option<String> {
-        member_def.children.iter().find_map(|child_opt| {
-            if let Some(Chunk::XMedia(xmedia)) = child_opt {
-                if xmedia.is_pfr_font() {
-                    let name = xmedia.extract_font_name();
-                    if !name.clone()?.is_empty() {
-                        return Some(name);
-                    }
-                }
-            }
-            None
-        })?
-    }
-
-    fn resolve_font_name(chunk: &CastMemberChunk, member_def: &CastMemberDef, number: u32) -> String {
+    fn resolve_font_name(chunk: &CastMemberChunk, pfr: &Option<PfrFont>, number: u32) -> String {
         if let Some(name) = chunk.member_info.as_ref().map(|i| i.name.clone()).filter(|n| !n.is_empty()) {
             return name;
         }
 
-        if let Some(pfr_name) = Self::find_pfr_name(member_def) {
-            return pfr_name;
+        if let Some(ref pfr) = pfr {
+            if !pfr.font_name.is_empty() {
+                return pfr.font_name.clone();
+            }
         }
 
         if let Some(info) = chunk.specific_data.font_info() {
@@ -806,20 +834,35 @@ impl CastMember {
     fn render_pfr_to_bitmap(
         pfr: &PfrFont,
         bitmap_manager: &mut BitmapManager,
+        target_height: usize,
     ) -> PfrBitmap {
-        let bitmap_width  = (pfr.char_width  as u16) * (pfr.grid_columns as u16);
-        let bitmap_height = (pfr.char_height as u16) * (pfr.grid_rows    as u16);
+        use crate::director::chunks::pfr1::{rasterizer, parse_pfr1_font_with_target};
+
+        // Parse at the actual target height so zone tables produce correct
+        // piecewise-linear interpolation for this specific size.
+        let parsed_for_size = match parse_pfr1_font_with_target(&pfr.raw_data, target_height as i32) {
+            Ok(p) => p,
+            Err(_) => pfr.parsed.clone(),
+        };
+
+        // Use the PFR1 rasterizer to render the parsed font
+        let rasterized = rasterizer::rasterize_pfr1_font(&parsed_for_size, target_height);
+
+        let bitmap_width = rasterized.bitmap_width as u16;
+        let bitmap_height = rasterized.bitmap_height as u16;
 
         debug!(
-            "🎨 Creating bitmap for PFR font '{}' ({}x{}, grid {}x{})",
+            "🎨 Creating bitmap for PFR font '{}' ({}x{}, grid {}x{}, cell {}x{})",
             pfr.font_name,
             bitmap_width,
             bitmap_height,
-            pfr.grid_columns,
-            pfr.grid_rows,
+            rasterized.grid_columns,
+            rasterized.grid_rows,
+            rasterized.cell_width,
+            rasterized.cell_height,
         );
 
-        // Create a blank 32-bit bitmap
+        // Create a 32-bit bitmap from the rasterized RGBA data
         let mut bitmap = Bitmap::new(
             bitmap_width,
             bitmap_height,
@@ -829,73 +872,35 @@ impl CastMember {
             PaletteRef::BuiltIn(BuiltInPalette::SystemWin),
         );
 
-        // fully transparent
-        for px in bitmap.data.chunks_exact_mut(4) {
-            px.copy_from_slice(&[0, 0, 0, 0]);
-        }
+        // Copy RGBA data
+        let data_len = rasterized.bitmap_data.len().min(bitmap.data.len());
+        bitmap.data[..data_len].copy_from_slice(&rasterized.bitmap_data[..data_len]);
 
-        // Render PFR vector glyphs into a temporary 1-bit buffer
-        use super::super::director::chunks::pfr_renderer::render_pfr_font;
-
-        let rendered = render_pfr_font(
-            &pfr.glyph_data,
-            pfr.char_width as usize,
-            pfr.char_height as usize,
-            128, // fixed number of glyphs
-        );
-
-        debug!("🖨 Rendered PFR vector glyphs → {} bytes", rendered.len());
-
-        let bytes_per_row = ((pfr.char_width + 7) / 8) as usize;
-        let bytes_per_glyph = bytes_per_row * pfr.char_height as usize;
-
-        // Copy the 1-bit glyphs into the RGBA bitmap
-        for glyph_idx in 0..128 {
-            let grid_x = (glyph_idx % pfr.grid_columns as usize) as u8;
-            let grid_y = (glyph_idx / pfr.grid_columns as usize) as u8;
-
-            let dest_x = (grid_x as u16) * (pfr.char_width as u16);
-            let dest_y = (grid_y as u16) * (pfr.char_height as u16);
-
-            let glyph_offset = glyph_idx * bytes_per_glyph;
-
-            for row in 0..pfr.char_height {
-                let row_base = glyph_offset + (row as usize * bytes_per_row);
-                if row_base >= rendered.len() {
-                    break;
-                }
-
-                for col in 0..pfr.char_width {
-                    let b_index = row_base + (col as usize / 8);
-                    if b_index >= rendered.len() {
-                        continue;
-                    }
-
-                    let byte = rendered[b_index];
-                    let bit = (byte >> (7 - (col % 8))) & 1;
-
-                    if bit == 1 {
-                        let px = dest_x + col as u16;
-                        let py = dest_y + row as u16;
-                        let index = (py as usize * bitmap_width as usize + px as usize) * 4;
-
-                        bitmap.data[index..index + 4].copy_from_slice(&[255, 255, 255, 255]);
-                    }
-                }
+        // Ensure transparent background is white (avoids black-square artifacts in text rendering)
+        for i in (0..data_len).step_by(4) {
+            let a = bitmap.data[i + 3];
+            if a == 0 {
+                bitmap.data[i] = 255;
+                bitmap.data[i + 1] = 255;
+                bitmap.data[i + 2] = 255;
             }
         }
 
-        debug!("✅ Finished assembling PFR bitmap.");
+        bitmap.use_alpha = true;
 
-        // Add to the manager and return
+        debug!("✅ Finished assembling PFR bitmap ({} glyphs rendered).",
+            parsed_for_size.glyphs.len() + parsed_for_size.bitmap_glyphs.len());
+
         let bitmap_ref = bitmap_manager.add_bitmap(bitmap);
 
         PfrBitmap {
             bitmap_ref,
-            char_width: pfr.char_width,
-            char_height: pfr.char_height,
-            grid_columns: pfr.grid_columns,
-            grid_rows: pfr.grid_rows,
+            char_width: rasterized.cell_width as u16,
+            char_height: rasterized.cell_height as u16,
+            grid_columns: rasterized.grid_columns as u8,
+            grid_rows: rasterized.grid_rows as u8,
+            char_widths: Some(rasterized.char_widths),
+            first_char: rasterized.first_char,
         }
     }
 
@@ -974,17 +979,32 @@ impl CastMember {
         number: u32,
         chunk: &CastMemberChunk,
         bitmap_manager: &mut BitmapManager,
-    ) -> Option<CastMember> 
+    ) -> Option<CastMember>
     {
         for opt_child in &member_def.children {
             let Some(Chunk::XMedia(xm)) = opt_child else { continue };
 
+            let member_name = chunk.member_info.as_ref().map(|i| i.name.as_str()).unwrap_or("");
+            web_sys::console::log_1(&format!("Checking XMedia child (member #{}, name='{}', {} bytes)", number, member_name, xm.raw_data.len()).into());
+
             // 1) If SWF: return SWF
             if let Some(cm) = Self::try_parse_swf(xm.raw_data.to_vec(), number, chunk) {
+                web_sys::console::log_1(&"Detected as SWF".into());
                 return Some(cm);
             }
 
-            // 2) Font logic
+            // 2) Check if styled text (XMED format)
+            if let Some(styled_text) = xm.parse_styled_text() {
+                web_sys::console::log_1(&"Detected as XMED styled text".into());
+                return Some(Self::create_text_member_from_xmed(
+                    number,
+                    chunk,
+                    styled_text,
+                ));
+            }
+
+            // 3) Font logic
+            web_sys::console::log_1(&"Falling through to font parsing".into());
             return Some(Self::parse_xmedia_font(member_def, number, chunk, xm, bitmap_manager));
         }
         None
@@ -997,12 +1017,21 @@ impl CastMember {
         xm: &XMediaChunk,
         bitmap_manager: &mut BitmapManager,
     ) -> CastMember {
-        let font_name = Self::resolve_font_name(chunk, member_def, number);
-        let preview_text = Self::extract_text_from_xmedia(&xm.raw_data)
-            .filter(|s| s.len() > 3)
-            .unwrap_or_default();
-        let preview_font_name = Self::scan_font_name_from_xmedia(xm);
         let pfr = Self::extract_pfr(member_def);
+
+        // Only extract preview text if this is NOT a PFR font.
+        // PFR binary data contains byte patterns (0x2C...0x03) that
+        // extract_text_from_xmedia misidentifies as "preview text",
+        // which then causes load_fonts_into_manager to skip the font.
+        let preview_text = if pfr.is_some() {
+            String::new()
+        } else {
+            Self::extract_text_from_xmedia(&xm.raw_data)
+                .filter(|s| s.len() > 3)
+                .unwrap_or_default()
+        };
+        let preview_font_name = Self::scan_font_name_from_xmedia(xm);
+        let font_name = Self::resolve_font_name(chunk, &pfr, number);
 
         let info_and_bitmap = Self::build_font_info_and_bitmap(
             pfr,
@@ -1011,15 +1040,28 @@ impl CastMember {
             bitmap_manager,
         );
 
-        let (font_info, bitmap_ref, char_w, char_h, gc, gr) = info_and_bitmap;
+        let (font_info, bitmap_ref, char_w, char_h, gc, gr, char_widths, first_char, pfr_parsed, pfr_data) = info_and_bitmap;
+
+        let member_name = chunk
+            .member_info
+            .as_ref()
+            .map(|x| x.name.to_owned())
+            .unwrap_or_default();
+
+        debug!(
+            "FontMember #{} name='{}' font_name='{}' preview_text='{}' preview_font_name={:?} \
+             fixed_line_space=14 top_spacing=0 char_width={:?} char_height={:?} \
+             grid_columns={:?} grid_rows={:?} first_char_num={:?} char_widths_len={} \
+             bitmap_ref={:?} pfr_parsed={} pfr_data_len={}",
+            number, member_name, font_name, preview_text, preview_font_name,
+            char_w, char_h, gc, gr, first_char,
+            char_widths.as_ref().map_or(0, |v| v.len()),
+            bitmap_ref, pfr_parsed.is_some(), pfr_data.as_ref().map_or(0, |d| d.len()),
+        );
 
         CastMember {
             number,
-            name: chunk
-                .member_info
-                .as_ref()
-                .map(|x| x.name.to_owned())
-                .unwrap_or_default(),
+            name: member_name,
             member_type: CastMemberType::Font(FontMember {
                 font_info,
                 preview_text,
@@ -1032,9 +1074,168 @@ impl CastMember {
                 char_height: char_h,
                 grid_columns: gc,
                 grid_rows: gr,
+                char_widths,
+                first_char_num: first_char,
                 alignment: TextAlignment::Left,
+                pfr_parsed,
+                pfr_data,
             }),
             color: ColorRef::PaletteIndex(255),
+            bg_color: ColorRef::PaletteIndex(0),
+        }
+    }
+
+    fn create_text_member_from_xmed(
+        number: u32,
+        chunk: &CastMemberChunk,
+        styled_text: crate::director::chunks::xmedia::XmedStyledText,
+    ) -> CastMember {
+        use crate::player::handlers::datum_handlers::cast_member::font::TextAlignment;
+
+        debug!("Creating TextMember from XMED styled text (member #{})", number);
+
+        let alignment_str = match styled_text.alignment {
+            TextAlignment::Left => "left",
+            TextAlignment::Center => "center",
+            TextAlignment::Right => "right",
+            TextAlignment::Justify => "justify",
+        };
+
+        // Use first span font face, but member fontSize should track the largest styled size.
+        let (font_name, font_size) = if !styled_text.styled_spans.is_empty() {
+            let first_style = &styled_text.styled_spans[0].style;
+            let max_span_size = styled_text
+                .styled_spans
+                .iter()
+                .filter_map(|s| s.style.font_size)
+                .filter(|s| *s > 0)
+                .max()
+                .unwrap_or(12);
+            (
+                first_style.font_face.clone().unwrap_or_else(|| "Arial".to_string()),
+                max_span_size as u16,
+            )
+        } else {
+            ("Arial".to_string(), 12)
+        };
+
+        debug!(
+            "  Text: '{}', alignment: {}, font: {}, size: {}, spans: {}, word_wrap: {}",
+            styled_text.text, alignment_str, font_name, font_size, styled_text.styled_spans.len(),
+            styled_text.word_wrap
+        );
+
+        // Get TextInfo from specific_data if available; otherwise synthesize a default one
+        // so runtime properties like centerRegPoint are always present on parsed text members.
+        let text_info_from_chunk = chunk.specific_data.text_info().cloned();
+        let raw_looks_like_text_info = TextInfo::looks_like_text_info(chunk.specific_data_raw.as_slice());
+        let text_info_from_raw = if text_info_from_chunk.is_none() && raw_looks_like_text_info {
+            Some(TextInfo::from(chunk.specific_data_raw.as_slice()))
+        } else {
+            None
+        };
+        let text_info_from_chunk = text_info_from_chunk.or(text_info_from_raw);
+        let field_info_from_chunk = chunk.specific_data.field_info();
+        let mut text_info = text_info_from_chunk.unwrap_or_else(|| {
+            let mut info = TextInfo::default();
+            if let Some(field_info) = field_info_from_chunk {
+                info.box_type = field_info.box_type as u32;
+                info.scroll_top = field_info.scroll_top as u32;
+                info.auto_tab = field_info.auto_tab();
+                info.editable = field_info.editable();
+                info.width = field_info.width as u32;
+                info.height = field_info.height as u32;
+            }
+            info
+        });
+        let mut box_w = if text_info.width > 0 { text_info.width as u16 } else { 0 };
+        let mut box_h = if text_info.height > 0 { text_info.height as u16 } else { 0 };
+
+        // Fallback for older text member formats: parse raw text member data for dimensions.
+        if box_w == 0 || box_h == 0 {
+            if let Some(text_member_data) = TextMemberData::from_raw_bytes(chunk.specific_data_raw.as_slice()) {
+                if box_w == 0 && text_member_data.width > 0 {
+                    box_w = text_member_data.width as u16;
+                }
+                if box_h == 0 && text_member_data.height > 0 {
+                    box_h = text_member_data.height as u16;
+                }
+            }
+        }
+
+        if box_w == 0 { box_w = 100; }
+        if box_h == 0 { box_h = 20; }
+
+        // Keep synthesized TextInfo dimensions aligned with effective member box.
+        text_info.width = box_w as u32;
+        text_info.height = box_h as u32;
+
+        let box_type = text_info.box_type_str().trim_start_matches('#').to_string();
+        let text_member = TextMember {
+            text: styled_text.text.clone(),
+            html_source: String::new(),
+            alignment: alignment_str.to_string(),
+            box_type,
+            word_wrap: styled_text.word_wrap,
+            anti_alias: true,
+            font: font_name,
+            font_style: Vec::new(),
+            font_size,
+            fixed_line_space: if styled_text.line_spacing > 0 {
+                styled_text.line_spacing as u16
+            } else {
+                styled_text.fixed_line_space
+            },
+            top_spacing: styled_text.top_spacing as i16,
+            width: box_w,
+            height: box_h,
+            html_styled_spans: styled_text.styled_spans,
+            info: Some(text_info),
+        };
+
+        let member_name = chunk
+            .member_info
+            .as_ref()
+            .map(|x| x.name.to_owned())
+            .unwrap_or_default();
+
+        debug!(
+            "TextMember #{} name='{}' text='{}' alignment='{}' box_type='{}' word_wrap={} \
+             anti_alias={} font='{}' font_style={:?} font_size={} fixed_line_space={} \
+             top_spacing={} width={} height={} styled_spans={}",
+            number,
+            member_name,
+            text_member.text,
+            text_member.alignment,
+            text_member.box_type,
+            text_member.word_wrap,
+            text_member.anti_alias,
+            text_member.font,
+            text_member.font_style,
+            text_member.font_size,
+            text_member.fixed_line_space,
+            text_member.top_spacing,
+            text_member.width,
+            text_member.height,
+            text_member.html_styled_spans.len(),
+        );
+
+        // Preserve XMED foreColor at the member level so it persists
+        // even when Lingo sets member.text or member.html (which may clear styled span colors)
+        let member_color = text_member.html_styled_spans.first()
+            .and_then(|s| s.style.color)
+            .map(|c| ColorRef::Rgb(
+                ((c >> 16) & 0xFF) as u8,
+                ((c >> 8) & 0xFF) as u8,
+                (c & 0xFF) as u8,
+            ))
+            .unwrap_or(ColorRef::PaletteIndex(255));
+
+        CastMember {
+            number,
+            name: member_name,
+            member_type: CastMemberType::Text(text_member),
+            color: member_color,
             bg_color: ColorRef::PaletteIndex(0),
         }
     }
@@ -1051,15 +1252,30 @@ impl CastMember {
         Option<u16>, // char height
         Option<u8>, // grid columns
         Option<u8>, // grid rows
+        Option<Vec<u16>>, // char widths
+        Option<u8>, // first_char_num
+        Option<crate::director::chunks::pfr1::types::Pfr1ParsedFont>,
+        Option<Vec<u8>>,
         ) {
         let specific_bytes = chunk.specific_data_raw.clone();
 
         if let Some(pfr) = pfr {
-            let bmp = Self::render_pfr_to_bitmap(&pfr, bitmap_manager);
+            let requested_size = chunk
+                .specific_data
+                .font_info()
+                .map(|fi| fi.size)
+                .unwrap_or(0);
+            let target_height = if requested_size > 0 {
+                requested_size as usize
+            } else {
+                16usize
+            };
+
+            let bmp = Self::render_pfr_to_bitmap(&pfr, bitmap_manager, target_height);
 
             let info = FontInfo {
                 font_id: 0,
-                size: pfr.char_height,
+                size: target_height as u16,
                 style: 0,
                 name: if pfr.font_name.is_empty() {
                     default_name.to_string()
@@ -1068,6 +1284,8 @@ impl CastMember {
                 }
             };
 
+            web_sys::console::log_1(&format!("Rendered PFR: {:?}", info).into());
+
             return (
                 info,
                 Some(bmp.bitmap_ref),
@@ -1075,6 +1293,10 @@ impl CastMember {
                 Some(bmp.char_height),
                 Some(bmp.grid_columns),
                 Some(bmp.grid_rows),
+                bmp.char_widths,
+                Some(bmp.first_char),
+                Some(pfr.parsed.clone()),
+                Some(pfr.raw_data.clone()),
             );
         }
 
@@ -1085,11 +1307,11 @@ impl CastMember {
                 .map(|fi| fi.clone().with_default_name(default_name))
                 .unwrap_or_else(|| FontInfo::minimal(default_name));
 
-            return (info, None, None, None, None, None);
+            return (info, None, None, None, None, None, None, None, None, None);
         }
 
         // fallback
-        (FontInfo::minimal(default_name), None, None, None, None, None)
+        (FontInfo::minimal(default_name), None, None, None, None, None, None, None, None, None)
     }
 
     pub fn get_script_id(&self) -> Option<u32> {
@@ -1127,6 +1349,7 @@ impl CastMember {
         member_def: &CastMemberDef,
         lctx: &Option<ScriptContext>,
         bitmap_manager: &mut BitmapManager,
+        dir_version: u16,
     ) -> CastMember {
         let chunk = &member_def.chunk;
 
@@ -1135,36 +1358,107 @@ impl CastMember {
                 let text_chunk = member_def.children[0]
                     .as_ref()
                     .unwrap()
-                    .as_text();
+                    .as_text()
+                    .expect("Not a text chunk");
+                let raw = chunk.specific_data_raw.as_slice();
+                let field_info = FieldInfo::from(raw);
+                let (bg_r, bg_g, bg_b) = field_info.bg_color_rgb();
+                debug!(
+                    "FieldInfo: border={} margin={} box_drop_shadow={} box_type={} \
+                     alignment=({},{}) bgpal=({},{},{}) bg_rgb=({},{},{}) \
+                     reserved_12={} scroll_top={} reserved_14_18={:?} \
+                     reserved_19={} reserved_20={} width={} reserved_22={} \
+                     height={} font_type={} drop_shadow={} flags=0x{:02X} reserved_27_28={:?}",
+                    field_info.border, field_info.margin, field_info.box_drop_shadow, field_info.box_type,
+                    field_info.alignment_high, field_info.alignment_low,
+                    field_info.bgpal_r, field_info.bgpal_g, field_info.bgpal_b,
+                    bg_r, bg_g, bg_b,
+                    field_info.reserved_12, field_info.scroll_top, field_info.reserved_14_18,
+                    field_info.reserved_19, field_info.reserved_20, field_info.width, field_info.reserved_22,
+                    field_info.height, field_info.font_type, field_info.drop_shadow, field_info.flags,
+                    field_info.reserved_27_28,
+                );
+                let mut field_member = FieldMember::from_field_info(&field_info);
+                field_member.text = text_chunk.text.clone();
 
-                let field_member = if let Some(text_chunk) = text_chunk {
-                    let field_info = FieldInfo::from(chunk.specific_data_raw.as_slice());
-                    let mut field_member = FieldMember::from_field_info(field_info);
-                    field_member.text = text_chunk.text.clone();
-                    field_member
-                } else {
-                    log::error!(
-                        "Cast member #{} in cast lib {} is of type Text but has no valid Text chunk.",
-                        number,
-                        cast_lib
+                // Parse STXT formatting data to extract actual fontId, fontSize, and style
+                let formatting_runs = text_chunk.parse_formatting_runs();
+                for (i, run) in formatting_runs.iter().enumerate() {
+                    debug!(
+                        "  formatting_run[{}]: start_position={} height={} ascent={} font_id={} style=0x{:02X} font_size={} color=({},{},{}) -> rgb({},{},{})",
+                        i, run.start_position, run.height, run.ascent, run.font_id, run.style, run.font_size,
+                        run.color_r, run.color_g, run.color_b,
+                        (run.color_r >> 8) as u8, (run.color_g >> 8) as u8, (run.color_b >> 8) as u8,
                     );
-                    let mut field_member = FieldMember::default();
-                    field_member.text = "<Invalid Text Member>".to_string();
-                    field_member
-                };
+                }
+                if let Some(first_run) = formatting_runs.first() {
+                    // Extract foreground color from STXT formatting run
+                    let fg_r = (first_run.color_r >> 8) as u8;
+                    let fg_g = (first_run.color_g >> 8) as u8;
+                    let fg_b = (first_run.color_b >> 8) as u8;
+                    field_member.fore_color = Some(ColorRef::Rgb(fg_r, fg_g, fg_b));
+
+                    field_member.font_id = Some(first_run.font_id);
+                    if first_run.font_size > 0 {
+                        field_member.font_size = first_run.font_size;
+                        // Ensure field line height can fit the parsed font size.
+                        if field_member.fixed_line_space < first_run.font_size {
+                            field_member.fixed_line_space = first_run.font_size;
+                        }
+                    }
+                    if first_run.style != 0 {
+                        let mut styles = Vec::new();
+                        if (first_run.style & 0x01) != 0 {
+                            styles.push("bold");
+                        }
+                        if (first_run.style & 0x02) != 0 {
+                            styles.push("italic");
+                        }
+                        if (first_run.style & 0x04) != 0 {
+                            styles.push("underline");
+                        }
+                        if styles.is_empty() {
+                            field_member.font_style = "plain".to_string();
+                        } else {
+                            field_member.font_style = styles.join(" ");
+                        }
+                    }
+                }
+
+                debug!(
+                    "FieldMember text='{}' alignment='{}' word_wrap={} font='{}' \
+                     font_style='{}' font_size={} font_id={:?} fixed_line_space={} \
+                     top_spacing={} box_type='{}' anti_alias={} width={} \
+                     auto_tab={} editable={} border={} fore_color={:?} back_color={:?} formatting_runs={}",
+                    field_member.text, field_member.alignment, field_member.word_wrap,
+                    field_member.font, field_member.font_style, field_member.font_size,
+                    field_member.font_id, field_member.fixed_line_space,
+                    field_member.top_spacing, field_member.box_type, field_member.anti_alias,
+                    field_member.width, field_member.auto_tab, field_member.editable,
+                    field_member.border, field_member.fore_color, field_member.back_color,
+                    formatting_runs.len(),
+                );
+
                 CastMemberType::Field(field_member)
             }
             MemberType::Script => {
                 let member_info = chunk.member_info.as_ref().unwrap();
                 let script_id = member_info.header.script_id;
                 let script_type = chunk.specific_data.script_type().unwrap();
-                let _script_chunk = &lctx.as_ref().unwrap().scripts[&script_id];
+                let has_script = lctx.as_ref()
+                    .map(|ctx| ctx.scripts.contains_key(&script_id))
+                    .unwrap_or(false);
 
-                CastMemberType::Script(ScriptMember {
-                    script_id,
-                    script_type,
-                    name: member_info.name.clone(),
-                })
+                if has_script {
+                    CastMemberType::Script(ScriptMember {
+                        script_id,
+                        script_type,
+                        name: member_info.name.clone(),
+                    })
+                } else {
+                    web_sys::console::warn_1(&format!("Script member {}: script_id {} not found in Lctx, skipping", number, script_id).into());
+                    CastMemberType::Unknown
+                }
             }
             MemberType::Flash => {
                 use crate::director::enums::ShapeType;
@@ -1343,7 +1637,7 @@ impl CastMember {
                 };
 
                 debug!(
-                        "BitmapMember created → name: {} palette_id {} useAlpha {} trimWhiteSpace {}",
+                        "BitmapMember created â†’ name: {} palette_id {} useAlpha {} trimWhiteSpace {}",
                         chunk.member_info.as_ref().map(|x| x.name.to_owned()).unwrap_or_default(),
                         bitmap_info.palette_id,
                         bitmap_info.use_alpha,
@@ -1391,41 +1685,65 @@ impl CastMember {
                 })
             }
             MemberType::FilmLoop => {
-                let score_chunk = member_def.children[0].as_ref().unwrap().as_score().unwrap();
+                let score_chunk_opt = member_def.children.get(0)
+                    .and_then(|c| c.as_ref())
+                    .and_then(|c| c.as_score());
                 let film_loop_info = chunk.specific_data.film_loop_info().unwrap();
-                let mut score = Score::empty();
-                score.load_from_score_chunk(score_chunk);
 
-                // Compute initial_rect by finding the bounding box of all sprites
-                let initial_rect = Self::compute_filmloop_initial_rect(
-                    &score_chunk.frame_data.frame_channel_data,
-                    film_loop_info.reg_point,
-                );
+                if let Some(score_chunk) = score_chunk_opt {
+                    let mut score = Score::empty();
+                    score.load_from_score_chunk(score_chunk, dir_version);
 
-                debug!(
-                    "FilmLoop {} initial_rect: ({}, {}, {}, {}), info size: {}x{}, reg_point: ({}, {})",
-                    number,
-                    initial_rect.left, initial_rect.top, initial_rect.right, initial_rect.bottom,
-                    film_loop_info.width, film_loop_info.height,
-                    film_loop_info.reg_point.0, film_loop_info.reg_point.1
-                );
+                    // Compute initial_rect by finding the bounding box of all sprites
+                    let initial_rect = Self::compute_filmloop_initial_rect(
+                        &score_chunk.frame_data.frame_channel_data,
+                        film_loop_info.reg_point,
+                    );
 
-                // Log sprite_spans info
-                debug!(
-                    "FilmLoop {} has {} sprite_spans, {} frame_intervals, {} frame_channel_data entries",
-                    number,
-                    score.sprite_spans.len(),
-                    score_chunk.frame_intervals.len(),
-                    score_chunk.frame_data.frame_channel_data.len()
-                );
+                    debug!(
+                        "FilmLoop {} initial_rect: ({}, {}, {}, {}), info size: {}x{}, reg_point: ({}, {})",
+                        number,
+                        initial_rect.left, initial_rect.top, initial_rect.right, initial_rect.bottom,
+                        film_loop_info.width, film_loop_info.height,
+                        film_loop_info.reg_point.0, film_loop_info.reg_point.1
+                    );
 
-                CastMemberType::FilmLoop(FilmLoopMember {
-                    info: film_loop_info.clone(),
-                    score_chunk: score_chunk.clone(),
-                    score,
-                    current_frame: 1, // Start at frame 1
-                    initial_rect,
-                })
+                    // Log sprite_spans info
+                    debug!(
+                        "FilmLoop {} has {} sprite_spans, {} frame_intervals, {} frame_channel_data entries",
+                        number,
+                        score.sprite_spans.len(),
+                        score_chunk.frame_intervals.len(),
+                        score_chunk.frame_data.frame_channel_data.len()
+                    );
+
+                    CastMemberType::FilmLoop(FilmLoopMember {
+                        info: film_loop_info.clone(),
+                        score_chunk: score_chunk.clone(),
+                        score,
+                        current_frame: 1, // Start at frame 1
+                        initial_rect,
+                    })
+                } else {
+                    warn!("FilmLoop {} has no valid score chunk, creating empty film loop", number);
+                    let empty_score_chunk = ScoreChunk {
+                        header: ScoreChunkHeader {
+                            total_length: 0, unk1: 0, unk2: 0,
+                            entry_count: 0, unk3: 0, entry_size_sum: 0,
+                        },
+                        entries: vec![],
+                        frame_intervals: vec![],
+                        frame_data: ScoreFrameData::default(),
+                        sprite_details: std::collections::HashMap::new(),
+                    };
+                    CastMemberType::FilmLoop(FilmLoopMember {
+                        info: film_loop_info.clone(),
+                        score_chunk: empty_score_chunk,
+                        score: Score::empty(),
+                        current_frame: 1,
+                        initial_rect: super::geometry::IntRect { left: 0, top: 0, right: 0, bottom: 0 },
+                    })
+                }
             }
             MemberType::Sound => {
                 // Log children
@@ -1504,7 +1822,7 @@ impl CastMember {
                     };
 
                     debug!(
-                        "SoundMember created → name: {}, version: {}, sample_rate: {}, sample_size: {}, channels: {}, sample_count: {}, duration: {:.3}ms",
+                        "SoundMember created â†’ name: {}, version: {}, sample_rate: {}, sample_size: {}, channels: {}, sample_count: {}, duration: {:.3}ms",
                         chunk.member_info.as_ref().map(|x| x.name.to_owned()).unwrap_or_default(),
                         sound_chunk.version,
                         info.sample_rate,
@@ -1541,18 +1859,18 @@ impl CastMember {
 
                 if let Some(info) = &chunk.member_info {
                     debug!(
-                        "  → name='{}', script_id={}, flags={:?}",
+                        "  â†’ name='{}', script_id={}, flags={:?}",
                         info.name, info.header.script_id, info.header.flags
                     );
                 } else {
-                    debug!("  → No member_info available");
+                    debug!("  â†’ No member_info available");
                 }
 
                 // Log all child chunks
                 if member_def.children.is_empty() {
-                    debug!("  → No children found.");
+                    debug!("  â†’ No children found.");
                 } else {
-                    debug!("  → {} children:", member_def.children.len());
+                    debug!("  â†’ {} children:", member_def.children.len());
 
                     for (i, c_opt) in member_def.children.iter().enumerate() {
                         match c_opt {
