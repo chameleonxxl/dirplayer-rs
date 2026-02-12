@@ -25,7 +25,7 @@ export function initializeNetLoader() {
       // Check if this is a local file:// URL
       if (url.startsWith('file://')) {
         // Extract the file path from the URL
-        let filePath = url.replace('file://', '')
+        let filePath = decodeURIComponent(url.replace('file://', ''))
         if (process.platform === 'win32' && filePath.startsWith('/')) {
           filePath = filePath.slice(1);
         } else {
