@@ -232,6 +232,8 @@ impl PropListUtils {
                 let prop_list = player.get_datum_mut(prop_list_ref).to_map_mut()?;
                 if index < prop_list.len() {
                     prop_list[index].1 = value_ref.clone();
+                } else if index <= prop_list.len() {
+                    prop_list.push((key_ref.clone(), value_ref.clone()));
                 } else {
                     return Err(ScriptError::new(format!("Index out of range: {}", index)));
                 }
