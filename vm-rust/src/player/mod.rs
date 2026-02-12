@@ -1621,6 +1621,18 @@ async fn player_call_global_handler(
             receiver_handler = ScriptInstanceUtils::get_handler_from_first_arg(&args, handler_name);
 
             if receiver_handler.is_none() {
+                receiver_handler =
+                    get_active_static_script_refs(&player.movie, &player.get_hydrated_globals())
+                        .iter()
+                        .find_map(|script_ref| {
+                            let script = player.movie.cast_manager.get_script_by_ref(script_ref);
+                            script
+                                .and_then(|x| x.get_own_handler_ref(&handler_name))
+                                .map(|handler_pair| (None, handler_pair))
+                        });
+            }
+
+            if receiver_handler.is_none() {
                 receiver_handler = player
                     .movie
                     .score
@@ -1638,18 +1650,6 @@ async fn player_call_global_handler(
                             .get_own_handler_ref(&handler_name)
                             .map(|handler_pair| (Some(instance_receiver_ref.clone()), handler_pair))
                     });
-            }
-
-            if receiver_handler.is_none() {
-                receiver_handler =
-                    get_active_static_script_refs(&player.movie, &player.get_hydrated_globals())
-                        .iter()
-                        .find_map(|script_ref| {
-                            let script = player.movie.cast_manager.get_script_by_ref(script_ref);
-                            script
-                                .and_then(|x| x.get_own_handler_ref(&handler_name))
-                                .map(|handler_pair| (None, handler_pair))
-                        });
             }
         }
 
