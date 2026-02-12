@@ -41,8 +41,9 @@ use crate::{
 use crate::player::cast_manager::CastManager;
 use crate::player::font::BitmapFont;
 use crate::player::font::FontManager;
-use crate::player::handlers::datum_handlers::cast_member::font::FontMemberHandlers;
+use crate::player::handlers::datum_handlers::cast_member::font::{FontMemberHandlers, TextAlignment, StyledSpan, HtmlStyle};
 use crate::player::score_keyframes::SpritePathKeyframes;
+use crate::rendering_gpu::{DynamicRenderer, Renderer};
 
 /// Interpolate path position between keyframes for filmloop animation.
 /// Returns interpolated (x, y) position for the given frame, or None if no interpolation is needed.
@@ -101,6 +102,17 @@ fn get_or_load_font(
     font_size: Option<u16>,
     font_style: Option<u8>,
 ) -> Option<Rc<BitmapFont>> {
+    return get_or_load_font_with_id(font_manager, cast_manager, font_name, font_size, font_style, None);
+}
+
+fn get_or_load_font_with_id(
+    font_manager: &mut FontManager,
+    cast_manager: &CastManager,
+    font_name: &str,
+    font_size: Option<u16>,
+    font_style: Option<u8>,
+    font_id: Option<u16>,
+) -> Option<Rc<BitmapFont>> {
     if font_name.is_empty() || font_name == "System" {
         return font_manager.get_system_font();
     }
@@ -112,37 +124,37 @@ fn get_or_load_font(
         font_style.unwrap_or(0)
     );
 
-    debug!(
-        "🔍 Looking for font: '{}' (key: '{}')",
-        font_name, cache_key
-    );
-
     if let Some(font) = font_manager.font_cache.get(&cache_key) {
-        debug!("✓ Found in cache: '{}'", cache_key);
         return Some(Rc::clone(font));
     }
 
     if let Some(font) = font_manager.font_cache.get(font_name) {
-        debug!("✓ Found by name: '{}'", font_name);
         return Some(Rc::clone(font));
     }
 
-    debug!(
-        "⚠️  Font '{}' not in cache, attempting to load from cast...",
-        font_name
-    );
+    // Try font_id-based lookup (for STXT formatting runs that reference fonts by ID)
+    if let Some(id) = font_id {
+        if let Some(font_ref) = font_manager.font_by_id.get(&id).copied() {
+            if let Some(font) = font_manager.fonts.get(&font_ref) {
+                web_sys::console::log_1(&format!(
+                    "Font '{}' not found by name, but found by font_id={}", font_name, id
+                ).into());
+                return Some(Rc::clone(font));
+            }
+        }
+    }
 
     if let Some(loaded_font) =
         font_manager.get_font_with_cast(font_name, Some(cast_manager), font_size, font_style)
     {
-        debug!("✅ Loaded font '{}' from cast", font_name);
         return Some(loaded_font);
     }
 
-    debug!(
-        "❌ Could not find font '{}', falling back to system font",
-        font_name
-    );
+    web_sys::console::log_1(&format!(
+        "Font '{}' (id={:?}) not found, cache keys: {:?}",
+        font_name, font_id,
+        font_manager.font_cache.keys().collect::<Vec<_>>()
+    ).into());
 
     font_manager.get_system_font()
 }
@@ -636,6 +648,7 @@ fn render_filmloop_from_channel_data(
                     mask_image: mask.map(|m| m as &BitmapMask),
                     is_text_rendering: false,
                     rotation: 0.0,
+                    skew: 0.0,
                     sprite: None,
                     original_dst_rect: Some(dst_rect.clone()),
                 };
@@ -957,6 +970,7 @@ pub fn render_score_to_bitmap_with_offset(
                     mask_image: None,
                     is_text_rendering: false,
                     rotation: sprite.rotation,
+                    skew: sprite.skew,
                     sprite: Some(&sprite.clone()),
                     original_dst_rect: Some(logical_rect),
                 };
@@ -1033,12 +1047,13 @@ pub fn render_score_to_bitmap_with_offset(
             CastMemberType::Field(field_member) => {
                 let sprite = get_score_sprite(&player.movie, score_source, channel_num).unwrap();
 
-                let font_opt = get_or_load_font(
+                let font_opt = get_or_load_font_with_id(
                     &mut player.font_manager,
                     &player.movie.cast_manager,
                     &field_member.font,
                     Some(field_member.font_size),
                     None,
+                    field_member.font_id,
                 );
 
                 if let Some(font) = font_opt {
@@ -1052,6 +1067,7 @@ pub fn render_score_to_bitmap_with_offset(
                         mask_image: None,
                         is_text_rendering: true,
                         rotation: 0.0,
+                        skew: 0.0,
                         sprite: None,
                         original_dst_rect: None,
                     };
@@ -1121,6 +1137,7 @@ pub fn render_score_to_bitmap_with_offset(
                     mask_image: None,
                     is_text_rendering: true,
                     rotation: 0.0,
+                    skew: 0.0,
                     sprite: None,
                     original_dst_rect: None,
                 };
@@ -1160,14 +1177,74 @@ pub fn render_score_to_bitmap_with_offset(
             }
             CastMemberType::Text(text_member) => {
                 let sprite = get_score_sprite(&player.movie, score_source, channel_num).unwrap();
+                let sprite_rect = get_concrete_sprite_rect(player, sprite);
+                let draw_x = sprite_rect.left;
+                let draw_y = sprite_rect.top;
+                let draw_w = sprite_rect.width();
+                let draw_h = sprite_rect.height();
 
-                let font_opt = get_or_load_font(
+                // Extract font properties from first styled span if available
+                let (font_name, font_size, font_style) = if !text_member.html_styled_spans.is_empty() {
+                    let first_style = &text_member.html_styled_spans[0].style;
+                    let name = first_style.font_face.clone().unwrap_or_else(|| text_member.font.clone());
+                    let size = first_style.font_size.map(|s| s as u16).unwrap_or(text_member.font_size);
+                    // Convert bold/italic/underline to font_style: bit 0 = bold, bit 1 = italic, bit 2 = underline
+                    let style = (if first_style.bold { 1u8 } else { 0 })
+                        | (if first_style.italic { 2u8 } else { 0 })
+                        | (if first_style.underline { 4u8 } else { 0 });
+                    (name, size, Some(style))
+                } else {
+                    (text_member.font.clone(), text_member.font_size, None)
+                };
+
+                web_sys::console::log_1(&format!(
+                    "🔤 Text member font request: name='{}', size={}, style={:?}",
+                    font_name, font_size, font_style
+                ).into());
+
+                // Try to load font with specified style first
+                let mut font_opt = get_or_load_font(
                     &mut player.font_manager,
                     &player.movie.cast_manager,
-                    &text_member.font,
-                    Some(text_member.font_size),
-                    None,
+                    &font_name,
+                    Some(font_size),
+                    font_style,
                 );
+
+                // If not found with style, try without style
+                if font_opt.is_none() && font_style.is_some() {
+                    web_sys::console::log_1(&format!(
+                        "⚠️ Font not found with style, trying without style..."
+                    ).into());
+                    font_opt = get_or_load_font(
+                        &mut player.font_manager,
+                        &player.movie.cast_manager,
+                        &font_name,
+                        Some(font_size),
+                        None,
+                    );
+                }
+
+                // If still not found with size, try without size
+                if font_opt.is_none() {
+                    web_sys::console::log_1(&format!(
+                        "⚠️ Font not found with size, trying without size..."
+                    ).into());
+                    font_opt = get_or_load_font(
+                        &mut player.font_manager,
+                        &player.movie.cast_manager,
+                        &font_name,
+                        None,
+                        None,
+                    );
+                }
+
+                if let Some(ref font) = font_opt {
+                    web_sys::console::log_1(&format!(
+                        "✅ Using font: name='{}', size={}, style={}",
+                        font.font_name, font.font_size, font.font_style
+                    ).into());
+                }
 
                 if let Some(font) = font_opt {
                     let font_bitmap = player.bitmap_manager.get_bitmap(font.bitmap_ref).unwrap();
@@ -1180,21 +1257,110 @@ pub fn render_score_to_bitmap_with_offset(
                         mask_image: None,
                         is_text_rendering: true,
                         rotation: 0.0,
+                        skew: 0.0,
                         sprite: None,
                         original_dst_rect: None,
                     };
 
-                    bitmap.draw_text(
-                        &text_member.text,
-                        &font,
-                        font_bitmap,
-                        sprite.loc_h,
-                        sprite.loc_v,
-                        params,
-                        &palettes,
-                        text_member.fixed_line_space,
-                        text_member.top_spacing,
-                    );
+                    // Use styled text rendering if html_styled_spans is populated
+                    // BUT only use native rendering if the font is NOT a PFR bitmap font
+                    // PFR fonts can't be used by Canvas2D, so we must use bitmap rendering
+                    let is_pfr_font = font.char_widths.is_some();
+                    if !text_member.html_styled_spans.is_empty() && !is_pfr_font {
+                        // Parse alignment from text_member
+                        let alignment = match text_member.alignment.to_lowercase().as_str() {
+                            "center" | "#center" => TextAlignment::Center,
+                            "right" | "#right" => TextAlignment::Right,
+                            "justify" | "#justify" => TextAlignment::Justify,
+                            _ => TextAlignment::Left,
+                        };
+
+                        let initial_span_size = text_member
+                            .html_styled_spans
+                            .first()
+                            .and_then(|s| s.style.font_size)
+                            .unwrap_or(0);
+                        let should_override_span_sizes = text_member.font_size > 0
+                            && (text_member.font_size as i32) != initial_span_size;
+
+                        // Clone spans and apply text member runtime overrides when needed.
+                        // The movie can set font, fontSize, fontStyle at runtime, so these
+                        // should override whatever was in the original styled spans
+                        let spans_with_defaults: Vec<StyledSpan> = text_member.html_styled_spans.iter().map(|span| {
+                            let mut style = span.style.clone();
+
+                            // ALWAYS use text_member's font if set (movie may have changed it)
+                            if !text_member.font.is_empty() {
+                                style.font_face = Some(text_member.font.clone());
+                            } else if style.font_face.as_ref().map_or(true, |f| f.is_empty()) {
+                                style.font_face = Some("Arial".to_string());
+                            }
+
+                            // Preserve per-span sizes unless the movie changed fontSize at runtime.
+                            if should_override_span_sizes {
+                                style.font_size = Some(text_member.font_size as i32);
+                            } else if style.font_size.map_or(true, |s| s <= 0) {
+                                style.font_size = Some(12);
+                            }
+
+                            // Use sprite color if span doesn't have color
+                            if style.color.is_none() {
+                                style.color = match &sprite.color {
+                                    ColorRef::Rgb(r, g, b) => {
+                                        Some(((*r as u32) << 16) | ((*g as u32) << 8) | (*b as u32))
+                                    }
+                                    ColorRef::PaletteIndex(idx) => {
+                                        match *idx {
+                                            0 => Some(0xFFFFFF),
+                                            255 => Some(0x000000),
+                                            _ => Some(0x000000),
+                                        }
+                                    }
+                                };
+                            }
+
+                            // ALWAYS apply text_member's fontStyle (movie may have changed it)
+                            if !text_member.font_style.is_empty() {
+                                style.bold = text_member.font_style.iter().any(|s| s == "bold");
+                                style.italic = text_member.font_style.iter().any(|s| s == "italic");
+                                style.underline = text_member.font_style.iter().any(|s| s == "underline");
+                            }
+
+                            StyledSpan {
+                                text: span.text.clone(),
+                                style,
+                            }
+                        }).collect();
+
+                        // Use native browser text rendering for smooth, anti-aliased text
+                        if let Err(e) = FontMemberHandlers::render_native_text_to_bitmap(
+                            bitmap,
+                            &spans_with_defaults,
+                            draw_x,
+                            draw_y + text_member.top_spacing as i32,
+                            draw_w,
+                            draw_h,
+                            alignment,
+                            draw_w,
+                            text_member.word_wrap,
+                            None, // Color is now in the spans
+                            text_member.fixed_line_space,
+                        ) {
+                            console_warn!("Native text render error for Text member: {:?}", e);
+                        }
+                    } else {
+                        bitmap.draw_text(
+                            &text_member.text,
+                            &font,
+                            font_bitmap,
+                            draw_x,
+                            draw_y,
+                            params,
+                            &palettes,
+                            text_member.fixed_line_space,
+                            text_member.top_spacing,
+                        );
+                    }
                 }
             }
             CastMemberType::FilmLoop(film_loop) => {
@@ -1217,6 +1383,7 @@ pub fn render_score_to_bitmap_with_offset(
                     color,
                     bg_color,
                     rotation,
+                    skew,
                     logical_rect,
                     initial_rect,
                     current_frame,
@@ -1234,6 +1401,7 @@ pub fn render_score_to_bitmap_with_offset(
                         sprite.color.clone(),
                         sprite.bg_color.clone(),
                         sprite.rotation,
+                        sprite.skew,
                         rect, // logical rect
                         info_initial_rect,
                         film_loop.current_frame,
@@ -1315,6 +1483,7 @@ pub fn render_score_to_bitmap_with_offset(
                     mask_image: None,
                     is_text_rendering: false,
                     rotation,
+                    skew,
                     sprite: None,
                     original_dst_rect: Some(logical_rect),
                 };
@@ -1462,6 +1631,7 @@ fn draw_cursor(player: &mut DirPlayer, bitmap: &mut Bitmap, palettes: &PaletteMa
                 mask_image: mask.as_ref(),
                 is_text_rendering: false,
                 rotation: 0.0,
+                skew: 0.0,
                 sprite: None,
                 original_dst_rect: None,
             },
@@ -1707,6 +1877,7 @@ impl PlayerCanvasRenderer {
                 mask_image: None,
                 is_text_rendering: false,
                 rotation: 0.0,
+                skew: 0.0,
                 sprite: None,
                 original_dst_rect: None,
             };
@@ -1737,16 +1908,55 @@ impl PlayerCanvasRenderer {
             _ => {}
         }
     }
+
+    /// Get the backend name
+    pub fn backend_name(&self) -> &'static str {
+        "Canvas2D"
+    }
+}
+
+impl Renderer for PlayerCanvasRenderer {
+    fn draw_frame(&mut self, player: &mut DirPlayer) {
+        PlayerCanvasRenderer::draw_frame(self, player)
+    }
+
+    fn draw_preview_frame(&mut self, player: &mut DirPlayer) {
+        PlayerCanvasRenderer::draw_preview_frame(self, player)
+    }
+
+    fn set_size(&mut self, width: u32, height: u32) {
+        PlayerCanvasRenderer::set_size(self, width, height)
+    }
+
+    fn size(&self) -> (u32, u32) {
+        self.size
+    }
+
+    fn backend_name(&self) -> &'static str {
+        PlayerCanvasRenderer::backend_name(self)
+    }
+
+    fn canvas(&self) -> &web_sys::HtmlCanvasElement {
+        &self.canvas
+    }
+
+    fn set_preview_member_ref(&mut self, member_ref: Option<CastMemberRef>) {
+        self.preview_member_ref = member_ref;
+    }
+
+    fn set_preview_container_element(&mut self, container_element: Option<web_sys::HtmlElement>) {
+        PlayerCanvasRenderer::set_preview_container_element(self, container_element)
+    }
 }
 
 thread_local! {
-    pub static RENDERER_LOCK: RefCell<Option<PlayerCanvasRenderer>> = RefCell::new(None);
+    pub static RENDERER_LOCK: RefCell<Option<DynamicRenderer>> = RefCell::new(None);
 }
 
 #[allow(dead_code)]
-pub fn with_canvas_renderer_ref<F, R>(f: F) -> R
+pub fn with_renderer_ref<F, R>(f: F) -> R
 where
-    F: FnOnce(&PlayerCanvasRenderer) -> R,
+    F: FnOnce(&DynamicRenderer) -> R,
 {
     RENDERER_LOCK.with(|renderer_lock| {
         let renderer = renderer_lock.borrow();
@@ -1754,28 +1964,81 @@ where
     })
 }
 
-pub fn with_canvas_renderer_mut<F, R>(f: F) -> R
+pub fn with_renderer_mut<F, R>(f: F) -> R
 where
-    F: FnOnce(&mut Option<PlayerCanvasRenderer>) -> R,
+    F: FnOnce(&mut Option<DynamicRenderer>) -> R,
 {
     RENDERER_LOCK.with_borrow_mut(|renderer_lock| f(renderer_lock))
 }
 
+/// Helper to access Canvas2D renderer for Canvas2D-specific operations
+#[allow(dead_code)]
+pub fn with_canvas2d_renderer<F, R>(f: F) -> Option<R>
+where
+    F: FnOnce(&PlayerCanvasRenderer) -> R,
+{
+    RENDERER_LOCK.with(|renderer_lock| {
+        let renderer = renderer_lock.borrow();
+        if let Some(dynamic) = renderer.as_ref() {
+            if let Some(canvas2d) = dynamic.as_canvas2d() {
+                return Some(f(canvas2d));
+            }
+        }
+        None
+    })
+}
+
+/// Helper to access Canvas2D renderer mutably for Canvas2D-specific operations
+pub fn with_canvas2d_renderer_mut<F, R>(f: F) -> Option<R>
+where
+    F: FnOnce(&mut PlayerCanvasRenderer) -> R,
+{
+    RENDERER_LOCK.with_borrow_mut(|renderer_lock| {
+        if let Some(dynamic) = renderer_lock {
+            if let Some(canvas2d) = dynamic.as_canvas2d_mut() {
+                return Some(f(canvas2d));
+            }
+        }
+        None
+    })
+}
+
+/// Legacy helper - kept for backward compatibility with existing code
+/// Prefer using with_renderer_mut or with_canvas2d_renderer_mut
+#[allow(dead_code)]
+pub fn with_canvas_renderer_mut<F, R>(f: F) -> R
+where
+    F: FnOnce(&mut PlayerCanvasRenderer) -> R,
+    R: Default,
+{
+    with_canvas2d_renderer_mut(f).unwrap_or_default()
+}
+
 #[wasm_bindgen]
 pub fn player_set_preview_member_ref(cast_lib: i32, cast_num: i32) -> Result<(), JsValue> {
-    with_canvas_renderer_mut(|renderer| {
-        renderer.as_mut().unwrap().preview_member_ref = Some(CastMemberRef {
-            cast_lib,
-            cast_member: cast_num,
-        });
+    use crate::rendering_gpu::Renderer;
+    with_renderer_mut(|renderer_lock| {
+        if let Some(dynamic) = renderer_lock {
+            dynamic.set_preview_member_ref(Some(CastMemberRef {
+                cast_lib,
+                cast_member: cast_num,
+            }));
+        }
     });
     Ok(())
 }
 
 #[wasm_bindgen]
 pub fn player_set_debug_selected_channel(channel_num: i16) -> Result<(), JsValue> {
-    with_canvas_renderer_mut(|renderer| {
-        renderer.as_mut().unwrap().debug_selected_channel_num = Some(channel_num);
+    // Set on whichever renderer is active (Canvas2D or WebGL2)
+    with_renderer_mut(|renderer_lock| {
+        if let Some(dynamic) = renderer_lock {
+            if let Some(canvas2d) = dynamic.as_canvas2d_mut() {
+                canvas2d.debug_selected_channel_num = Some(channel_num);
+            } else if let Some(webgl2) = dynamic.as_webgl2_mut() {
+                webgl2.debug_selected_channel_num = Some(channel_num);
+            }
+        }
     });
     JsApi::dispatch_channel_changed(channel_num);
     Ok(())
@@ -1783,12 +2046,12 @@ pub fn player_set_debug_selected_channel(channel_num: i16) -> Result<(), JsValue
 
 #[wasm_bindgen]
 pub fn player_set_preview_parent(parent_selector: &str) -> Result<(), JsValue> {
+    use crate::rendering_gpu::Renderer;
     if parent_selector.is_empty() {
-        with_canvas_renderer_mut(|renderer| {
-            renderer
-                .as_mut()
-                .unwrap()
-                .set_preview_container_element(None);
+        with_renderer_mut(|renderer_lock| {
+            if let Some(dynamic) = renderer_lock {
+                dynamic.set_preview_container_element(None);
+            }
         });
         return Ok(());
     }
@@ -1801,14 +2064,151 @@ pub fn player_set_preview_parent(parent_selector: &str) -> Result<(), JsValue> {
         .unwrap()
         .dyn_into::<web_sys::HtmlElement>()?;
 
-    with_canvas_renderer_mut(|renderer| {
-        renderer
-            .as_mut()
-            .unwrap()
-            .set_preview_container_element(Some(parent_element));
+    with_renderer_mut(|renderer_lock| {
+        if let Some(dynamic) = renderer_lock {
+            dynamic.set_preview_container_element(Some(parent_element));
+        }
     });
 
     Ok(())
+}
+
+/// Helper to set pixel-perfect rendering styles on a canvas
+fn set_pixelated_canvas_style(canvas: &web_sys::HtmlCanvasElement) {
+    canvas
+        .style()
+        .set_property("image-rendering", "pixelated")
+        .unwrap_or(());
+    canvas
+        .style()
+        .set_property("image-rendering", "-moz-crisp-edges")
+        .unwrap_or(());
+    canvas
+        .style()
+        .set_property("image-rendering", "crisp-edges")
+        .unwrap_or(());
+}
+
+/// Create a Canvas2D renderer (fallback)
+fn create_canvas2d_renderer(
+    canvas_size: (u32, u32),
+) -> PlayerCanvasRenderer {
+    let canvas = web_sys::window()
+        .unwrap()
+        .document()
+        .unwrap()
+        .create_element("canvas")
+        .unwrap()
+        .dyn_into::<web_sys::HtmlCanvasElement>()
+        .unwrap();
+
+    let preview_canvas = web_sys::window()
+        .unwrap()
+        .document()
+        .unwrap()
+        .create_element("canvas")
+        .unwrap()
+        .dyn_into::<web_sys::HtmlCanvasElement>()
+        .unwrap();
+
+    canvas.set_width(canvas_size.0);
+    canvas.set_height(canvas_size.1);
+
+    preview_canvas.set_width(1);
+    preview_canvas.set_height(1);
+
+    set_pixelated_canvas_style(&canvas);
+    set_pixelated_canvas_style(&preview_canvas);
+
+    let ctx = canvas
+        .get_context("2d")
+        .unwrap()
+        .unwrap()
+        .dyn_into::<web_sys::CanvasRenderingContext2d>()
+        .unwrap();
+
+    let preview_ctx = preview_canvas
+        .get_context("2d")
+        .unwrap()
+        .unwrap()
+        .dyn_into::<web_sys::CanvasRenderingContext2d>()
+        .unwrap();
+
+    ctx.set_image_smoothing_enabled(false);
+    preview_ctx.set_image_smoothing_enabled(false);
+
+    PlayerCanvasRenderer {
+        container_element: None,
+        preview_container_element: None,
+        canvas,
+        preview_canvas,
+        ctx2d: ctx,
+        preview_ctx2d: preview_ctx,
+        size: canvas_size,
+        preview_size: (1, 1),
+        preview_member_ref: None,
+        debug_selected_channel_num: None,
+        bitmap: Bitmap::new(
+            1,
+            1,
+            32,
+            32,
+            0,
+            PaletteRef::BuiltIn(get_system_default_palette()),
+        ),
+    }
+}
+
+/// Try to create a WebGL2 renderer, returns None if not supported or fails
+fn try_create_webgl2_renderer(
+    canvas_size: (u32, u32),
+) -> Option<crate::rendering_gpu::webgl2::WebGL2Renderer> {
+    use crate::rendering_gpu::webgl2::WebGL2Renderer;
+
+    // Check if WebGL2 is supported
+    if !crate::rendering_gpu::is_webgl2_supported() {
+        console::log_1(&"WebGL2 not supported, falling back to Canvas2D".into());
+        return None;
+    }
+
+    // Create canvases for WebGL2
+    let canvas = web_sys::window()
+        .unwrap()
+        .document()
+        .unwrap()
+        .create_element("canvas")
+        .ok()?
+        .dyn_into::<web_sys::HtmlCanvasElement>()
+        .ok()?;
+
+    let preview_canvas = web_sys::window()
+        .unwrap()
+        .document()
+        .unwrap()
+        .create_element("canvas")
+        .ok()?
+        .dyn_into::<web_sys::HtmlCanvasElement>()
+        .ok()?;
+
+    canvas.set_width(canvas_size.0);
+    canvas.set_height(canvas_size.1);
+    preview_canvas.set_width(1);
+    preview_canvas.set_height(1);
+
+    set_pixelated_canvas_style(&canvas);
+    set_pixelated_canvas_style(&preview_canvas);
+
+    // Try to create the WebGL2 renderer
+    match WebGL2Renderer::new(canvas, preview_canvas) {
+        Ok(renderer) => {
+            console::log_1(&"WebGL2 renderer created successfully".into());
+            Some(renderer)
+        }
+        Err(e) => {
+            console::warn_1(&format!("Failed to create WebGL2 renderer: {:?}, falling back to Canvas2D", e).into());
+            None
+        }
+    }
 }
 
 #[wasm_bindgen]
@@ -1823,26 +2223,8 @@ pub fn player_create_canvas() -> Result<(), JsValue> {
         .dyn_into::<web_sys::HtmlElement>()?;
 
     // Create renderer if it doesn't exist
-    with_canvas_renderer_mut(|renderer_lock| {
+    with_renderer_mut(|renderer_lock| {
         if renderer_lock.is_none() {
-            let canvas = web_sys::window()
-                .unwrap()
-                .document()
-                .unwrap()
-                .create_element("canvas")
-                .unwrap()
-                .dyn_into::<web_sys::HtmlCanvasElement>()
-                .unwrap();
-
-            let preview_canvas = web_sys::window()
-                .unwrap()
-                .document()
-                .unwrap()
-                .create_element("canvas")
-                .unwrap()
-                .dyn_into::<web_sys::HtmlCanvasElement>()
-                .unwrap();
-
             let canvas_size = reserve_player_ref(|player| {
                 (
                     player.movie.rect.width() as u32,
@@ -1850,88 +2232,36 @@ pub fn player_create_canvas() -> Result<(), JsValue> {
                 )
             });
 
-            canvas.set_width(canvas_size.0);
-            canvas.set_height(canvas_size.1);
-
-            preview_canvas.set_width(1);
-            preview_canvas.set_height(1);
-
-            canvas
-                .style()
-                .set_property("image-rendering", "pixelated")
-                .unwrap_or(());
-            canvas
-                .style()
-                .set_property("image-rendering", "-moz-crisp-edges")
-                .unwrap_or(());
-            canvas
-                .style()
-                .set_property("image-rendering", "crisp-edges")
-                .unwrap_or(());
-
-            preview_canvas
-                .style()
-                .set_property("image-rendering", "pixelated")
-                .unwrap_or(());
-            preview_canvas
-                .style()
-                .set_property("image-rendering", "-moz-crisp-edges")
-                .unwrap_or(());
-            preview_canvas
-                .style()
-                .set_property("image-rendering", "crisp-edges")
-                .unwrap_or(());
-
-            let ctx = canvas
-                .get_context("2d")
-                .unwrap()
-                .unwrap()
-                .dyn_into::<web_sys::CanvasRenderingContext2d>()
-                .unwrap();
-
-            let preview_ctx = preview_canvas
-                .get_context("2d")
-                .unwrap()
-                .unwrap()
-                .dyn_into::<web_sys::CanvasRenderingContext2d>()
-                .unwrap();
-
-            ctx.set_image_smoothing_enabled(false);
-            preview_ctx.set_image_smoothing_enabled(false);
-
-            let renderer = PlayerCanvasRenderer {
-                container_element: None,
-                preview_container_element: None,
-                canvas,
-                preview_canvas,
-                ctx2d: ctx,
-                preview_ctx2d: preview_ctx,
-                size: canvas_size,
-                preview_size: (1, 1),
-                preview_member_ref: None,
-                debug_selected_channel_num: None,
-                bitmap: Bitmap::new(
-                    1,
-                    1,
-                    32,
-                    32,
-                    0,
-                    PaletteRef::BuiltIn(get_system_default_palette()),
-                ),
+            // Try WebGL2 first, fall back to Canvas2D
+            let dynamic_renderer = if let Some(webgl2_renderer) = try_create_webgl2_renderer(canvas_size) {
+                DynamicRenderer::WebGL2(webgl2_renderer)
+            } else {
+                DynamicRenderer::Canvas2D(create_canvas2d_renderer(canvas_size))
             };
 
-            *renderer_lock = Some(renderer);
+            *renderer_lock = Some(dynamic_renderer);
             spawn_local(async {
                 run_draw_loop().await;
             });
         }
     });
 
-    with_canvas_renderer_mut(|renderer| {
-        renderer
-            .as_mut()
-            .unwrap()
-            .set_container_element(container_element);
+    // Set container element - need to handle both renderer types
+    with_renderer_mut(|renderer_lock| {
+        if let Some(renderer) = renderer_lock {
+            match renderer {
+                DynamicRenderer::Canvas2D(canvas_renderer) => {
+                    canvas_renderer.set_container_element(container_element.clone());
+                }
+                DynamicRenderer::WebGL2(webgl_renderer) => {
+                    // For WebGL2, we need to append the canvas to the container
+                    if webgl_renderer.canvas().parent_node().is_some() {
+                        webgl_renderer.canvas().remove();
+                    }
+                    container_element.append_child(webgl_renderer.canvas()).unwrap();
+                }
+            }
+        }
     });
 
     Ok(())
@@ -1955,10 +2285,11 @@ async fn run_draw_loop() {
 
         if Local::now().timestamp_millis() - last_frame_ms >= 1000 / draw_fps as i64 {
             last_frame_ms = Local::now().timestamp_millis();
-            with_canvas_renderer_mut(|renderer| {
-                let renderer = renderer.as_mut().unwrap();
-                renderer.draw_frame(&mut player);
-                renderer.draw_preview_frame(&mut player);
+            with_renderer_mut(|renderer_lock| {
+                if let Some(renderer) = renderer_lock {
+                    renderer.draw_frame(&mut player);
+                    renderer.draw_preview_frame(&mut player);
+                }
             });
         }
 

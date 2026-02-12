@@ -10,7 +10,7 @@ use crate::{
         bitmap::palette_map::PaletteMap,
         cast_lib::CastMemberRef,
         font::{
-            bitmap_font_copy_char, get_text_index_at_pos, measure_text, BitmapFont, DrawTextParams,
+            bitmap_font_copy_char, bitmap_font_copy_char_scaled, get_text_index_at_pos, measure_text, BitmapFont, DrawTextParams,
         },
         handlers::datum_handlers::{
             cast_member_ref::borrow_member_mut, string_chunk::StringChunkUtils,
@@ -23,6 +23,7 @@ use crate::player::cast_member::CastMemberType;
 use crate::player::ColorRef;
 use std::borrow::Borrow;
 use std::convert::TryInto;
+use wasm_bindgen::JsCast;
 
 // Simple HTML parser without external dependencies
 #[derive(Clone, Debug)]
@@ -34,6 +35,8 @@ pub struct HtmlStyle {
     pub bold: bool,
     pub italic: bool,
     pub underline: bool,
+    pub kerning: i32,       // Kerning amount (from XMED Section 7 dword98, stored as fixed-point * 65536)
+    pub char_spacing: i32,  // Character spacing in pixels (from XMED Section 7 dword9C, stored as fixed-point * 65536)
 }
 
 impl Default for HtmlStyle {
@@ -46,6 +49,8 @@ impl Default for HtmlStyle {
             bold: false,
             italic: false,
             underline: false,
+            kerning: 0,
+            char_spacing: 0,
         }
     }
 }
@@ -61,6 +66,7 @@ pub enum TextAlignment {
     Left,
     Center,
     Right,
+    Justify,
 }
 
 pub struct HtmlParser;
@@ -126,6 +132,8 @@ impl HtmlParser {
         let mut pos = 0;
         let mut style_stack = vec![current_style];
         let chars: Vec<char> = html.chars().collect();
+        // Track depth inside non-content tags (head, title, script, style)
+        let mut skip_content_depth = 0;
 
         while pos < chars.len() {
             if chars[pos] == '<' {
@@ -136,52 +144,81 @@ impl HtmlParser {
 
                     // Handle closing tags
                     if tag.starts_with('/') {
-                        if style_stack.len() > 1 {
+                        let closing_tag = tag_lower[1..].split_whitespace().next().unwrap_or("");
+                        // Check if closing a non-content tag
+                        if closing_tag == "head" || closing_tag == "title" || closing_tag == "script" || closing_tag == "style" {
+                            if skip_content_depth > 0 {
+                                skip_content_depth -= 1;
+                            }
+                        } else if skip_content_depth == 0 && style_stack.len() > 1 {
                             style_stack.pop();
                         }
                     } else {
                         // Handle opening tags
                         let mut new_style = style_stack.last().unwrap().clone();
 
-                        match tag_lower.split_whitespace().next().unwrap_or("") {
-                            "font" => {
-                                if let Some(face) = Self::extract_tag_attr(&tag, "face") {
-                                    new_style.font_face = Some(face);
-                                }
-                                if let Some(size_str) = Self::extract_tag_attr(&tag, "size") {
-                                    if let Ok(size) = size_str.parse::<i32>() {
-                                        new_style.font_size = Some(size);
+                        // Get the tag name, handling self-closing tags like <br/> or <br />
+                        let tag_name = tag_lower.split_whitespace().next().unwrap_or("")
+                            .trim_end_matches('/');
+
+                        // Check if entering a non-content tag
+                        if tag_name == "head" || tag_name == "title" || tag_name == "script" || tag_name == "style" {
+                            skip_content_depth += 1;
+                        } else if skip_content_depth == 0 {
+                            // Only process content tags when not inside non-content section
+                            match tag_name {
+                                "font" => {
+                                    if let Some(face) = Self::extract_tag_attr(&tag, "face") {
+                                        new_style.font_face = Some(face);
+                                    }
+                                    if let Some(size_str) = Self::extract_tag_attr(&tag, "size") {
+                                        if let Ok(size) = size_str.parse::<i32>() {
+                                            new_style.font_size = Some(size);
+                                        }
+                                    }
+                                    if let Some(color_str) = Self::extract_tag_attr(&tag, "color") {
+                                        if let Some(color) = Self::parse_color(&color_str) {
+                                            new_style.color = Some(color);
+                                        }
                                     }
                                 }
-                                if let Some(color_str) = Self::extract_tag_attr(&tag, "color") {
-                                    if let Some(color) = Self::parse_color(&color_str) {
-                                        new_style.color = Some(color);
-                                    }
-                                }
-                            }
-                            "b" | "strong" => new_style.bold = true,
-                            "i" | "em" => new_style.italic = true,
-                            "u" => new_style.underline = true,
-                            "br" => {
-                                spans.push(StyledSpan {
-                                    text: "\n".to_string(),
-                                    style: new_style.clone(),
-                                });
-                            }
-                            "center" => {
-                                if !spans.is_empty() && !spans.last().unwrap().text.ends_with('\n')
-                                {
+                                "b" | "strong" => new_style.bold = true,
+                                "i" | "em" => new_style.italic = true,
+                                "u" => new_style.underline = true,
+                                "br" => {
                                     spans.push(StyledSpan {
                                         text: "\n".to_string(),
                                         style: new_style.clone(),
                                     });
                                 }
+                                "p" => {
+                                    // Handle paragraph tag - may have align attribute
+                                    // Add newline before paragraph if not at start
+                                    if !spans.is_empty() && !spans.last().unwrap().text.ends_with('\n')
+                                    {
+                                        spans.push(StyledSpan {
+                                            text: "\n".to_string(),
+                                            style: new_style.clone(),
+                                        });
+                                    }
+                                }
+                                "center" => {
+                                    if !spans.is_empty() && !spans.last().unwrap().text.ends_with('\n')
+                                    {
+                                        spans.push(StyledSpan {
+                                            text: "\n".to_string(),
+                                            style: new_style.clone(),
+                                        });
+                                    }
+                                }
+                                // Skip structural tags that don't affect content
+                                "html" | "body" | "!doctype" => {}
+                                _ => {}
                             }
-                            _ => {}
-                        }
 
-                        if !tag.ends_with('/') && tag_lower != "br" {
-                            style_stack.push(new_style);
+                            if !tag.ends_with('/') && tag_name != "br" {
+                                style_stack.push(new_style);
+                            }
                         }
                     }
 
@@ -190,14 +227,15 @@ impl HtmlParser {
                 }
             }
 
-            // Collect text content
+            // Collect text content (only if not inside non-content tags)
             let mut text = String::new();
             while pos < chars.len() && chars[pos] != '<' {
                 text.push(chars[pos]);
                 pos += 1;
             }
 
-            if !text.trim().is_empty() {
+            // Only add text if not inside head/title/script/style and text is not empty
+            if skip_content_depth == 0 && !text.is_empty() {
                 spans.push(StyledSpan {
                     text,
                     style: style_stack.last().unwrap().clone(),
@@ -206,7 +244,7 @@ impl HtmlParser {
         }
     }
 
-    fn extract_tag_attr(tag: &str, attr: &str) -> Option<String> {
+    pub fn extract_tag_attr(tag: &str, attr: &str) -> Option<String> {
         let lower = tag.to_lowercase();
         let attr_pattern = format!("{}=", attr.to_lowercase());
 
@@ -360,65 +398,602 @@ impl FontMemberHandlers {
         start_y: i32,
         params: CopyPixelsParams,
     ) -> Result<(), ScriptError> {
-        let mut x = start_x;
-        let mut y = start_y;
-        let line_height = if fixed_line_space > 0 {
-            fixed_line_space as i32
+        // Call the extended version with default alignment and no word wrap
+        Self::render_html_text_to_bitmap_styled(
+            bitmap,
+            spans,
+            font,
+            font_bitmap,
+            palettes,
+            fixed_line_space,
+            start_x,
+            start_y,
+            params,
+            TextAlignment::Left,
+            0,     // max_width = 0 means no limit
+            false, // word_wrap
+        )
+    }
+
+    /// Render styled text using browser's native Canvas2D fillText() for smooth, anti-aliased text
+    /// This produces much better quality than bitmap font scaling
+    /// Returns the rendered text as RGBA pixel data that can be composited onto the destination
+    /// sprite_color: Optional sprite foreground color that overrides the styled span color
+    pub fn render_native_text_to_bitmap(
+        bitmap: &mut Bitmap,
+        spans: &[StyledSpan],
+        start_x: i32,
+        start_y: i32,
+        render_width: i32,
+        render_height: i32,
+        alignment: TextAlignment,
+        max_width: i32,
+        word_wrap: bool,
+        sprite_color: Option<&ColorRef>,
+        fixed_line_space: u16,
+    ) -> Result<(), ScriptError> {
+        // Create temporary canvas for text rendering (size of text area only)
+        let document = web_sys::window()
+            .ok_or_else(|| ScriptError::new("No window".to_string()))?
+            .document()
+            .ok_or_else(|| ScriptError::new("No document".to_string()))?;
+
+        let canvas: web_sys::HtmlCanvasElement = document
+            .create_element("canvas")
+            .map_err(|_| ScriptError::new("Failed to create canvas".to_string()))?
+            .dyn_into()
+            .map_err(|_| ScriptError::new("Failed to cast canvas".to_string()))?;
+
+        let canvas_width = render_width.max(1) as u32;
+        let canvas_height = render_height.max(1) as u32;
+        canvas.set_width(canvas_width);
+        canvas.set_height(canvas_height);
+
+        let ctx: web_sys::CanvasRenderingContext2d = canvas
+            .get_context("2d")
+            .map_err(|_| ScriptError::new("Failed to get 2d context".to_string()))?
+            .ok_or_else(|| ScriptError::new("No 2d context".to_string()))?
+            .dyn_into()
+            .map_err(|_| ScriptError::new("Failed to cast context".to_string()))?;
+
+        // Clear canvas to transparent (don't fill with white)
+        // The browser's fillText will render with proper alpha for anti-aliasing
+        ctx.clear_rect(0.0, 0.0, canvas_width as f64, canvas_height as f64);
+
+        // Set text baseline to top for consistent positioning
+        ctx.set_text_baseline("top");
+
+        #[derive(Clone)]
+        struct NativeSegmentStyle {
+            font: String,
+            size_px: f64,
+            underline: bool,
+            color: (u8, u8, u8),
+        }
+
+        #[derive(Clone)]
+        struct NativeSegment {
+            text: String,
+            width: f64,
+            style: NativeSegmentStyle,
+        }
+
+        #[derive(Default)]
+        struct NativeLine {
+            segments: Vec<NativeSegment>,
+            width: f64,
+            max_font_px: f64,
+        }
+
+        let fallback_color = if let Some(color_ref) = sprite_color {
+            match color_ref {
+                ColorRef::Rgb(r, g, b) => (*r, *g, *b),
+                ColorRef::PaletteIndex(idx) => match *idx {
+                    0 => (255, 255, 255),
+                    255 => (0, 0, 0),
+                    _ => (0, 0, 0),
+                },
+            }
         } else {
-            font.char_height as i32
+            (0, 0, 0)
+        };
+
+        let style_from_html = |style: &HtmlStyle| -> NativeSegmentStyle {
+            let size_px = style.font_size.filter(|s| *s > 0).unwrap_or(12) as f64;
+            let font_face = style
+                .font_face
+                .clone()
+                .filter(|f| !f.is_empty())
+                .unwrap_or_else(|| "Arial".to_string());
+            let mut font_parts: Vec<String> = Vec::new();
+            if style.bold {
+                font_parts.push("bold".to_string());
+            }
+            if style.italic {
+                font_parts.push("italic".to_string());
+            }
+            font_parts.push(format!("{}px", size_px as i32));
+            font_parts.push(font_face);
+
+            let color = if let Some(c) = style.color {
+                (((c >> 16) & 0xFF) as u8, ((c >> 8) & 0xFF) as u8, (c & 0xFF) as u8)
+            } else {
+                fallback_color
+            };
+
+            NativeSegmentStyle {
+                font: font_parts.join(" "),
+                size_px,
+                underline: style.underline,
+                color,
+            }
+        };
+
+        let mut lines: Vec<NativeLine> = Vec::new();
+        let mut current_line = NativeLine::default();
+        let wrap_width = if word_wrap && max_width > 0 {
+            max_width as f64
+        } else {
+            f64::MAX
+        };
+
+        let mut push_line = |line: &mut NativeLine, lines_out: &mut Vec<NativeLine>| {
+            lines_out.push(std::mem::take(line));
         };
 
         for span in spans {
+            if span.text.is_empty() {
+                continue;
+            }
+            let seg_style = style_from_html(&span.style);
+
+            let mut token = String::new();
+            let mut token_is_ws: Option<bool> = None;
+
+            let mut flush_token = |token_text: &mut String,
+                                   is_ws: Option<bool>,
+                                   line: &mut NativeLine,
+                                   lines_out: &mut Vec<NativeLine>,
+                                   style: &NativeSegmentStyle| {
+                if token_text.is_empty() {
+                    return;
+                }
+                let is_whitespace = is_ws.unwrap_or(false);
+                ctx.set_font(&style.font);
+                // Keep width estimation deterministic; some web-sys builds do not expose
+                // CanvasRenderingContext2d::measure_text.
+                let token_width = token_text.chars().count() as f64 * (style.size_px * 0.55);
+
+                if line.width + token_width > wrap_width
+                    && !line.segments.is_empty()
+                    && !is_whitespace
+                {
+                    lines_out.push(std::mem::take(line));
+                }
+
+                if !(is_whitespace && line.segments.is_empty()) {
+                    line.max_font_px = line.max_font_px.max(style.size_px);
+                    line.width += token_width;
+                    line.segments.push(NativeSegment {
+                        text: token_text.clone(),
+                        width: token_width,
+                        style: style.clone(),
+                    });
+                }
+
+                token_text.clear();
+            };
+
+            let mut prev_was_cr = false;
             for ch in span.text.chars() {
-                if ch == '\n' || ch == '\r' {
-                    x = start_x;
-                    y += line_height;
+                // Director (Mac origin) uses \r for line breaks.
+                // Handle \r, \n, and \r\n without double-breaking.
+                if ch == '\n' && prev_was_cr {
+                    // Skip \n after \r (already broke on \r)
+                    prev_was_cr = false;
+                    continue;
+                }
+                prev_was_cr = ch == '\r';
+                if ch == '\r' || ch == '\n' {
+                    flush_token(
+                        &mut token,
+                        token_is_ws,
+                        &mut current_line,
+                        &mut lines,
+                        &seg_style,
+                    );
+                    token_is_ws = None;
+                    push_line(&mut current_line, &mut lines);
                     continue;
                 }
 
-                if ch < ' ' {
+                let is_ws = ch.is_whitespace();
+                if token_is_ws != Some(is_ws) && !token.is_empty() {
+                    flush_token(
+                        &mut token,
+                        token_is_ws,
+                        &mut current_line,
+                        &mut lines,
+                        &seg_style,
+                    );
+                }
+                token_is_ws = Some(is_ws);
+                token.push(ch);
+            }
+
+            flush_token(
+                &mut token,
+                token_is_ws,
+                &mut current_line,
+                &mut lines,
+                &seg_style,
+            );
+        }
+
+        if !current_line.segments.is_empty() || lines.is_empty() {
+            lines.push(current_line);
+        }
+
+        let mut y = 0.0;
+        for line in &lines {
+            if y >= canvas_height as f64 {
+                break;
+            }
+
+            let x_start = match alignment {
+                TextAlignment::Left => 0.0,
+                TextAlignment::Center => {
+                    if max_width > 0 {
+                        ((max_width as f64) - line.width) / 2.0
+                    } else {
+                        0.0
+                    }
+                }
+                TextAlignment::Right => {
+                    if max_width > 0 {
+                        (max_width as f64) - line.width
+                    } else {
+                        0.0
+                    }
+                }
+                TextAlignment::Justify => 0.0,
+            };
+
+            let mut x = x_start.max(0.0);
+            for segment in &line.segments {
+                let (r, g, b) = segment.style.color;
+                ctx.set_font(&segment.style.font);
+                ctx.set_fill_style_str(&format!("rgb({},{},{})", r, g, b));
+                let _ = ctx.fill_text(&segment.text, x, y);
+
+                if segment.style.underline {
+                    let underline_y = y + segment.style.size_px - 1.0;
+                    ctx.begin_path();
+                    ctx.move_to(x, underline_y);
+                    ctx.line_to(x + segment.width, underline_y);
+                    ctx.set_stroke_style_str(&format!("rgb({},{},{})", r, g, b));
+                    ctx.stroke();
+                }
+
+                x += segment.width;
+            }
+
+            let line_font_px = if line.max_font_px > 0.0 {
+                line.max_font_px
+            } else {
+                12.0
+            };
+            // fixedLineSpace is an absolute line step; when not set, fall back to line font height.
+            y += if fixed_line_space > 0 {
+                fixed_line_space as f64
+            } else {
+                line_font_px
+            };
+        }
+
+        // Get pixel data from canvas
+        let image_data = ctx
+            .get_image_data(0.0, 0.0, canvas_width as f64, canvas_height as f64)
+            .map_err(|_| ScriptError::new("Failed to get image data".to_string()))?;
+
+        let pixels = image_data.data();
+
+        // Copy pixels to bitmap, converting white to transparent
+        // This allows proper compositing with background
+        for cy in 0..canvas_height as i32 {
+            let dest_y = start_y + cy;
+            if dest_y < 0 || dest_y >= bitmap.height as i32 {
+                continue;
+            }
+
+            for cx in 0..canvas_width as i32 {
+                let dest_x = start_x + cx;
+                if dest_x < 0 || dest_x >= bitmap.width as i32 {
                     continue;
                 }
 
-                // Determine the color for this span
-                let fg_color = if let Some(rgb) = span.style.color {
-                    let r = ((rgb >> 16) & 0xFF) as u8;
-                    let g = ((rgb >> 8) & 0xFF) as u8;
-                    let b = (rgb & 0xFF) as u8;
-                    ColorRef::Rgb(r, g, b)
-                } else {
-                    // Use sprite's foreground color if no HTML color specified
-                    params.color.clone()
-                };
+                let src_idx = ((cy as usize * canvas_width as usize) + cx as usize) * 4;
+                let dest_idx = ((dest_y as usize * bitmap.width as usize) + dest_x as usize) * 4;
 
-                // For background, only set if HTML explicitly specifies it
-                // Otherwise use sprite's bg_color (which for matte ink should be transparent)
-                let bg_color = if let Some(rgb) = span.style.bg_color {
-                    let r = ((rgb >> 16) & 0xFF) as u8;
-                    let g = ((rgb >> 8) & 0xFF) as u8;
-                    let b = (rgb & 0xFF) as u8;
-                    ColorRef::Rgb(r, g, b)
-                } else {
-                    params.bg_color.clone()
-                };
-
-                if x >= bitmap.width as i32 {
-                    x = start_x;
-                    y += line_height;
+                if src_idx + 3 >= pixels.len() || dest_idx + 3 >= bitmap.data.len() {
+                    continue;
                 }
 
-                if y >= bitmap.height as i32 {
-                    break;
-                }
+                let r = pixels[src_idx];
+                let g = pixels[src_idx + 1];
+                let b = pixels[src_idx + 2];
+                let a = pixels[src_idx + 3];
 
-                // Draw single character using bitmap_font_copy_char
-                bitmap_font_copy_char(font, font_bitmap, ch as u8, bitmap, x, y, palettes, &params);
-
-                x += font.char_width as i32;
+                // Copy all pixels with their alpha channel from the browser's fillText
+                // Background pixels will have alpha=0, text pixels will have alpha>0
+                bitmap.data[dest_idx] = r;
+                bitmap.data[dest_idx + 1] = g;
+                bitmap.data[dest_idx + 2] = b;
+                bitmap.data[dest_idx + 3] = a;
             }
         }
 
         Ok(())
+    }
+
+    /// Word wrap helper for native text rendering
+    fn word_wrap_native_with_size(text: &str, max_width: f64, font_size: i32) -> Vec<String> {
+        let mut lines = Vec::new();
+        let words: Vec<&str> = text.split_whitespace().collect();
+
+        if words.is_empty() {
+            return vec![String::new()];
+        }
+
+        // Estimate char width: ~0.55x font height for proportional fonts
+        let char_width = font_size as f64 * 0.55;
+
+        let mut current_line = String::new();
+
+        for word in words {
+            let test_line = if current_line.is_empty() {
+                word.to_string()
+            } else {
+                format!("{} {}", current_line, word)
+            };
+
+            let width = test_line.chars().count() as f64 * char_width;
+
+            if width <= max_width || current_line.is_empty() {
+                current_line = test_line;
+            } else {
+                lines.push(current_line);
+                current_line = word.to_string();
+            }
+        }
+
+        if !current_line.is_empty() {
+            lines.push(current_line);
+        }
+
+        if lines.is_empty() {
+            lines.push(String::new());
+        }
+
+        lines
+    }
+
+    /// Extended text rendering with alignment, word wrap, and bold simulation
+    pub fn render_html_text_to_bitmap_styled(
+        bitmap: &mut Bitmap,
+        spans: &[StyledSpan],
+        font: &BitmapFont,
+        font_bitmap: &Bitmap,
+        palettes: &PaletteMap,
+        fixed_line_space: u16,
+        start_x: i32,
+        start_y: i32,
+        params: CopyPixelsParams,
+        alignment: TextAlignment,
+        max_width: i32,
+        word_wrap: bool,
+    ) -> Result<(), ScriptError> {
+        // Get style from first span (for bold/italic simulation and font size)
+        let first_style = spans.first().map(|s| &s.style);
+        let is_bold = first_style.map(|s| s.bold).unwrap_or(false);
+        let _is_italic = first_style.map(|s| s.italic).unwrap_or(false);
+        let is_underline = first_style.map(|s| s.underline).unwrap_or(false);
+
+        // Get requested font size from style
+        // Font size in points approximately equals pixel height at 96 DPI
+        let requested_font_size = first_style
+            .and_then(|s| s.font_size)
+            .unwrap_or(12) as i32; // Default to 12pt if not specified
+
+        // Scale based on actual character height vs requested pixel height
+        // The requested font_size (in points) should map to approximately that many pixels in height
+        let native_char_height = font.char_height.max(1) as i32;
+
+        // Calculate scale factor: requested_font_size / native_char_height
+        // This ensures a 12pt request scales the font to ~12 pixels tall
+        let scaled_char_height = requested_font_size;
+        let scaled_char_width = (font.char_width as i32 * requested_font_size) / native_char_height;
+
+        web_sys::console::log_1(&format!(
+            "ðŸ“ Font scaling: requested={}pt, native_char={}x{} -> scaled={}x{}",
+            requested_font_size,
+            font.char_width, font.char_height,
+            scaled_char_width, scaled_char_height
+        ).into());
+
+        // Use scaled dimensions for layout
+        let char_width = scaled_char_width.max(1);
+        let char_height = scaled_char_height.max(1);
+
+        let line_height = if fixed_line_space > 0 {
+            fixed_line_space as i32
+        } else {
+            char_height
+        };
+
+        // Collect all text into a single string for processing
+        let full_text: String = spans.iter().map(|s| s.text.as_str()).collect();
+
+        // Split text into lines (respecting existing line breaks)
+        let raw_lines: Vec<&str> = full_text.split(|c| c == '\n' || c == '\r').collect();
+
+        // Process lines with word wrap if enabled
+        let mut lines: Vec<String> = Vec::new();
+        for raw_line in raw_lines {
+            if word_wrap && max_width > 0 {
+                // Word wrap this line using scaled char width
+                let wrapped = Self::word_wrap_line(raw_line, char_width, max_width);
+                lines.extend(wrapped);
+            } else {
+                lines.push(raw_line.to_string());
+            }
+        }
+
+        // Render each line with alignment
+        let mut y = start_y;
+        for line in &lines {
+            if y >= bitmap.height as i32 {
+                break;
+            }
+
+            // Calculate line width using proportional per-character advances
+            let line_width: i32 = line.chars()
+                .map(|c| {
+                    let advance = font.get_char_advance(c as u8) as i32;
+                    (advance * requested_font_size) / native_char_height
+                })
+                .sum();
+
+            // Calculate x position based on alignment
+            let x = match alignment {
+                TextAlignment::Left => start_x,
+                TextAlignment::Center => {
+                    if max_width > 0 {
+                        start_x + (max_width - line_width) / 2
+                    } else {
+                        start_x
+                    }
+                }
+                TextAlignment::Right => {
+                    if max_width > 0 {
+                        start_x + max_width - line_width
+                    } else {
+                        start_x
+                    }
+                }
+                TextAlignment::Justify => start_x, // TODO: implement justify
+            };
+
+            // Render the line
+            let mut char_x = x;
+            for ch in line.chars() {
+                // Skip control characters
+                if ch < ' ' {
+                    continue;
+                }
+
+                // Calculate proportional advance for this character
+                let char_advance = ((font.get_char_advance(ch as u8) as i32) * requested_font_size / native_char_height).max(1);
+
+                // For space character, just advance position without drawing
+                if ch == ' ' {
+                    char_x += char_advance;
+                    continue;
+                }
+
+                if char_x >= bitmap.width as i32 {
+                    break;
+                }
+
+                // Draw the character with scaling (use full cell width for source mapping)
+                bitmap_font_copy_char_scaled(
+                    font, font_bitmap, ch as u8, bitmap,
+                    char_x, y, char_width, char_height,
+                    palettes, &params
+                );
+
+                // Simulate bold by drawing again with 1px offset
+                if is_bold {
+                    bitmap_font_copy_char_scaled(
+                        font, font_bitmap, ch as u8, bitmap,
+                        char_x + 1, y, char_width, char_height,
+                        palettes, &params
+                    );
+                }
+
+                // Draw underline at the bottom of the scaled character
+                if is_underline {
+                    let underline_y = y + char_height - 1;
+                    if underline_y < bitmap.height as i32 {
+                        for ux in char_x..(char_x + char_advance).min(bitmap.width as i32) {
+                            if ux >= 0 {
+                                let idx = (underline_y as usize * bitmap.width as usize + ux as usize) * 4;
+                                if idx + 3 < bitmap.data.len() {
+                                    // Draw underline pixel (use foreground color)
+                                    bitmap.data[idx] = 0;     // R
+                                    bitmap.data[idx + 1] = 0; // G
+                                    bitmap.data[idx + 2] = 0; // B
+                                    bitmap.data[idx + 3] = 255; // A
+                                }
+                            }
+                        }
+                    }
+                }
+
+                char_x += char_advance;
+            }
+
+            y += line_height;
+        }
+
+        Ok(())
+    }
+
+    /// Word wrap a single line to fit within max_width
+    fn word_wrap_line(text: &str, char_width: i32, max_width: i32) -> Vec<String> {
+        let mut lines = Vec::new();
+        let max_chars = (max_width / char_width).max(1) as usize;
+
+        let words: Vec<&str> = text.split_whitespace().collect();
+        let mut current_line = String::new();
+
+        for word in words {
+            let word_with_space = if current_line.is_empty() {
+                word.to_string()
+            } else {
+                format!(" {}", word)
+            };
+
+            if current_line.len() + word_with_space.len() <= max_chars {
+                current_line.push_str(&word_with_space);
+            } else {
+                if !current_line.is_empty() {
+                    lines.push(current_line);
+                    current_line = String::new();
+                }
+                // Handle very long words
+                if word.len() > max_chars {
+                    let mut remaining = word;
+                    while remaining.len() > max_chars {
+                        lines.push(remaining[..max_chars].to_string());
+                        remaining = &remaining[max_chars..];
+                    }
+                    current_line = remaining.to_string();
+                } else {
+                    current_line = word.to_string();
+                }
+            }
+        }
+
+        if !current_line.is_empty() {
+            lines.push(current_line);
+        }
+
+        if lines.is_empty() {
+            lines.push(String::new());
+        }
+
+        lines
     }
 
     // Convert RGB color to palette index without accessing private fields
@@ -567,6 +1142,7 @@ impl FontMemberHandlers {
                         mask_image: None,
                         is_text_rendering: true,
                         rotation: 0.0,
+                        skew: 0.0,
                         sprite: None,
                         original_dst_rect: None,
                     };
@@ -597,6 +1173,7 @@ impl FontMemberHandlers {
             "left" => Ok(TextAlignment::Left),
             "center" => Ok(TextAlignment::Center),
             "right" => Ok(TextAlignment::Right),
+            "justify" => Ok(TextAlignment::Justify),
             _ => Err(ScriptError::new(format!(
                 "Invalid alignment '{}'",
                 s
@@ -736,6 +1313,7 @@ impl FontMemberHandlers {
                                     mask_image: None,
                                     is_text_rendering: true,
                                     rotation: 0.0,
+                                    skew: 0.0,
                                     sprite: None,
                                     original_dst_rect: None,
                                 };
