@@ -667,6 +667,12 @@ impl BitmapDatumHandlers {
                     bitmap.palette_ref = PaletteRef::Member(member_ref);
                     Ok(())
                 }
+                Datum::PaletteRef(palette_ref) => {
+                    let palette_ref = palette_ref.to_owned();
+                    let bitmap = player.bitmap_manager.get_bitmap_mut(bitmap_ref).unwrap();
+                    bitmap.palette_ref = palette_ref;
+                    Ok(())
+                }
                 _ => Err(ScriptError::new(format!(
                     "Cannot set paletteRef to datum of type {}",
                     value.type_str()

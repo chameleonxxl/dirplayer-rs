@@ -158,6 +158,13 @@ impl BitmapMemberHandlers {
                             Ok(())
                         })?;
                     }
+                    Datum::PaletteRef(palette_ref) => {
+                        reserve_player_mut(|player| {
+                            let bitmap = player.bitmap_manager.get_bitmap_mut(bitmap_id).unwrap();
+                            bitmap.palette_ref = palette_ref;
+                            Ok(())
+                        })?;
+                    }
                     _ => {
                         return Err(ScriptError::new(format!(
                             "Cannot set bitmap member paletteRef to type {}",
