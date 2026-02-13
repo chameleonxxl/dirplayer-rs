@@ -140,7 +140,18 @@ pub fn script_get_prop_opt(
     }
 
     // Try to find the property on the current instance first
-    let prop_value = script_instance.properties.get(prop_name).map(|x| x.clone());
+    let key_index = script_instance
+        .properties
+        .keys()
+        .position(|k| k.to_lowercase() == prop_name.to_lowercase());
+    let prop_value = key_index.and_then(|index| {
+        script_instance
+            .properties
+            .values()
+            .nth(index)
+            .cloned()
+    });
+    // let prop_value = script_instance.properties.get(prop_name).map(|x| x.clone());
     if let Some(prop) = prop_value {
         return Some(prop);
     }
@@ -256,7 +267,16 @@ pub fn script_set_prop(
             let script_instance = player
                 .allocator
                 .get_script_instance_mut(&script_instance_ref);
-            if let Some(prop) = script_instance.properties.get_mut(prop_name) {
+            let prop_index = script_instance
+                .properties
+                .keys()
+                .position(|k| k.to_lowercase() == prop_name.to_lowercase());
+            if let Some(index) = prop_index {
+                let prop = script_instance
+                    .properties
+                    .values_mut()
+                    .nth(index)
+                    .unwrap();
                 *prop = value_ref.clone();
                 Ok(())
             } else {
