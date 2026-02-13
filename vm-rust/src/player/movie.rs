@@ -334,4 +334,15 @@ impl Movie {
         // So delay = 1000ms / tempo
         1000.0 / tempo as f64
     }
+
+    pub fn next_random_int(&mut self, max: i32) -> Option<i32> {
+        let seed = self.random_seed?;
+        let seed_u32 = seed as u32;
+
+        // Note: This does not match the Director implementation exactly - there is no public knowledge of the seed algorithm.
+        let next_seed = seed_u32.wrapping_mul(214013).wrapping_add(2531011);
+        self.random_seed = Some(next_seed as i32);
+        let value = (next_seed % (max as u32)) as i32 + 1;
+        Some(value)
+    }
 }
