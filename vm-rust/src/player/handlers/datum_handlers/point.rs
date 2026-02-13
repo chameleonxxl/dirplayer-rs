@@ -16,10 +16,27 @@ impl PointDatumHandlers {
             "getAt" => Self::get_at(datum, args),
             "setAt" => Self::set_at(datum, args),
             "inside" => Self::inside(datum, args),
+            "duplicate" => Self::duplicate(datum, args),
             _ => Err(ScriptError::new(format!(
                 "No handler {handler_name} for point"
             ))),
         }
+    }
+
+    pub fn duplicate(datum: &DatumRef, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+        reserve_player_mut(|player| {
+            let point_arr = match player.get_datum(datum) {
+                Datum::Point(arr) => arr,
+                _ => return Err(ScriptError::new("Cannot duplicate non-point".to_string())),
+            }.to_owned();
+
+            // Clone each component to create new datum refs
+            let new_arr: [DatumRef; 2] = [
+                player.alloc_datum(player.get_datum(&point_arr[0]).clone()),
+                player.alloc_datum(player.get_datum(&point_arr[1]).clone()),
+            ];
+            Ok(player.alloc_datum(Datum::Point(new_arr)))
+        })
     }
 
     pub fn inside(datum: &DatumRef, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
