@@ -2,6 +2,7 @@ use std::{collections::HashMap, path::Path, sync::Arc};
 
 use async_std::sync::Mutex;
 use manual_future::{ManualFuture, ManualFutureCompleter};
+use percent_encoding::percent_decode_str;
 use url::Url;
 
 use super::net_task::{fetch_net_task, NetResult, NetTask, NetTaskState};
@@ -119,6 +120,12 @@ impl NetManager {
     }
 
     pub fn preload_net_thing(&mut self, url: String) -> u32 {
+        // Normalize the URL by decoding percent-encoded characters
+        let url = percent_decode_str(&url)
+            .decode_utf8()
+            .map(|s| s.to_string())
+            .unwrap_or(url);
+
         // Check if the task already exists and return it if found
         if let Some(existing_task) = find_task_with_url(&self.tasks, &url) {
             return existing_task.id;
@@ -241,9 +248,13 @@ pub fn find_task_with_url<'a>(
     tasks: &'a HashMap<u32, NetTask>,
     url: &String,
 ) -> Option<&'a NetTask> {
+    let decoded_url = percent_decode_str(url)
+        .decode_utf8()
+        .map(|s| s.to_string())
+        .unwrap_or_else(|_| url.clone());
     tasks
         .iter()
-        .find(|(_, x)| x.url.as_str() == url)
+        .find(|(_, x)| x.url == decoded_url)
         .map(|x| x.1)
 }
 

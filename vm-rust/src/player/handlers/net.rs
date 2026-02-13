@@ -2,7 +2,7 @@ use crate::{
     director::lingo::datum::{datum_bool, Datum},
     player::{reserve_player_mut, DatumRef, ScriptError},
 };
-use percent_encoding::{percent_decode_str, utf8_percent_encode, NON_ALPHANUMERIC};
+use percent_encoding::{utf8_percent_encode, NON_ALPHANUMERIC};
 
 pub struct NetHandlers {}
 
@@ -31,14 +31,10 @@ impl NetHandlers {
 
     pub fn get_net_text(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
         reserve_player_mut(|player| {
-            let original_url = player.get_datum(&args[0]).string_value()?;
-
-            let url = percent_decode_str(&original_url)
-                .decode_utf8()
-                .map_err(|e| ScriptError::new(format!("Cannot decode URL: {}", e)))?
-                .to_string();
+            let url = player.get_datum(&args[0]).string_value()?;
 
             // TODO should the task be tagged as a text task?
+            // URL decoding is handled by preload_net_thing
             let task_id = player.net_manager.preload_net_thing(url);
             Ok(player.alloc_datum(Datum::Int(task_id as i32)))
         })
