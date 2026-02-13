@@ -112,32 +112,41 @@ impl XmlParserXtraInstance {
             let name_key = player.alloc_datum(Datum::Symbol("name".to_string()));
             let name_value = player.alloc_datum(Datum::String(node.name.clone()));
 
-            // Create #attributes property list
+            // Create #attributes property list and #attributeName/#attributeValue lists
             let attributes_key = player.alloc_datum(Datum::Symbol("attributes".to_string()));
             let mut attr_pairs: Vec<(DatumRef, DatumRef)> = Vec::new();
+            let mut attr_name_refs: Vec<DatumRef> = Vec::new();
+            let mut attr_value_refs: Vec<DatumRef> = Vec::new();
             for (attr_name, attr_value) in &node.attributes {
                 let attr_key = player.alloc_datum(Datum::Symbol(attr_name.clone()));
                 let attr_val = player.alloc_datum(Datum::String(attr_value.clone()));
                 attr_pairs.push((attr_key, attr_val));
+                attr_name_refs.push(player.alloc_datum(Datum::String(attr_name.clone())));
+                attr_value_refs.push(player.alloc_datum(Datum::String(attr_value.clone())));
             }
             let attributes_value = player.alloc_datum(Datum::PropList(attr_pairs, false));
+            let attr_name_key = player.alloc_datum(Datum::Symbol("attributeName".to_string()));
+            let attr_name_value = player.alloc_datum(Datum::List(DatumType::List, attr_name_refs, false));
+            let attr_value_key = player.alloc_datum(Datum::Symbol("attributeValue".to_string()));
+            let attr_value_value = player.alloc_datum(Datum::List(DatumType::List, attr_value_refs, false));
 
-            // Create #children list
-            let children_key = player.alloc_datum(Datum::Symbol("children".to_string()));
+            // Create #child list and collect #charData
+            let child_key = player.alloc_datum(Datum::Symbol("child".to_string()));
             let mut children_refs: Vec<DatumRef> = Vec::new();
+            let mut char_data = String::new();
 
             for child in &node.children {
                 match child {
                     XmlNodeChild::Element(child_node) => {
-                        // Recursively convert child elements
-                        // We need to drop the player borrow before recursing
                         let child_ref = Self::node_to_prop_list_inner(player, child_node)?;
                         children_refs.push(child_ref);
                     }
                     XmlNodeChild::Text(text) => {
-                        // Text nodes are added as strings directly to children
-                        let text_ref = player.alloc_datum(Datum::String(text.clone()));
-                        children_refs.push(text_ref);
+                        char_data.push_str(text);
+                        if !text.trim().is_empty() {
+                            let text_ref = Self::text_node_to_prop_list_inner(player, text);
+                            children_refs.push(text_ref);
+                        }
                     }
                 }
             }
@@ -145,12 +154,17 @@ impl XmlParserXtraInstance {
             let children_value =
                 player.alloc_datum(Datum::List(DatumType::List, children_refs, false));
 
-            // Build the property list: [#name: "tagname", #attributes: [:], #children: [...]]
+            let chardata_key = player.alloc_datum(Datum::Symbol("charData".to_string()));
+            let chardata_value = player.alloc_datum(Datum::String(char_data));
+
             let prop_list = Datum::PropList(
                 vec![
                     (name_key, name_value),
                     (attributes_key, attributes_value),
-                    (children_key, children_value),
+                    (attr_name_key, attr_name_value),
+                    (attr_value_key, attr_value_value),
+                    (child_key, children_value),
+                    (chardata_key, chardata_value),
                 ],
                 false,
             );
@@ -168,19 +182,28 @@ impl XmlParserXtraInstance {
         let name_key = player.alloc_datum(Datum::Symbol("name".to_string()));
         let name_value = player.alloc_datum(Datum::String(node.name.clone()));
 
-        // Create #attributes property list
+        // Create #attributes property list and #attributeName/#attributeValue lists
         let attributes_key = player.alloc_datum(Datum::Symbol("attributes".to_string()));
         let mut attr_pairs: Vec<(DatumRef, DatumRef)> = Vec::new();
+        let mut attr_name_refs: Vec<DatumRef> = Vec::new();
+        let mut attr_value_refs: Vec<DatumRef> = Vec::new();
         for (attr_name, attr_value) in &node.attributes {
             let attr_key = player.alloc_datum(Datum::Symbol(attr_name.clone()));
             let attr_val = player.alloc_datum(Datum::String(attr_value.clone()));
             attr_pairs.push((attr_key, attr_val));
+            attr_name_refs.push(player.alloc_datum(Datum::String(attr_name.clone())));
+            attr_value_refs.push(player.alloc_datum(Datum::String(attr_value.clone())));
         }
         let attributes_value = player.alloc_datum(Datum::PropList(attr_pairs, false));
+        let attr_name_key = player.alloc_datum(Datum::Symbol("attributeName".to_string()));
+        let attr_name_value = player.alloc_datum(Datum::List(DatumType::List, attr_name_refs, false));
+        let attr_value_key = player.alloc_datum(Datum::Symbol("attributeValue".to_string()));
+        let attr_value_value = player.alloc_datum(Datum::List(DatumType::List, attr_value_refs, false));
 
-        // Create #children list
-        let children_key = player.alloc_datum(Datum::Symbol("children".to_string()));
+        // Create #child list and collect #charData
+        let child_key = player.alloc_datum(Datum::Symbol("child".to_string()));
         let mut children_refs: Vec<DatumRef> = Vec::new();
+        let mut char_data = String::new();
 
         for child in &node.children {
             match child {
@@ -189,8 +212,11 @@ impl XmlParserXtraInstance {
                     children_refs.push(child_ref);
                 }
                 XmlNodeChild::Text(text) => {
-                    let text_ref = player.alloc_datum(Datum::String(text.clone()));
-                    children_refs.push(text_ref);
+                    char_data.push_str(text);
+                    if !text.trim().is_empty() {
+                        let text_ref = Self::text_node_to_prop_list_inner(player, text);
+                        children_refs.push(text_ref);
+                    }
                 }
             }
         }
@@ -198,12 +224,17 @@ impl XmlParserXtraInstance {
         let children_value =
             player.alloc_datum(Datum::List(DatumType::List, children_refs, false));
 
-        // Build the property list: [#name: "tagname", #attributes: [:], #children: [...]]
+        let chardata_key = player.alloc_datum(Datum::Symbol("charData".to_string()));
+        let chardata_value = player.alloc_datum(Datum::String(char_data));
+
         let prop_list = Datum::PropList(
             vec![
                 (name_key, name_value),
                 (attributes_key, attributes_value),
-                (children_key, children_value),
+                (attr_name_key, attr_name_value),
+                (attr_value_key, attr_value_value),
+                (child_key, children_value),
+                (chardata_key, chardata_value),
             ],
             false,
         );
@@ -220,38 +251,44 @@ impl XmlParserXtraInstance {
         }
     }
 
-    /// Convert a text node to a prop list with empty name (for getPropRef compatibility)
+    /// Convert a text node to a prop list with empty name
+    fn text_node_to_prop_list_inner(
+        player: &mut crate::player::DirPlayer,
+        text: &str,
+    ) -> DatumRef {
+        let name_key = player.alloc_datum(Datum::Symbol("name".to_string()));
+        let name_value = player.alloc_datum(Datum::String(String::new()));
+
+        let attributes_key = player.alloc_datum(Datum::Symbol("attributes".to_string()));
+        let attributes_value = player.alloc_datum(Datum::PropList(vec![], false));
+
+        let chardata_key = player.alloc_datum(Datum::Symbol("charData".to_string()));
+        let chardata_value = player.alloc_datum(Datum::String(text.to_string()));
+
+        let text_key = player.alloc_datum(Datum::Symbol("text".to_string()));
+        let text_value = player.alloc_datum(Datum::String(text.to_string()));
+
+        let child_key = player.alloc_datum(Datum::Symbol("child".to_string()));
+        let child_value =
+            player.alloc_datum(Datum::List(DatumType::List, vec![], false));
+
+        let prop_list = Datum::PropList(
+            vec![
+                (name_key, name_value),
+                (attributes_key, attributes_value),
+                (chardata_key, chardata_value),
+                (text_key, text_value),
+                (child_key, child_value),
+            ],
+            false,
+        );
+
+        player.alloc_datum(prop_list)
+    }
+
     fn text_node_to_prop_list(text: &str) -> Result<DatumRef, ScriptError> {
         reserve_player_mut(|player| {
-            // Create #name property (empty string for text nodes)
-            let name_key = player.alloc_datum(Datum::Symbol("name".to_string()));
-            let name_value = player.alloc_datum(Datum::String(String::new()));
-
-            // Create #attributes property list (empty for text nodes)
-            let attributes_key = player.alloc_datum(Datum::Symbol("attributes".to_string()));
-            let attributes_value = player.alloc_datum(Datum::PropList(vec![], false));
-
-            // Create #charData property with the text content
-            let chardata_key = player.alloc_datum(Datum::Symbol("charData".to_string()));
-            let chardata_value = player.alloc_datum(Datum::String(text.to_string()));
-
-            // Create #children list (empty for text nodes)
-            let children_key = player.alloc_datum(Datum::Symbol("children".to_string()));
-            let children_value =
-                player.alloc_datum(Datum::List(DatumType::List, vec![], false));
-
-            // Build the property list
-            let prop_list = Datum::PropList(
-                vec![
-                    (name_key, name_value),
-                    (attributes_key, attributes_value),
-                    (chardata_key, chardata_value),
-                    (children_key, children_value),
-                ],
-                false,
-            );
-
-            Ok(player.alloc_datum(prop_list))
+            Ok(Self::text_node_to_prop_list_inner(player, text))
         })
     }
 }
@@ -364,10 +401,10 @@ impl XmlParserXtraManager {
                     }
                 })?;
 
-                if let Some(ref root) = instance.parsed_root {
+                if let Some(ref _root) = instance.parsed_root {
                     let count = match prop_name.to_lowercase().as_str() {
-                        "child" | "children" => root.children.len() as i32,
-                        "attribute" | "attributes" => root.attributes.len() as i32,
+                        "child" | "children" => 1, // The parser object has one child: the root element
+                        "attribute" | "attributes" => 0, // Parser object has no attributes
                         _ => 0,
                     };
                     reserve_player_mut(|player| Ok(player.alloc_datum(Datum::Int(count))))
@@ -385,17 +422,9 @@ impl XmlParserXtraManager {
                 })?;
 
                 if let Some(ref root) = instance.parsed_root {
-                    // Lingo uses 1-based indexing
-                    let idx = (index - 1) as usize;
-                    if idx < root.children.len() {
-                        match &root.children[idx] {
-                            XmlNodeChild::Element(child_node) => {
-                                XmlParserXtraInstance::node_to_prop_list(child_node)
-                            }
-                            XmlNodeChild::Text(text) => {
-                                XmlParserXtraInstance::text_node_to_prop_list(text)
-                            }
-                        }
+                    // The parser object has one child: the root element (index 1)
+                    if index == 1 {
+                        XmlParserXtraInstance::node_to_prop_list(root)
                     } else {
                         Ok(DatumRef::Void)
                     }
@@ -478,7 +507,7 @@ impl XmlParserXtraManager {
                     Ok(DatumRef::Void)
                 }
             }
-            "getpropref" => {
+            "getprop" | "getpropref" => {
                 // getPropRef(#child, n) returns a property list for the nth child
                 // getPropRef(#attribute, n) returns the nth attribute as [name, value]
                 let (prop_name, index) = crate::player::reserve_player_ref(|player| {
@@ -496,18 +525,9 @@ impl XmlParserXtraManager {
                 if let Some(ref root) = instance.parsed_root {
                     match prop_name.to_lowercase().as_str() {
                         "child" | "children" => {
-                            let idx = (index - 1) as usize;
-                            if idx < root.children.len() {
-                                match &root.children[idx] {
-                                    XmlNodeChild::Element(child_node) => {
-                                        XmlParserXtraInstance::node_to_prop_list(child_node)
-                                    }
-                                    XmlNodeChild::Text(text) => {
-                                        // Wrap text nodes in a PropList with #charData for compatibility
-                                        // This allows .name access to return empty string instead of error
-                                        XmlParserXtraInstance::text_node_to_prop_list(text)
-                                    }
-                                }
+                            // The parser object has one child: the root element (index 1)
+                            if index == 1 {
+                                XmlParserXtraInstance::node_to_prop_list(root)
                             } else {
                                 Ok(DatumRef::Void)
                             }
