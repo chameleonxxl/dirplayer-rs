@@ -194,9 +194,7 @@ impl ScriptInstanceUtils {
                     }
                 }
             }
-            _ => Err(ScriptError::new(format!(
-                "Cannot setAt property {key} on script instance datum"
-            ))),
+            _ => script_set_prop(player, &self_instance_id, key, value, false),
         }
     }
 }
