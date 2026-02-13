@@ -1,100 +1,454 @@
-.title {
-  font-size: 1.5em;
-  font-weight: bold;
-  margin-bottom: 10px;
-}
-
 .container {
   display: flex;
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  height: 100vh;
-  background-color: #ccc;
+  min-height: 100vh;
+  padding: 32px 16px;
+  box-sizing: border-box;
+  background-color: #e0e0e0;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
 }
 
-.body {
-  width: 700px;
+.header {
+  margin-bottom: 24px;
+  width: 600px;
+  max-width: 100%;
+}
+
+.title {
+  font-size: 1.6em;
+  font-weight: 700;
+  color: #222;
+  margin: 0;
+  letter-spacing: -0.02em;
+}
+
+.subtitle {
+  font-size: 0.85em;
+  color: #777;
+  margin-top: 4px;
+}
+
+/* Card */
+
+.card {
+  width: 600px;
+  max-width: 100%;
+  background-color: #fff;
+  border-radius: 8px;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.12);
+  overflow: hidden;
+}
+
+.cardBody {
+  padding: 20px 24px;
   display: flex;
   flex-direction: column;
-  align-items: stretch;
-  background-color: #ddd;
-  padding: 16px;
   gap: 16px;
+  text-align: left;
+}
+
+/* Form fields */
+
+.fieldContainer {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.label {
+  font-size: 0.8em;
+  font-weight: 600;
+  color: #555;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
 }
 
 .inputGroup {
   display: flex;
   gap: 8px;
-  width: 100%;
-  margin-top: 4px;
 }
 
 .input {
-  padding: 10px;
-  border: 1px solid #000;
   flex: 1;
-  text-align: start;
+  padding: 9px 12px;
+  border: 1px solid #ccc;
+  border-radius: 4px;
+  font-size: 0.95em;
   background-color: #fff;
+  color: #222;
+  outline: none;
+  text-align: left;
+  transition: border-color 0.15s;
+
+  &:focus {
+    border-color: #888;
+  }
 
   &:disabled {
-    background-color: #ddd;
+    background-color: #f5f5f5;
+    color: #999;
   }
 }
 
 .browseButton {
-  padding: 10px 20px;
-  background-color: #555;
-  color: #fff;
-  border: 1px solid #000;
+  padding: 9px 16px;
+  background-color: #f0f0f0;
+  color: #333;
+  border: 1px solid #ccc;
+  border-radius: 4px;
   cursor: pointer;
   white-space: nowrap;
+  font-size: 0.9em;
+  transition: background-color 0.15s;
 
   &:hover:not(:disabled) {
-    background-color: #666;
+    background-color: #e4e4e4;
   }
 
   &:disabled {
-    background-color: #999;
+    color: #aaa;
     cursor: default;
   }
 }
 
-.button {
-  padding: 10px;
-  background-color: #000;
-  color: #fff;
-  border: none;
-  cursor: pointer;
+/* Options row (auto-play, etc.) */
 
-  &:disabled {
-    background-color: #999;
-    cursor: default;
-  }
-}
-
-.fieldContainer {
+.optionsRow {
   display: flex;
-  flex-direction: column;
-  align-items: flex-start;
-  justify-content: flex-start;
-}
-
-.checkbox {
-  width: 16px;
-  height: 16px;
+  align-items: center;
+  gap: 16px;
 }
 
 .checkboxContainer {
   display: flex;
-  flex-direction: row;
   align-items: center;
-  justify-content: flex-start;
+  gap: 6px;
+  font-size: 0.9em;
+  color: #444;
+  cursor: pointer;
+}
+
+.checkbox {
+  width: 15px;
+  height: 15px;
+  cursor: pointer;
+}
+
+/* Primary button */
+
+.button {
+  padding: 10px 16px;
+  background-color: #333;
+  color: #fff;
+  border: none;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 0.95em;
+  font-weight: 500;
+  transition: background-color 0.15s;
+  text-align: center;
+
+  &:hover:not(:disabled) {
+    background-color: #444;
+  }
+
+  &:disabled {
+    background-color: #bbb;
+    cursor: default;
+  }
+}
+
+/* External Params - collapsible */
+
+.paramsSection {
+  display: flex;
+  flex-direction: column;
   gap: 8px;
 }
 
-.divider {
-  width: 100%;
-  height: 1px;
-  background-color: #999;
+.paramsToggle {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  background: none;
+  border: none;
+  padding: 0;
+  cursor: pointer;
+  font-size: 0.8em;
+  font-weight: 600;
+  color: #555;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+
+  &:hover {
+    color: #333;
+  }
+}
+
+.paramsToggleArrow {
+  font-size: 0.7em;
+  transition: transform 0.15s;
+}
+
+.paramsToggleArrowOpen {
+  transform: rotate(90deg);
+}
+
+.paramsList {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.paramRow {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+
+.paramInput {
+  flex: 1;
+  padding: 7px 10px;
+  border: 1px solid #ccc;
+  border-radius: 4px;
+  font-size: 0.9em;
+  background-color: #fff;
+  color: #222;
+  outline: none;
+  transition: border-color 0.15s;
+
+  &:focus {
+    border-color: #888;
+  }
+
+  &:disabled {
+    background-color: #f5f5f5;
+    color: #999;
+  }
+}
+
+.removeParamButton {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  background: none;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  cursor: pointer;
+  color: #999;
+  font-size: 1em;
+  padding: 0;
+  flex-shrink: 0;
+  transition: all 0.15s;
+
+  &:hover:not(:disabled) {
+    background-color: #fee;
+    border-color: #fcc;
+    color: #c44;
+  }
+
+  &:disabled {
+    color: #ddd;
+    cursor: default;
+  }
+}
+
+.addParamButton {
+  align-self: flex-start;
+  padding: 5px 12px;
+  background: none;
+  border: 1px dashed #ccc;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 0.85em;
+  color: #666;
+  transition: all 0.15s;
+
+  &:hover:not(:disabled) {
+    border-color: #999;
+    color: #333;
+    background-color: #f8f8f8;
+  }
+
+  &:disabled {
+    color: #bbb;
+    cursor: default;
+  }
+}
+
+.paramsEmpty {
+  font-size: 0.85em;
+  color: #aaa;
+  font-style: italic;
+}
+
+/* Recent Movies */
+
+.recentSection {
+  width: 600px;
+  max-width: 100%;
+  margin-top: 24px;
+  text-align: left;
+}
+
+.recentHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 10px;
+}
+
+.recentTitle {
+  font-size: 0.8em;
+  font-weight: 600;
+  color: #888;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.clearRecent {
+  background: none;
+  border: none;
+  cursor: pointer;
+  font-size: 0.8em;
+  color: #aaa;
+  padding: 2px 4px;
+  transition: color 0.15s;
+
+  &:hover {
+    color: #c44;
+  }
+}
+
+.recentList {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-height: 350px;
+  overflow-y: auto;
+}
+
+.recentItem {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 14px;
+  background-color: #fff;
+  border-radius: 6px;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.06);
+  cursor: pointer;
+  transition: all 0.15s;
+
+  &:hover {
+    box-shadow: 0 2px 6px rgba(0, 0, 0, 0.1);
+    background-color: #fafafa;
+  }
+}
+
+.recentItemBody {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.recentUrl {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 0.9em;
+  color: #333;
+  text-align: left;
+}
+
+.recentParams {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.paramTag {
+  padding: 1px 6px;
+  background-color: #f0f0f0;
+  border-radius: 3px;
+  font-family: monospace;
+  font-size: 0.78em;
+  color: #666;
+}
+
+.recentActions {
+  display: flex;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+.recentActionButton {
+  padding: 5px 12px;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 0.82em;
+  white-space: nowrap;
+  transition: all 0.15s;
+}
+
+.editButton {
+  composes: recentActionButton;
+  background: none;
+  border: 1px solid #ddd;
+  color: #555;
+
+  &:hover:not(:disabled) {
+    border-color: #bbb;
+    background-color: #f8f8f8;
+  }
+
+  &:disabled {
+    color: #ccc;
+    cursor: default;
+  }
+}
+
+.loadRecentButton {
+  composes: recentActionButton;
+  background-color: #333;
+  border: 1px solid #333;
+  color: #fff;
+
+  &:hover:not(:disabled) {
+    background-color: #444;
+    border-color: #444;
+  }
+
+  &:disabled {
+    background-color: #bbb;
+    border-color: #bbb;
+    cursor: default;
+  }
+}
+
+.removeRecentButton {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  background: none;
+  border: none;
+  border-radius: 4px;
+  cursor: pointer;
+  color: #ccc;
+  font-size: 0.85em;
+  padding: 0;
+  flex-shrink: 0;
+  transition: all 0.15s;
+
+  &:hover {
+    background-color: #fee;
+    color: #c44;
+  }
 }
