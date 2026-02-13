@@ -1373,11 +1373,9 @@ impl CastMember {
 
         let member_type = match chunk.member_type {
             MemberType::Text => {
-                let text_chunk = member_def.children[0]
-                    .as_ref()
-                    .unwrap()
-                    .as_text()
-                    .expect("Not a text chunk");
+                let text_chunk = member_def.children.iter()
+                    .find_map(|c| c.as_ref().and_then(|ch| ch.as_text()))
+                    .expect("No text chunk found for text member");
                 let raw = chunk.specific_data_raw.as_slice();
                 let field_info = FieldInfo::from(raw);
                 let mut field_member = FieldMember::from_field_info(&field_info);
