@@ -43,6 +43,7 @@ impl RectDatumHandlers {
             "setAt" => Self::set_at(datum, args),
             "intersect" => Self::intersect(datum, args),
             "duplicate" => Self::duplicate(datum, args),
+            "offset" => Self::offset(datum, args),
             _ => Err(ScriptError::new(format!(
                 "No handler {handler_name} for rect"
             ))),
@@ -51,9 +52,32 @@ impl RectDatumHandlers {
 
     pub fn duplicate(datum: &DatumRef, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
         reserve_player_mut(|player| {
-            let rect = player.get_datum(datum);
-            let new_rect = rect.clone();
+            let rect = player.get_datum(datum).to_rect()?;
+            let new_rect_refs = [
+                player.alloc_datum(player.get_datum(&rect[0]).clone()),
+                player.alloc_datum(player.get_datum(&rect[1]).clone()),
+                player.alloc_datum(player.get_datum(&rect[2]).clone()),
+                player.alloc_datum(player.get_datum(&rect[3]).clone()),
+            ];
+            let new_rect = Datum::Rect(new_rect_refs);
             Ok(player.alloc_datum(new_rect))
+        })
+    }
+
+    pub fn offset(datum: &DatumRef, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+        reserve_player_mut(|player| {
+            let rect = player.get_datum(datum).to_rect()?;
+            let dx = player.get_datum(&args[0]).int_value()?;
+            let dy = player.get_datum(&args[1]).int_value()?;
+
+            let new_rect_refs = [
+                player.alloc_datum(Datum::Int(player.get_datum(&rect[0]).int_value()? + dx)),
+                player.alloc_datum(Datum::Int(player.get_datum(&rect[1]).int_value()? + dy)),
+                player.alloc_datum(Datum::Int(player.get_datum(&rect[2]).int_value()? + dx)),
+                player.alloc_datum(Datum::Int(player.get_datum(&rect[3]).int_value()? + dy)),
+            ];
+
+            Ok(player.alloc_datum(Datum::Rect(new_rect_refs)))
         })
     }
 
