@@ -164,7 +164,8 @@ impl MultiuserXtraManager {
                     let message_str = if let Ok(array_buffer) = data.clone().dyn_into::<js_sys::ArrayBuffer>() {
                         let array = js_sys::Uint8Array::new(&array_buffer);
                         let vec = array.to_vec();
-                        String::from_utf8_lossy(&vec).to_string()
+                        let char_vec: Vec<char> = vec.into_iter().map(|byte| byte as char).collect();
+                        char_vec.into_iter().collect()
                     } else if let Ok(js_string) = data.dyn_into::<js_sys::JsString>() {
                         js_string.as_string().unwrap_or_default()
                     } else {

@@ -100,12 +100,12 @@ impl StringHandlers {
     pub fn char_to_num(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
         reserve_player_mut(|player| {
             let str_value = player.get_datum(&args[0]).string_value()?;
-            let utf8_bytes = str_value.as_bytes();
+            let mut chars = str_value.chars();
 
-            let byte_val = if utf8_bytes.is_empty() {
-                0
+            let byte_val = if let Some(c) = chars.next() {
+                c as i32
             } else {
-                utf8_bytes[0] as i32
+                0
             };
 
             Ok(player.alloc_datum(Datum::Int(byte_val)))
@@ -115,10 +115,10 @@ impl StringHandlers {
     pub fn num_to_char(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
         reserve_player_mut(|player| {
             let num = player.get_datum(&args[0]).int_value()?;
-            let byte_val = (num & 0xFF) as u8;
+            let byte_val = (num & 0xFF) as u8 as char;
 
             // Build a single-byte string directly from raw bytes (Latin-1 1:1)
-            let result_string = unsafe { String::from_utf8_unchecked(vec![byte_val]) };
+            let result_string = byte_val.to_string();
 
             Ok(player.alloc_datum(Datum::String(result_string)))
         })

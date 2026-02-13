@@ -106,7 +106,7 @@ impl StringChunkUtils {
             StringChunkType::Char => {
                 let mut new_string = string.clone();
                 let (start, end) =
-                    Self::vm_range_to_host((chunk_expr.start, chunk_expr.end), string.len());
+                    Self::vm_range_to_host((chunk_expr.start, chunk_expr.end), string.chars().count());
                 new_string.replace_range(start..end, "");
                 Ok(new_string)
             }
@@ -165,7 +165,7 @@ impl StringChunkUtils {
             StringChunkType::Char => {
                 let mut new_string = string.clone();
                 let (start, end) =
-                    Self::vm_range_to_host((chunk_expr.start, chunk_expr.end), string.len());
+                    Self::vm_range_to_host((chunk_expr.start, chunk_expr.end), string.chars().count());
                 new_string.replace_range(start..end, &replace_with);
                 Ok(new_string)
             }
@@ -254,7 +254,7 @@ impl StringChunkUtils {
                 Ok(string.chars().filter(|c| item_delimiter == *c).count() + 1)
             }
             StringChunkType::Word => Ok(string.split_whitespace().count()),
-            StringChunkType::Char => Ok(string.len()),
+            StringChunkType::Char => Ok(string.chars().count()),
             StringChunkType::Line => Ok(string_get_lines(string).len()),
         }
     }
@@ -309,9 +309,9 @@ impl StringChunkUtils {
             }
             StringChunkType::Char => {
                 let (start, end) =
-                    Self::vm_range_to_host((chunk_expr.start, chunk_expr.end), string.len());
-                let bytes = string.bytes().skip(start).take(end - start);
-                unsafe { String::from_utf8_unchecked(bytes.collect_vec()) }
+                    Self::vm_range_to_host((chunk_expr.start, chunk_expr.end), string.chars().count());
+                let chars = string.chars().skip(start).take(end - start).collect();
+                chars
             }
             StringChunkType::Line => {
                 let chunk_list = Self::resolve_chunk_list(
@@ -345,7 +345,7 @@ impl StringChunkUtils {
             StringChunkType::Char => {
                 let mut new_string = string.clone();
                 let (start, end) =
-                    StringChunkUtils::vm_range_to_host((chunk_expr.start, chunk_expr.end), string.len());
+                    StringChunkUtils::vm_range_to_host((chunk_expr.start, chunk_expr.end), string.chars().count());
                 new_string.replace_range(start..end, replace_with);
                 Ok(new_string)
             }
@@ -387,7 +387,7 @@ impl StringChunkUtils {
             StringChunkType::Char => {
                 let mut new_string = string.clone();
                 let (start, _) =
-                    StringChunkUtils::vm_range_to_host((chunk_expr.start, chunk_expr.end), string.len());
+                    StringChunkUtils::vm_range_to_host((chunk_expr.start, chunk_expr.end), string.chars().count());
                 new_string.insert_str(start, insert_value);
                 Ok(new_string)
             }
@@ -438,7 +438,7 @@ impl StringChunkUtils {
             StringChunkType::Char => {
                 let mut new_string = string.clone();
                 let (_, end) =
-                    StringChunkUtils::vm_range_to_host((chunk_expr.start, chunk_expr.end), string.len());
+                    StringChunkUtils::vm_range_to_host((chunk_expr.start, chunk_expr.end), string.chars().count());
                 new_string.insert_str(end, insert_value);
                 Ok(new_string)
             }

@@ -605,7 +605,7 @@ impl GetSetBytecodeHandler {
                 crate::director::lingo::datum::DatumType::String => match prop_name.as_str() {
                     "length" => {
                         let len = if let Datum::String(s) = player.get_datum(&obj_ref) {
-                            s.len() as i32
+                            s.chars().count() as i32
                         } else {
                             unreachable!()
                         };
@@ -615,7 +615,7 @@ impl GetSetBytecodeHandler {
                         use crate::director::lingo::datum::{StringChunkExpr, StringChunkType};
                         let (s_len, s_clone) = if let Datum::String(s) = player.get_datum(&obj_ref)
                         {
-                            (s.len() as i32, s.clone())
+                            (s.chars().count() as i32, s.clone())
                         } else {
                             unreachable!()
                         };
