@@ -187,9 +187,9 @@ impl SpriteDatumHandlers {
             }
         }
 
-        // No handler found on sprite's scripts - fall back to global handlers
-        // This allows game scripts to define handlers like "setcursor" that can be
-        // called on sprites even if not attached directly to the sprite
-        player_call_global_handler(handler_name, args).await
+        Err(ScriptError::new_code(
+            ScriptErrorCode::HandlerNotFound,
+            format!("No async handler {handler_name} found for sprite"),
+        ))
     }
 }
