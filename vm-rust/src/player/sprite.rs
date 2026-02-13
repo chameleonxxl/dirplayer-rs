@@ -167,6 +167,15 @@ impl Sprite {
         }
     }
 
+    pub fn reset_for_member_change(&mut self) {
+        self.skew = 0.0;
+        self.flip_h = false;
+        self.flip_v = false;
+        self.rotation = 0.0;
+        self.bg_color = ColorRef::PaletteIndex(0);
+        self.color = ColorRef::PaletteIndex(255);
+    }
+
     pub fn reset(&mut self) {
         self.name = "".to_owned();
         self.puppet = false;

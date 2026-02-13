@@ -2653,6 +2653,9 @@ pub fn sprite_set_prop(sprite_id: i16, prop_name: &str, value: Datum) -> Result<
                 // Initialize size and reset rotation/skew ONLY if:
                 //  - member actually changed
                 if member_changed {
+                    if sprite.puppet {
+                        sprite.reset_for_member_change();
+                    }
                     if !sprite.has_size_changed {
                         if let Some((w, h)) = intrinsic_size {
                             if w > 0 && h > 0 {
