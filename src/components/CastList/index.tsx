@@ -4,17 +4,44 @@ import classNames from "classnames"
 import styles from './styles.module.css'
 import _ from "lodash"
 
+function getMemberTypeIcon(memberType?: string, scriptType?: string): string | null {
+  if (!memberType) return null;
+  switch (memberType) {
+    case 'bitmap': return '/icons/member-types/1-bitmap.png';
+    case 'filmLoop': return '/icons/member-types/2-filmloop.png';
+    case 'field': return '/icons/member-types/3-field.png';
+    case 'palette': return '/icons/member-types/4-palette.png';
+    case 'script':
+      switch (scriptType) {
+        case 'score': return '/icons/member-types/11-1-script.png';
+        case 'movie': return '/icons/member-types/11-3-movie.png';
+        case 'parent': return '/icons/member-types/11-parent.png';
+        default: return '/icons/member-types/11-1-script.png';
+      }
+    case 'shape': return '/icons/member-types/8-shape.png';
+    case 'text': return '/icons/member-types/text.png';
+    case 'sound': return '/icons/member-types/audio.png';
+    default: return null;
+  }
+}
+
 interface ICastMemberListItemProps {
   number: number
   name: string
+  memberType?: string
+  scriptType?: string
   isSelected: boolean
   onSelect: () => void
 }
 
-function CastMemberListItem({ number, name, isSelected, onSelect }: ICastMemberListItemProps) {
+function CastMemberListItem({ number, name, memberType, scriptType, isSelected, onSelect }: ICastMemberListItemProps) {
   const classes = classNames({ [styles.castMemberItem]: true, [styles.selected]: isSelected })
+  const icon = getMemberTypeIcon(memberType, scriptType);
   return <button className={classes} onClick={onSelect}>
     <span className={styles.memberNumberLabel}>{number}</span>
+    <span className={styles.memberTypeIcon}>
+      {icon && <img src={icon} alt="" />}
+    </span>
     <span className={styles.memberNameLabel}>{name}</span>
   </button>
 }
@@ -58,6 +85,8 @@ function CastListItem({ number, name, members, selectedMemberId, onSelectMember,
           key={memberNumber}
           number={memberNumber}
           name={member.name}
+          memberType={member.type}
+          scriptType={member.scriptType}
           isSelected={isSelected}
           onSelect={() => onSelectMember(memberId)} />
       })}

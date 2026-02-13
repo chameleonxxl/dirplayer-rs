@@ -80,6 +80,8 @@ export function castMemberIdentifier(castNumber: number, memberNumber: number): 
 
 export interface CastMemberRecord {
   name: string;
+  type?: string;
+  scriptType?: string;
   snapshot?: MemberSnapshot;
 }
 

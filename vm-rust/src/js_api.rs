@@ -420,6 +420,14 @@ impl JsApi {
         let member_map = js_sys::Map::new();
         member_map.str_set("name", &safe_js_string(&member.name));
         member_map.str_set("type", &safe_js_string(&member.member_type.type_string()));
+        if let CastMemberType::Script(script_data) = &member.member_type {
+            member_map.str_set("scriptType", &safe_js_string(match script_data.script_type {
+                ScriptType::Movie => "movie",
+                ScriptType::Parent => "parent",
+                ScriptType::Score => "score",
+                _ => "unknown",
+            }));
+        }
         return member_map;
     }
 

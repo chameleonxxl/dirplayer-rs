@@ -87,6 +87,20 @@
   justify-content: center;
 }
 
+.memberTypeIcon {
+  width: 20px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+
+.memberTypeIcon img {
+  width: 16px;
+  height: 16px;
+  image-rendering: pixelated;
+}
+
 .memberNameLabel {
   display: flex;
   align-items: center;
