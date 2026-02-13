@@ -294,6 +294,19 @@ impl Movie {
             "randomSeed" => {
                 self.random_seed = Some(value.int_value()?);
             }
+            "stageColor" => {
+                match value {
+                    Datum::Int(color_index) => {
+                        self.stage_color_ref = ColorRef::PaletteIndex(color_index as u8);
+                    }
+                    Datum::ColorRef(color_ref) => {
+                        self.stage_color_ref = color_ref;
+                    }
+                    _ => {
+                        return Err(ScriptError::new("Integer color index expected for stageColor".to_string()));
+                    }
+                }
+            }
             _ => return Err(ScriptError::new(format!("Cannot set movie prop {prop}"))),
         }
         Ok(())
