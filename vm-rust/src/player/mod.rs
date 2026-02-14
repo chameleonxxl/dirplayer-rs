@@ -227,6 +227,7 @@ pub struct DirPlayer {
     /// so that sprite(n) accesses the filmloop's sprites, not the main stage.
     pub current_score_context: ScoreRef,
     pub debug_datum_refs: Vec<DatumRef>,
+    pub eval_scope_index: Option<u32>,
 }
 
 impl DirPlayer {
@@ -335,6 +336,7 @@ impl DirPlayer {
             last_initialized_frame: None,
             current_score_context: ScoreRef::Stage,
             debug_datum_refs: vec![],
+            eval_scope_index: None,
         };
 
         result.reset();
@@ -752,6 +754,7 @@ impl DirPlayer {
 
     pub fn resume_breakpoint(&mut self) {
         self.step_mode = StepMode::None;
+        self.eval_scope_index = None;
         let breakpoint = self.current_breakpoint.take();
 
         if let Some(breakpoint) = breakpoint {
@@ -762,6 +765,7 @@ impl DirPlayer {
     pub fn step_into(&mut self) {
         self.step_mode = StepMode::Into;
         self.step_scope_depth = self.scope_count;
+        self.eval_scope_index = None;
         let breakpoint = self.current_breakpoint.take();
 
         if let Some(breakpoint) = breakpoint {
@@ -772,6 +776,7 @@ impl DirPlayer {
     pub fn step_over(&mut self) {
         self.step_mode = StepMode::Over;
         self.step_scope_depth = self.scope_count;
+        self.eval_scope_index = None;
         let breakpoint = self.current_breakpoint.take();
 
         if let Some(breakpoint) = breakpoint {
@@ -782,6 +787,7 @@ impl DirPlayer {
     pub fn step_out(&mut self) {
         self.step_mode = StepMode::Out;
         self.step_scope_depth = self.scope_count;
+        self.eval_scope_index = None;
         let breakpoint = self.current_breakpoint.take();
 
         if let Some(breakpoint) = breakpoint {
@@ -792,6 +798,7 @@ impl DirPlayer {
     pub fn step_over_line(&mut self, skip_bytecode_indices: Vec<usize>) {
         self.step_mode = StepMode::OverLine { skip_bytecode_indices };
         self.step_scope_depth = self.scope_count;
+        self.eval_scope_index = None;
         let breakpoint = self.current_breakpoint.take();
 
         if let Some(breakpoint) = breakpoint {
@@ -802,6 +809,7 @@ impl DirPlayer {
     pub fn step_into_line(&mut self, skip_bytecode_indices: Vec<usize>) {
         self.step_mode = StepMode::IntoLine { skip_bytecode_indices };
         self.step_scope_depth = self.scope_count;
+        self.eval_scope_index = None;
         let breakpoint = self.current_breakpoint.take();
 
         if let Some(breakpoint) = breakpoint {

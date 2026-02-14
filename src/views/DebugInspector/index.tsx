@@ -14,6 +14,7 @@ import {
   step_out,
   step_over_line,
   step_into_line,
+  set_eval_scope_index,
 } from "vm-rust";
 import ListView from "../../components/ListView";
 import { onMemberSelected, selectScriptViewMode } from "../../store/uiSlice";
@@ -327,6 +328,7 @@ function Scopes({ selectedScopeIndex, setSelectedScopeIndex }: { selectedScopeIn
 
   const onSelectScope = (index: number) => {
     setSelectedScopeIndex(index);
+    set_eval_scope_index(index);
     const scope = scopes[index];
     dispatch(onMemberSelected(scope.script_member_ref));
   };

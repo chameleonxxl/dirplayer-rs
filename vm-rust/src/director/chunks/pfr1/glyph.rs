@@ -154,6 +154,9 @@ pub struct Pfr1HeaderParser<'a> {
     interp_accum_y: i16,
     flag_620: u32,
     ce9d_nibble_aligned: bool,
+
+    // Recursion depth for compound glyph parsing
+    depth: u32,
 }
 
 impl<'a> Pfr1HeaderParser<'a> {
@@ -317,6 +320,7 @@ impl<'a> Pfr1HeaderParser<'a> {
             first_point_orus_x: None,
             first_point_orus_y: None,
             ce9d_nibble_aligned: false,
+            depth: 0,
         };
 
         // Compute fontScale from target pixel size and outline resolution
@@ -2345,6 +2349,14 @@ impl<'a> Pfr1HeaderParser<'a> {
 
     /// Parse compound glyph with full modulo-6 encoding
     fn parse_compound_glyph(&mut self) {
+        const MAX_COMPOUND_DEPTH: u32 = 8;
+        if self.depth >= MAX_COMPOUND_DEPTH {
+            log(&format!(
+                "  [compound] depth limit ({}) reached, skipping", MAX_COMPOUND_DEPTH
+            ));
+            return;
+        }
+
         // Extract component count from header byte (bits 5-0)
         let component_count = (self.data[0] & 0x3F) as usize;
 
@@ -2447,6 +2459,7 @@ impl<'a> Pfr1HeaderParser<'a> {
                 self.target_em_px,
             );
 
+            sub_parser.depth = self.depth + 1;
             sub_parser.diag_char_code = self.diag_char_code;
             if self.font_stroke_tables_available {
                 sub_parser.font_stroke_x_count = self.font_stroke_x_count;

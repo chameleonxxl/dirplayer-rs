@@ -247,6 +247,13 @@ pub fn clear_debug_messages() {
 }
 
 #[wasm_bindgen]
+pub fn set_eval_scope_index(index: i32) {
+    reserve_player_mut(|player| {
+        player.eval_scope_index = if index >= 0 { Some(index as u32) } else { None };
+    });
+}
+
+#[wasm_bindgen]
 pub fn request_script_instance_snapshot(script_instance_id: u32) {
     reserve_player_ref(|player| {
         JsApi::dispatch_script_instance_snapshot(

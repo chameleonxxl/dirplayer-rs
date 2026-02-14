@@ -13,7 +13,7 @@ use crate::{
         datum_operations::{add_datums, divide_datums, multiply_datums, subtract_datums},
         handlers::datum_handlers::{player_call_datum_handler, string_chunk::StringChunkUtils},
         player_call_global_handler, reserve_player_mut,
-        script::{get_obj_prop, player_set_obj_prop},
+        script::{get_lctx_for_script, get_obj_prop, player_set_obj_prop, script_get_prop_opt},
         DirPlayer,
     },
 };
@@ -351,6 +351,62 @@ fn get_eval_top_level_prop(
         let actual_prop = &prop_name[4..];
         let result = player.get_movie_prop(actual_prop)?;
         return Ok(result);
+    }
+
+    // When a breakpoint is active, resolve against the selected (or topmost) scope first
+    if player.current_breakpoint.is_some() && player.scope_count > 0 {
+        let scope_idx = player.eval_scope_index
+            .unwrap_or(player.scope_count - 1) as usize;
+        let scope = &player.scopes[scope_idx];
+
+        // Check locals
+        if let Some(local_ref) = scope.locals.get(prop_name) {
+            return Ok(local_ref.clone());
+        }
+
+        // Check "me" (the receiver)
+        if prop_name == "me" {
+            if let Some(receiver) = scope.receiver.clone() {
+                return Ok(player.alloc_datum(Datum::ScriptInstanceRef(receiver)));
+            }
+        }
+
+        // Resolve handler name from the scope's handler_name_id
+        let script_ref = scope.script_ref.clone();
+        let handler_name_id = scope.handler_name_id;
+        if let Some(script_rc) = player.movie.cast_manager.get_script_by_ref(&script_ref) {
+            let script = script_rc.clone();
+            // Find the handler whose name_id matches this scope's handler_name_id
+            let handler_name = script.handlers.iter()
+                .find(|(_, h)| h.name_id == handler_name_id)
+                .map(|(name, _)| name.clone());
+            if let Some(handler_name) = handler_name {
+                if let Some(handler_def) = script.get_own_handler(&handler_name) {
+                    let handler_def = handler_def.clone();
+                    // Check handler arguments by name
+                    if let Some(lctx) = get_lctx_for_script(player, &script) {
+                        for (i, &name_id) in handler_def.argument_name_ids.iter().enumerate() {
+                            if let Some(name) = lctx.names.get(name_id as usize) {
+                                if name.eq_ignore_ascii_case(prop_name) {
+                                    if let Some(arg_ref) = player.scopes[scope_idx].args.get(i) {
+                                        return Ok(arg_ref.clone());
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Check properties on the receiver (me) object
+        let receiver = player.scopes[scope_idx].receiver.clone();
+        if let Some(receiver_ref) = receiver {
+            let prop_name_str = prop_name.to_string();
+            if let Some(result) = script_get_prop_opt(player, &receiver_ref, &prop_name_str) {
+                return Ok(result);
+            }
+        }
     }
 
     if let Some(global_ref) = player.globals.get(prop_name) {
@@ -1173,7 +1229,29 @@ pub async fn eval_lingo_expr_ast_runtime(expr: &LingoExpr) -> Result<DatumRef, S
                 let datum = Box::pin(eval_lingo_expr_ast_runtime(arg)).await?;
                 datum_args.push(datum);
             }
-            player_call_global_handler(&handler_name, &datum_args).await
+            // When a breakpoint is active and there's a receiver, try calling the handler on the receiver first
+            let receiver_call = reserve_player_mut(|player| {
+                if player.current_breakpoint.is_some() && player.scope_count > 0 {
+                    let scope_idx = player.eval_scope_index
+                        .unwrap_or(player.scope_count - 1) as usize;
+                    let scope = &player.scopes[scope_idx];
+                    if let Some(receiver_ref) = scope.receiver.clone() {
+                        let script_ref = scope.script_ref.clone();
+                        if let Some(script) = player.movie.cast_manager.get_script_by_ref(&script_ref) {
+                            if script.get_own_handler(handler_name).is_some() {
+                                let me_ref = player.alloc_datum(Datum::ScriptInstanceRef(receiver_ref));
+                                return Some(me_ref);
+                            }
+                        }
+                    }
+                }
+                None
+            });
+            if let Some(me_ref) = receiver_call {
+                player_call_datum_handler(&me_ref, handler_name, &datum_args).await
+            } else {
+                player_call_global_handler(&handler_name, &datum_args).await
+            }
         }
         LingoExpr::ObjProp(obj_expr, prop_name) => {
             let obj_datum = Box::pin(eval_lingo_expr_ast_runtime(obj_expr.as_ref())).await?;
