@@ -14,6 +14,7 @@ use crate::{
 use super::cast_member::{
     bitmap::BitmapMemberHandlers, field::FieldMemberHandlers, film_loop::FilmLoopMemberHandlers,
     font::FontMemberHandlers, sound::SoundMemberHandlers, text::TextMemberHandlers,
+    palette::PaletteMemberHandlers,
 };
 
 pub struct CastMemberRefHandlers {}
@@ -293,6 +294,7 @@ impl CastMemberRefHandlers {
             }
             CastMemberTypeId::Sound => SoundMemberHandlers::get_prop(player, cast_member_ref, prop),
             CastMemberTypeId::Font => FontMemberHandlers::get_prop(player, cast_member_ref, prop),
+            CastMemberTypeId::Palette => PaletteMemberHandlers::get_prop(player, cast_member_ref, prop),
             CastMemberTypeId::Script => {
                 if prop == "text" {
                     let cast_member = player.movie.cast_manager.find_member_by_ref(cast_member_ref)
@@ -380,6 +382,9 @@ impl CastMemberRefHandlers {
                 FontMemberHandlers::set_prop(player, member_ref, prop, value)
             }),
             CastMemberTypeId::Bitmap => BitmapMemberHandlers::set_prop(member_ref, prop, value),
+            CastMemberTypeId::Palette => reserve_player_mut(|player| {
+                PaletteMemberHandlers::set_prop(player, member_ref, prop, value)
+            }),
             _ => {
                 // Check if this is a bitmap-specific property being set on a non-bitmap
                 if prop == "image"

@@ -35,6 +35,7 @@ pub struct CastMember {
 #[derive(Clone)]
 pub enum Media {
     Field(FieldMember),
+    Palette(PaletteMember)
 }
 
 #[derive(Clone, Default)]
@@ -1653,11 +1654,10 @@ impl CastMember {
                 })
             }
             MemberType::Palette => {
-                let palette_chunk = member_def.children[0]
-                    .as_ref()
-                    .unwrap()
-                    .as_palette()
-                    .expect("Not a palette chunk");
+                let palette_chunk = member_def.children.iter()
+                    .find_map(|c| c.as_ref().and_then(|ch| ch.as_palette()))
+                    .expect("No palette chunk found for palette member");
+
                 CastMemberType::Palette(PaletteMember {
                     colors: palette_chunk.colors.clone(),
                 })
