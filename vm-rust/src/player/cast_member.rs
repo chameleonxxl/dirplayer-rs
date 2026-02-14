@@ -84,6 +84,7 @@ pub struct TextMember {
     pub font_size: u16,
     pub fixed_line_space: u16,
     pub top_spacing: i16,
+    pub bottom_spacing: i16,
     pub width: u16,
     pub height: u16,
     pub html_styled_spans: Vec<StyledSpan>,
@@ -199,6 +200,7 @@ impl TextMember {
             font_size: 12,
             fixed_line_space: 0,
             top_spacing: 0,
+            bottom_spacing: 0,
             box_type: "adjust".to_string(),
             anti_alias: false,
             width: 100,
@@ -1207,6 +1209,7 @@ impl CastMember {
                 styled_text.fixed_line_space
             },
             top_spacing: styled_text.top_spacing as i16,
+            bottom_spacing: styled_text.bottom_spacing as i16,
             width: box_w,
             height: box_h,
             html_styled_spans: styled_text.styled_spans,

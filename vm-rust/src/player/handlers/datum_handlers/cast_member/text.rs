@@ -215,6 +215,7 @@ impl TextMemberHandlers {
                     None,
                     text_data.fixed_line_space,
                     text_data.top_spacing,
+                    text_data.bottom_spacing,
                 );
                 // For #adjust, always use measured height. For #fixed/#scroll, use stored height if set.
                 let height = if text_data.box_type != "adjust" && text_data.height > 0 {
@@ -255,6 +256,7 @@ impl TextMemberHandlers {
                         None,
                         text_data.fixed_line_space,
                         text_data.top_spacing,
+                        text_data.bottom_spacing,
                     );
                     Ok(Datum::Int(height as i32))
                 }
@@ -553,6 +555,7 @@ impl TextMemberHandlers {
                             None,
                             text_data.fixed_line_space,
                             text_data.top_spacing,
+                            text_data.bottom_spacing,
                         )
                     } else {
                         (100, 20) // Fallback dimensions
@@ -585,6 +588,7 @@ impl TextMemberHandlers {
                         None,
                         text_data.fixed_line_space,
                         text_data.top_spacing,
+                        text_data.bottom_spacing,
                     )
                 };
                 let mut box_width = width;
@@ -677,8 +681,9 @@ impl TextMemberHandlers {
                             &text_data.text,
                             font,
                             Some(font.char_height),
-                            0,
+                            text_data.fixed_line_space,
                             text_data.top_spacing,
+                            text_data.bottom_spacing,
                         );
                         width = mw.max(1);
                         height = mh.max(1);
@@ -839,9 +844,18 @@ impl TextMemberHandlers {
                             lines_to_draw = raw_lines.iter().map(|s| s.to_string()).collect();
                         }
 
+                        // fixedLineSpace overrides glyph height; topSpacing + bottomSpacing added on top.
+                        let effective_line_height = if text_data.fixed_line_space > 0 {
+                            text_data.fixed_line_space as i32
+                        } else {
+                            line_height
+                        };
+                        let line_step = effective_line_height
+                            + text_data.bottom_spacing as i32
+                            + text_data.top_spacing as i32;
                         for line in lines_to_draw {
                             flush_line(&line, y, &mut bitmap);
-                            y += line_height;
+                            y += line_step;
                         }
 
                         // Trim only when left-aligned and no explicit box size; otherwise keep width for centering.
@@ -991,7 +1005,7 @@ impl TextMemberHandlers {
                         &mut bitmap,
                         &spans_with_defaults,
                         0,
-                        text_data.top_spacing as i32,
+                        0,
                         box_width as i32,
                         box_height as i32,
                         alignment,
@@ -999,6 +1013,8 @@ impl TextMemberHandlers {
                         text_data.word_wrap,
                         None, // Don't pass text_color - it's now in the span
                         text_data.fixed_line_space,
+                        text_data.top_spacing,
+                        text_data.bottom_spacing,
                     );
                 } else {
                     // Create a basic styled span from text member properties
@@ -1043,7 +1059,7 @@ impl TextMemberHandlers {
                         &mut bitmap,
                         &spans,
                         0,
-                        text_data.top_spacing as i32,
+                        0,
                         box_width as i32,
                         box_height as i32,
                         alignment,
@@ -1051,6 +1067,8 @@ impl TextMemberHandlers {
                         text_data.word_wrap,
                         None, // Don't pass text_color since we set it in the span
                         text_data.fixed_line_space,
+                        text_data.top_spacing,
+                        text_data.bottom_spacing,
                     );
                 }
 

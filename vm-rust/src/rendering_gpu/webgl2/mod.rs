@@ -392,7 +392,7 @@ impl WebGL2Renderer {
         );
 
         // Measure text to determine texture size
-        let (text_width, text_height) = measure_text(&txt, &font, None, 0, 0);
+        let (text_width, text_height) = measure_text(&txt, &font, None, 0, 0, 0);
         let width = (text_width as u32).max(1);
         let height = (text_height as u32).max(1);
 
@@ -688,6 +688,7 @@ impl WebGL2Renderer {
                 font_id: Option<u16>,
                 line_spacing: u16,
                 top_spacing: i16,
+                bottom_spacing: i16,
                 width: u32,
                 height: u32,
                 text_fg_color: ColorRef,
@@ -786,6 +787,7 @@ impl WebGL2Renderer {
                         font_id: Some(font_member.font_info.font_id),
                         line_spacing: font_member.fixed_line_space,
                         top_spacing: font_member.top_spacing,
+                        bottom_spacing: 0,
                         width,
                         height,
                         text_fg_color: fg_color.clone(),
@@ -1037,6 +1039,7 @@ impl WebGL2Renderer {
                         font_id: None,
                         line_spacing: text_member.fixed_line_space,
                         top_spacing: text_member.top_spacing,
+                        bottom_spacing: text_member.bottom_spacing,
                         width,
                         height,
                         text_fg_color,
@@ -1126,6 +1129,7 @@ impl WebGL2Renderer {
                         font_id: field_member.font_id,
                         line_spacing: field_member.fixed_line_space,
                         top_spacing: field_member.top_spacing,
+                        bottom_spacing: 0,
                         width,
                         height,
                         text_fg_color: effective_fg,
@@ -1309,6 +1313,7 @@ impl WebGL2Renderer {
                 font_id,
                 line_spacing,
                 top_spacing,
+                bottom_spacing,
                 width,
                 height,
                 ref text_fg_color,
@@ -1334,6 +1339,7 @@ impl WebGL2Renderer {
                         font_id,
                         line_spacing,
                         top_spacing,
+                        bottom_spacing,
                         width,
                         height,
                         ink,
@@ -2342,6 +2348,7 @@ impl WebGL2Renderer {
         font_id: Option<u16>,
         line_spacing: u16,
         top_spacing: i16,
+        bottom_spacing: i16,
         width: u32,
         height: u32,
         ink: i32,
@@ -2483,9 +2490,9 @@ impl WebGL2Renderer {
         let mut bitmap_start_x = 0i32;
         if styled_spans.is_none() && !word_wrap {
             let (line_width, _) = if is_pfr_font {
-                measure_text(text, &font, Some(font.char_height), 0, top_spacing)
+                measure_text(text, &font, Some(font.char_height), 0, top_spacing, bottom_spacing)
             } else {
-                measure_text(text, &font, None, render_line_spacing, top_spacing)
+                measure_text(text, &font, None, render_line_spacing, top_spacing, bottom_spacing)
             };
             let box_width = width as i32;
             let line_width = line_width as i32;
@@ -2617,6 +2624,8 @@ impl WebGL2Renderer {
                 word_wrap,
                 None, // Color is in the spans
                 render_line_spacing,
+                top_spacing,
+                bottom_spacing,
             ) {
                 web_sys::console::warn_1(
                     &format!("WebGL2 render_text_to_texture: Native text render error: {:?}", e).into()
@@ -3213,11 +3222,8 @@ impl WebGL2Renderer {
                         }
                     }
 
-                    let line_step = if render_line_spacing > 0 {
-                        render_line_spacing as i32
-                    } else {
-                        line.max_size.max(line_height)
-                    };
+                    let effective_lh = if render_line_spacing > 0 { render_line_spacing as i32 } else { line_height };
+                    let line_step = effective_lh + bottom_spacing as i32 + top_spacing as i32;
                     if DEBUG_WEBGL2_TEXT {
                         web_sys::console::log_1(&format!(
                             "[webgl2.text.pfr.styled] line width={} start_x={} y={} step={} next_y={}",
@@ -3305,11 +3311,8 @@ impl WebGL2Renderer {
                         ).into());
                     }
                     render_line(&line, y, &mut text_bitmap);
-                    let line_step = if render_line_spacing > 0 {
-                        render_line_spacing as i32
-                    } else {
-                        line_height
-                    };
+                    let effective_lh = if render_line_spacing > 0 { render_line_spacing as i32 } else { line_height };
+                    let line_step = effective_lh + bottom_spacing as i32 + top_spacing as i32;
                     if DEBUG_WEBGL2_TEXT && is_pfr_font {
                         web_sys::console::log_1(&format!(
                             "[webgl2.text.pfr.simple] step={} next_y={} h={}",

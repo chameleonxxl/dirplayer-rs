@@ -431,6 +431,8 @@ impl FontMemberHandlers {
         word_wrap: bool,
         sprite_color: Option<&ColorRef>,
         fixed_line_space: u16,
+        top_spacing: i16,
+        bottom_spacing: i16,
     ) -> Result<(), ScriptError> {
         // Create temporary canvas for text rendering (size of text area only)
         let document = web_sys::window()
@@ -634,7 +636,7 @@ impl FontMemberHandlers {
             lines.push(current_line);
         }
 
-        let mut y = 0.0;
+        let mut y = top_spacing.max(0) as f64;
         for line in &lines {
             if y >= canvas_height as f64 {
                 break;
@@ -683,12 +685,13 @@ impl FontMemberHandlers {
             } else {
                 12.0
             };
-            // fixedLineSpace is an absolute line step; when not set, fall back to line font height.
-            y += if fixed_line_space > 0 {
+            // fixedLineSpace overrides glyph height; topSpacing + bottomSpacing added on top.
+            let effective_line_height = if fixed_line_space > 0 {
                 fixed_line_space as f64
             } else {
                 line_font_px
             };
+            y += effective_line_height + bottom_spacing as f64 + top_spacing as f64;
         }
 
         // Get pixel data from canvas
@@ -1258,7 +1261,7 @@ impl FontMemberHandlers {
                         );
 
                         let (width, height) =
-                            measure_text(&text_clone, &font, None, fixed_line_space, top_spacing);
+                            measure_text(&text_clone, &font, None, fixed_line_space, top_spacing, 0);
 
                         match prop.as_str() {
                             "rect" => Ok(Datum::Rect([

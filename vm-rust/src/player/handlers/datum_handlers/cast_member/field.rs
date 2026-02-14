@@ -131,7 +131,7 @@ impl FieldMemberHandlers {
                     .ok_or_else(|| ScriptError::new("System font not available".to_string()))?;
 
                 let (_, measured_h) =
-                    measure_text(&text_clone, &font, None, fixed_line_space, top_spacing);
+                    measure_text(&text_clone, &font, None, fixed_line_space, top_spacing, 0);
                 Ok(Datum::Int(measured_h as i32))
             }
             "foreColor" => {
@@ -179,7 +179,7 @@ impl FieldMemberHandlers {
                 };
 
                 let (measured_w, measured_h) =
-                    measure_text(&text_clone, &font, None, fixed_line_space, top_spacing);
+                    measure_text(&text_clone, &font, None, fixed_line_space, top_spacing, 0);
                 let width = if field.width > 0 {
                     field.width.max(measured_w)
                 } else {

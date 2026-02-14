@@ -1001,6 +1001,7 @@ pub fn measure_text(
     line_height: Option<u16>,
     line_spacing: u16,
     top_spacing: i16,
+    bottom_spacing: i16,
 ) -> (u16, u16) {
     let mut width = 0;
     let mut line_width = 0;
@@ -1015,6 +1016,9 @@ pub fn measure_text(
     };
     let line_height = line_height.unwrap_or(effective_line_h);
     let mut height = (top_spacing + line_height as i16) as u16;
+    // fixedLineSpace overrides glyph height; topSpacing + bottomSpacing added on top.
+    let effective_lh = if line_spacing > 0 { line_spacing as i16 } else { line_height as i16 };
+    let line_step = (effective_lh + bottom_spacing + top_spacing) as u16;
     let mut index = 0;
     for c in text.chars() {
         if c == '\r' || c == '\n' {
@@ -1024,7 +1028,7 @@ pub fn measure_text(
             line_width = 0;
         } else {
             if line_width == 0 && index > 0 {
-                height += (line_height as i16 + line_spacing as i16 + 1) as u16;
+                height += line_step;
             }
             let adv = font.get_char_advance(c as u8);
             if font.char_widths.is_some() {

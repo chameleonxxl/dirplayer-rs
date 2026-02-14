@@ -1353,7 +1353,7 @@ pub fn render_score_to_bitmap_with_offset(
                             bitmap,
                             &spans_with_defaults,
                             draw_x,
-                            draw_y + text_member.top_spacing as i32,
+                            draw_y,
                             draw_w,
                             draw_h,
                             alignment,
@@ -1361,6 +1361,8 @@ pub fn render_score_to_bitmap_with_offset(
                             text_member.word_wrap,
                             None, // Color is now in the spans
                             text_member.fixed_line_space,
+                            text_member.top_spacing,
+                            text_member.bottom_spacing,
                         ) {
                             console_warn!("Native text render error for Text member: {:?}", e);
                         }
