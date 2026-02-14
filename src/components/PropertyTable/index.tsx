@@ -1,5 +1,7 @@
-import { useState } from "react";
+import { ReactNode, useState } from "react";
 import styles from "./styles.module.css";
+
+export { styles as propertyTableStyles };
 
 function PropertyValue({ value }: { value: unknown }) {
   const [expanded, setExpanded] = useState(false);
@@ -95,6 +97,16 @@ function PropertyRow({ label, value }: { label: string; value: unknown }) {
       <span className={styles.propValue}>
         <PropertyValue value={value} />
       </span>
+    </div>
+  );
+}
+
+/** A row with a label and custom children as the value. */
+export function PropertyRowCustom({ label, children }: { label: string; children: ReactNode }) {
+  return (
+    <div className={styles.propRow}>
+      <span className={styles.propKey}>{label}</span>
+      <span className={styles.propValue}>{children}</span>
     </div>
   );
 }

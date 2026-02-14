@@ -22,6 +22,7 @@ import { DatumRef, IScriptMemberSnapshot, ScriptInstanceId } from "../../vm";
 import { Layout, TabNode } from "flexlayout-react";
 import { debugLayoutModel } from "./layout";
 import { VscDebugStepOver, VscDebugStepInto, VscDebugStepOut, VscDebugContinue } from "react-icons/vsc";
+import { PropertyRowCustom, propertyTableStyles as pts } from "../../components/PropertyTable";
 
 interface DebugInspectorProps {}
 
@@ -35,16 +36,7 @@ type DatumAccessRef =
       datumRef: DatumRef;
     };
 
-type DatumDebugListProps = {
-  label?: string;
-  datumRef: DatumAccessRef;
-  depth?: number;
-};
-function DatumDebugListItems({
-  label,
-  datumRef,
-  depth = 0,
-}: DatumDebugListProps) {
+function DatumRow({ label, datumRef }: { label?: string; datumRef: DatumAccessRef }) {
   const [isExpanded, setIsExpanded] = useState(false);
   const datum = useAppSelector((state) => {
     switch (datumRef.type) {
@@ -52,8 +44,8 @@ function DatumDebugListItems({
         return state.vm.scriptInstanceSnapshots[datumRef.instanceId];
       case "datum":
         if (datumRef.datumRef === 0) {
-          return {type: 'void' as const, debugDescription: '<Void>'};
-        } else {          
+          return { type: 'void' as const, debugDescription: '<Void>' };
+        } else {
           return state.vm.datumSnapshots[datumRef.datumRef];
         }
     }
@@ -71,88 +63,100 @@ function DatumDebugListItems({
       }
     }
   }, [datumLoaded, datumRef]);
+
   if (datumRef && !datum) {
     return (
-      <ListView.Item style={{ paddingLeft: 16 * depth }}>
-        Loading...
-      </ListView.Item>
+      <PropertyRowCustom label={label ?? ""}>
+        <span className={pts.propNull}>Loading...</span>
+      </PropertyRowCustom>
     );
   }
+
+  const isExpandable = datum.type === "scriptInstance" || datum.type === "propList" || datum.type === "list";
+
+  const childEntries = (): Record<string, DatumAccessRef> => {
+    if (datum.type === "scriptInstance") {
+      return {
+        ancestor: datum.ancestor
+          ? { type: "scriptInstance", instanceId: datum.ancestor }
+          : { type: "datum", datumRef: 0 },
+        ...Object.fromEntries(
+          Object.entries(datum.properties).map(([key, value]) => [
+            key, { type: "datum" as const, datumRef: value },
+          ])
+        ),
+      };
+    }
+    if (datum.type === "propList") {
+      return Object.fromEntries(
+        Object.entries(datum.properties).map(([key, value]) => [
+          key, { type: "datum" as const, datumRef: value },
+        ])
+      );
+    }
+    return {};
+  };
+
+  const childList = (): DatumRef[] => {
+    if (datum.type === "list") return datum.items;
+    return [];
+  };
+
+  const valueContent = (
+    <>
+      {isExpandable && (
+        <span
+          className={pts.propExpandToggle}
+          onClick={(e) => { e.stopPropagation(); setIsExpanded(!isExpanded); }}
+          style={{ marginRight: 4 }}
+        >
+          {isExpanded ? "\u25BC" : "\u25B6"}
+        </span>
+      )}
+      <span className={pts.propString}>{datum.debugDescription}</span>
+    </>
+  );
+
   return (
     <>
-      <ListView.Item
-        style={{ paddingLeft: 16 * depth }}
-        onClick={() => setIsExpanded(!isExpanded)}
-      >
-        {label && `${label}: `}
-        {datum.debugDescription}
-      </ListView.Item>
-      {isExpanded && datum.type === "scriptInstance" && (
-        <DatumDebugTable
-          datums={{
-            ancestor: datum.ancestor
-              ? {
-                  type: "scriptInstance",
-                  instanceId: datum.ancestor,
-                }
-              : {
-                  type: "datum",
-                  datumRef: 0,
-                },
-            ...Object.fromEntries(
-              Object.entries(datum.properties).map(([key, value]) => [
-                key,
-                {
-                  type: "datum",
-                  datumRef: value,
-                },
-              ])
-            ),
-          }}
-          depth={depth + 1}
-        />
+      <PropertyRowCustom label={label ?? ""}>
+        {valueContent}
+      </PropertyRowCustom>
+      {isExpanded && datum.type === "list" && (
+        <div className={pts.propNested}>
+          {childList().map((item, i) => (
+            <DatumRow key={i} label={String(i)} datumRef={{ type: "datum", datumRef: item }} />
+          ))}
+        </div>
       )}
-      {isExpanded && datum.type === "propList" && (
-        <DatumDebugTable
-          datums={Object.fromEntries(
-            Object.entries(datum.properties).map(([key, value]) => [
-              key,
-              {
-                type: "datum",
-                datumRef: value,
-              },
-            ])
-          )}
-          depth={depth + 1}
-        />
+      {isExpanded && (datum.type === "scriptInstance" || datum.type === "propList") && (
+        <div className={pts.propNested}>
+          {Object.entries(childEntries()).map(([key, ref]) => (
+            <DatumRow key={key} label={key} datumRef={ref} />
+          ))}
+        </div>
       )}
-      {isExpanded &&
-        datum.type === "list" &&
-        datum.items.map((item, i) => (
-          <DatumDebugListItems
-            key={i}
-            datumRef={{ type: "datum", datumRef: item }}
-            depth={depth + 1}
-          />
-        ))}
     </>
   );
 }
 
-type DatumDebugTableProps = {
-  datums: Record<string, DatumAccessRef>;
-  depth?: number;
-};
-
-function DatumDebugTable({ datums, depth }: DatumDebugTableProps) {
+function DatumTable({ datums }: { datums: Record<string, DatumAccessRef> }) {
   return (
-    <>
-      {Object.entries(datums).map(([key, value]) => (
-        <>
-          <DatumDebugListItems label={key} datumRef={value} depth={depth} />
-        </>
+    <div className={pts.propTable}>
+      {Object.entries(datums).map(([key, ref]) => (
+        <DatumRow key={key} label={key} datumRef={ref} />
       ))}
-    </>
+    </div>
+  );
+}
+
+function DatumList({ items }: { items: DatumRef[] }) {
+  return (
+    <div className={pts.propTable}>
+      {items.map((ref, i) => (
+        <DatumRow key={i} label={String(i)} datumRef={{ type: "datum", datumRef: ref }} />
+      ))}
+    </div>
   );
 }
 
@@ -365,21 +369,18 @@ function Locals({ selectedScopeIndex }: { selectedScopeIndex?: number }) {
   const selectedScope =
     selectedScopeIndex !== undefined ? scopes[selectedScopeIndex] : undefined;
   return (
-    <ListView className={styles.listContainer}>
-      <DatumDebugTable
+    <div className={pts.propTableScrollable}>
+      <DatumTable
         datums={Object.fromEntries(
           Object.entries(selectedScope?.locals || {}).map(
             ([key, value]) => [
               key,
-              {
-                type: "datum",
-                datumRef: value,
-              },
+              { type: "datum" as const, datumRef: value },
             ]
           )
         )}
       />
-    </ListView>
+    </div>
   );
 }
 
@@ -389,16 +390,9 @@ function Args({ selectedScopeIndex }: { selectedScopeIndex?: number }) {
     selectedScopeIndex !== undefined ? scopes[selectedScopeIndex] : undefined;
 
   return (
-    <ListView className={styles.listContainer}>
-      {selectedScope?.args.map((datum, i) => {
-        return (
-          <DatumDebugListItems
-            key={i}
-            datumRef={{ type: "datum", datumRef: datum }}
-          />
-        );
-      })}
-    </ListView>
+    <div className={pts.propTableScrollable}>
+      <DatumList items={selectedScope?.args || []} />
+    </div>
   );
 }
 
@@ -408,36 +402,25 @@ function Stack({ selectedScopeIndex }: { selectedScopeIndex?: number }) {
     selectedScopeIndex !== undefined ? scopes[selectedScopeIndex] : undefined;
 
   return (
-    <ListView className={styles.listContainer}>
-      {selectedScope &&
-        selectedScope.stack.map((datum, i) => {
-          return (
-            <DatumDebugListItems
-              key={i}
-              datumRef={{ type: "datum", datumRef: datum }}
-            />
-          );
-        })}
-    </ListView>
+    <div className={pts.propTableScrollable}>
+      <DatumList items={selectedScope?.stack || []} />
+    </div>
   );
 }
 
 function Globals() {
   const globals = useAppSelector((state) => selectGlobals(state.vm));
   return (
-    <ListView className={styles.listContainer}>
-      <DatumDebugTable
+    <div className={pts.propTableScrollable}>
+      <DatumTable
         datums={Object.fromEntries(
           Object.entries(globals).map(([key, value]) => [
             key,
-            {
-              type: "datum",
-              datumRef: value,
-            },
+            { type: "datum" as const, datumRef: value },
           ])
         )}
       />
-    </ListView>
+    </div>
   );
 }
 
@@ -462,5 +445,5 @@ export default function DebugInspector({}: DebugInspectorProps) {
       return null;
     }
   }
-  return <Layout model={debugLayoutModel} factory={factory} />;
+  return <div style={{ textAlign: 'left'}} ><Layout model={debugLayoutModel} factory={factory} /></div>;
 }
