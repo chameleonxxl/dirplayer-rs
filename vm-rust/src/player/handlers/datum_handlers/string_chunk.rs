@@ -179,7 +179,11 @@ impl StringChunkUtils {
         let (start, end) = range;
         let start_index = std::cmp::max(0, start - 1) as usize;
         let end_index = if end == 0 {
-            (start_index + 1) as usize
+            if start <= 0 {
+                start_index
+            } else {
+                (start_index + 1) as usize
+            }
         } else if end == -1 || end > max_length as i32 {
             max_length as usize
         } else {
