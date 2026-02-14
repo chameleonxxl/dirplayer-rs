@@ -2,7 +2,7 @@
 // Ported from ProjectorRays
 
 use std::rc::Rc;
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use crate::director::lingo::opcode::OpCode;
 use super::enums::{ChunkExprType, PutType, DatumType, CaseExpect};
 use super::code_writer::CodeWriter;
@@ -294,12 +294,12 @@ pub enum AstNode {
     ExitRepeat,
     NextRepeat,
     Put { put_type: PutType, variable: Rc<AstNode>, value: Rc<AstNode> },
-    If { condition: Rc<AstNode>, block1: Rc<RefCell<BlockNode>>, block2: Rc<RefCell<BlockNode>>, has_else: bool },
+    If { condition: Rc<AstNode>, block1: Rc<RefCell<BlockNode>>, block2: Rc<RefCell<BlockNode>>, has_else: Cell<bool> },
     RepeatWhile { condition: Rc<AstNode>, block: Rc<RefCell<BlockNode>>, start_index: u32 },
     RepeatWithIn { var_name: String, list: Rc<AstNode>, block: Rc<RefCell<BlockNode>>, start_index: u32 },
     RepeatWithTo { var_name: String, start: Rc<AstNode>, end: Rc<AstNode>, up: bool, block: Rc<RefCell<BlockNode>>, start_index: u32 },
     Tell { window: Rc<AstNode>, block: Rc<RefCell<BlockNode>> },
-    Case { value: Rc<AstNode>, first_label: Option<Rc<RefCell<CaseLabelNode>>>, otherwise: Option<Rc<RefCell<OtherwiseNode>>>, end_pos: i32, potential_otherwise_pos: i32 },
+    Case { value: Rc<AstNode>, first_label: RefCell<Option<Rc<RefCell<CaseLabelNode>>>>, otherwise: RefCell<Option<Rc<RefCell<OtherwiseNode>>>>, end_pos: Cell<i32>, potential_otherwise_pos: Cell<i32> },
     NewObj { obj_type: String, args: Rc<AstNode> },
     When { event: i32, script: String },
     SoundCmd { cmd: String, args: Rc<AstNode> },
@@ -660,7 +660,7 @@ impl AstNode {
                 code.indent();
                 block1.borrow().write_script_with_depth(code, dot, sum, depth + 1);
                 code.unindent();
-                if *has_else && !block2.borrow().children.is_empty() {
+                if has_else.get() && !block2.borrow().children.is_empty() {
                     code.write("else");
                     code.end_line();
                     code.indent();
@@ -723,7 +723,7 @@ impl AstNode {
                 code.indent();
 
                 // Write case labels
-                let mut current_label = first_label.clone();
+                let mut current_label = first_label.borrow().clone();
                 while let Some(label) = current_label {
                     let label_ref = label.borrow();
                     label_ref.write_script_with_depth(code, dot, sum, depth + 1);
@@ -731,7 +731,7 @@ impl AstNode {
                 }
 
                 // Write otherwise
-                if let Some(ow) = otherwise {
+                if let Some(ow) = &*otherwise.borrow() {
                     ow.borrow().write_script_with_depth(code, dot, sum, depth + 1);
                 }
 

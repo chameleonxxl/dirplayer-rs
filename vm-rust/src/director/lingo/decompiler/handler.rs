@@ -3,7 +3,7 @@
 
 use std::collections::HashMap;
 use std::rc::Rc;
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use fxhash::FxHashMap;
 
 use crate::director::chunks::handler::HandlerDef;
@@ -46,6 +46,18 @@ struct StackEntry {
     bytecode_indices: Vec<usize>,
 }
 
+/// Tracks what type of statement owns a block, for ancestor handling on block exit
+#[derive(Clone)]
+enum BlockContext {
+    Root,
+    IfBlock1(Rc<AstNode>),
+    IfBlock2,
+    CaseLabel,
+    CaseOtherwise,
+    Loop { start_index: u32 },
+    Tell,
+}
+
 /// Decompiler state
 struct DecompilerState<'a> {
     handler: &'a HandlerDef,
@@ -61,6 +73,7 @@ struct DecompilerState<'a> {
     root_block: Rc<RefCell<BlockNode>>,
     current_block: Rc<RefCell<BlockNode>>,
     block_stack: Vec<Rc<RefCell<BlockNode>>>,
+    block_context_stack: Vec<BlockContext>,
 
     // Bytecode tagging
     bytecode_tags: Vec<BytecodeInfo>,
@@ -99,6 +112,7 @@ impl<'a> DecompilerState<'a> {
             root_block,
             current_block,
             block_stack: Vec::new(),
+            block_context_stack: Vec::new(),
             bytecode_tags,
             bytecode_pos_map,
             current_bytecode_index: 0,
@@ -165,15 +179,33 @@ impl<'a> DecompilerState<'a> {
         });
     }
 
-    fn enter_block(&mut self, block: Rc<RefCell<BlockNode>>) {
+    fn enter_block(&mut self, block: Rc<RefCell<BlockNode>>, context: BlockContext) {
         self.block_stack.push(self.current_block.clone());
+        self.block_context_stack.push(context);
         self.current_block = block;
     }
 
-    fn exit_block(&mut self) {
+    fn exit_block(&mut self) -> Option<BlockContext> {
         if let Some(parent) = self.block_stack.pop() {
             self.current_block = parent;
+            self.block_context_stack.pop()
+        } else {
+            None
         }
+    }
+
+    fn ancestor_loop_start_index(&self) -> Option<u32> {
+        for ctx in self.block_context_stack.iter().rev() {
+            match ctx {
+                BlockContext::Loop { start_index } => return Some(*start_index),
+                _ => {}
+            }
+        }
+        None
+    }
+
+    fn ancestor_statement_context(&self) -> Option<&BlockContext> {
+        self.block_context_stack.last()
     }
 
     fn add_statement(&mut self, node: Rc<AstNode>, bytecode_indices: Vec<usize>) {
@@ -480,9 +512,55 @@ impl<'a> DecompilerState<'a> {
             let bytecode = &self.handler.bytecode_array[i];
             let pos = bytecode.pos as u32;
 
-            // Exit blocks at their end position
+            // Exit blocks at their end position, handling ancestor statements
             while pos == self.current_block.borrow().end_pos {
-                self.exit_block();
+                let context = self.exit_block();
+                match context {
+                    Some(BlockContext::IfBlock1(if_node)) => {
+                        // If this block belongs to an if statement with an else branch,
+                        // enter block2
+                        if let AstNode::If { has_else, block2, .. } = if_node.as_ref() {
+                            if has_else.get() {
+                                self.enter_block(block2.clone(), BlockContext::IfBlock2);
+                            }
+                        }
+                    }
+                    Some(BlockContext::CaseLabel) => {
+                        // Check if case label expects otherwise
+                        let case_label = self.current_block.borrow().current_case_label.clone();
+                        if let Some(label) = case_label {
+                            let expect = label.borrow().expect;
+                            match expect {
+                                CaseExpect::Otherwise => {
+                                    self.current_block.borrow_mut().current_case_label = None;
+                                    // Find the ancestor case statement and add otherwise
+                                    // We need to find the case statement in the current block's children
+                                    let children = self.current_block.borrow().children.clone();
+                                    for child in children.iter().rev() {
+                                        if let AstNode::Case { otherwise, potential_otherwise_pos, .. } = child.as_ref() {
+                                            let ow = Rc::new(RefCell::new(OtherwiseNode::new()));
+                                            otherwise.borrow_mut().replace(ow.clone());
+                                            // Tag the otherwise position
+                                            let ow_pos = potential_otherwise_pos.get();
+                                            if ow_pos >= 0 {
+                                                if let Some(&ow_index) = self.bytecode_pos_map.get(&(ow_pos as usize)) {
+                                                    self.bytecode_tags[ow_index].tag = BytecodeTag::EndCase;
+                                                }
+                                            }
+                                            self.enter_block(ow.borrow().block.clone(), BlockContext::CaseOtherwise);
+                                            break;
+                                        }
+                                    }
+                                }
+                                CaseExpect::End => {
+                                    self.current_block.borrow_mut().current_case_label = None;
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+                    _ => {}
+                }
             }
 
             self.current_bytecode_index = i;
@@ -503,7 +581,7 @@ impl<'a> DecompilerState<'a> {
         let opcode = bytecode.opcode;
         let obj = bytecode.obj;
 
-        let mut next_block: Option<Rc<RefCell<BlockNode>>> = None;
+        let mut next_block: Option<(Rc<RefCell<BlockNode>>, BlockContext)> = None;
         let mut collected_indices: Vec<usize> = vec![index];
 
         let translation: Option<Rc<AstNode>> = match opcode {
@@ -589,7 +667,7 @@ impl<'a> DecompilerState<'a> {
                 let window = self.pop_with_indices(&mut collected_indices);
                 let block = Rc::new(RefCell::new(BlockNode::new()));
                 let tell = Rc::new(AstNode::Tell { window, block: block.clone() });
-                next_block = Some(block);
+                next_block = Some((block, BlockContext::Tell));
                 Some(tell)
             }
 
@@ -720,7 +798,7 @@ impl<'a> DecompilerState<'a> {
             }
 
             OpCode::Jmp => {
-                self.translate_jmp(index, obj)
+                self.translate_jmp(index, obj, &mut next_block)
             }
 
             OpCode::EndRepeat => {
@@ -832,14 +910,29 @@ impl<'a> DecompilerState<'a> {
             }
 
             OpCode::Peek => {
-                // This is either the start of a case statement or part of repeat with in
-                // For now, just push a placeholder
-                None
+                // This op denotes a case statement (repeat with in is handled via tags)
+                return self.translate_peek(index);
             }
 
             OpCode::Pop => {
-                // Pop instructions are handled specially
-                None
+                if self.bytecode_tags[index].tag == BytecodeTag::EndCase {
+                    // End of case statement, already recognized
+                    return 1;
+                }
+                if obj == 1 && self.stack.len() == 1 {
+                    // Unused value on stack - end of case statement with no labels
+                    let value = self.pop_with_indices(&mut collected_indices);
+                    Some(Rc::new(AstNode::Case {
+                        value,
+                        first_label: RefCell::new(None),
+                        otherwise: RefCell::new(None),
+                        end_pos: Cell::new(-1),
+                        potential_otherwise_pos: Cell::new(-1),
+                    }))
+                } else {
+                    // Pop before return within case statement, no translation needed
+                    return 1;
+                }
             }
 
             OpCode::TheBuiltin => {
@@ -887,14 +980,14 @@ impl<'a> DecompilerState<'a> {
             }
         }
 
-        if let Some(block) = next_block {
-            self.enter_block(block);
+        if let Some((block, context)) = next_block {
+            self.enter_block(block, context);
         }
 
         1
     }
 
-    fn translate_jmp(&mut self, index: usize, obj: i64) -> Option<Rc<AstNode>> {
+    fn translate_jmp(&mut self, index: usize, obj: i64, next_block: &mut Option<(Rc<RefCell<BlockNode>>, BlockContext)>) -> Option<Rc<AstNode>> {
         let bytecode_array = &self.handler.bytecode_array;
         let bytecode = &bytecode_array[index];
         let target_pos = bytecode.pos + obj as usize;
@@ -905,112 +998,88 @@ impl<'a> DecompilerState<'a> {
         };
 
         // Check for exit repeat / next repeat
-        if target_index > 0 {
-            let prev_bytecode = &bytecode_array[target_index - 1];
-            if prev_bytecode.opcode == OpCode::EndRepeat {
-                let owner_loop = self.bytecode_tags[target_index - 1].owner_loop;
-                if owner_loop > 0 {
+        if let Some(ancestor_loop_start) = self.ancestor_loop_start_index() {
+            if target_index > 0 {
+                let prev_bytecode = &bytecode_array[target_index - 1];
+                if prev_bytecode.opcode == OpCode::EndRepeat
+                    && self.bytecode_tags[target_index - 1].owner_loop == ancestor_loop_start
+                {
                     return Some(Rc::new(AstNode::ExitRepeat));
+                }
+            }
+
+            if self.bytecode_tags[target_index].tag == BytecodeTag::NextRepeatTarget
+                && self.bytecode_tags[target_index].owner_loop == ancestor_loop_start
+            {
+                return Some(Rc::new(AstNode::NextRepeat));
+            }
+        }
+
+        // Check for else branch or case statement jmp
+        if index + 1 < bytecode_array.len() {
+            let next_bytecode = &bytecode_array[index + 1];
+            if next_bytecode.pos as u32 == self.current_block.borrow().end_pos {
+                // Check ancestor statement context
+                if let Some(ctx) = self.ancestor_statement_context().cloned() {
+                    match ctx {
+                        BlockContext::IfBlock1(ref if_node) => {
+                            // Set up else branch
+                            if let AstNode::If { has_else, block2, .. } = if_node.as_ref() {
+                                has_else.set(true);
+                                block2.borrow_mut().end_pos = target_pos as u32;
+                            }
+                            return None; // if statement amended, nothing to push
+                        }
+                        BlockContext::CaseLabel => {
+                            // Case statement jmp - find ancestor case to set end position
+                            // The case statement is in the grandparent block (block_stack[-2])
+                            if self.block_stack.len() >= 2 {
+                                let grandparent = &self.block_stack[self.block_stack.len() - 2];
+                                let children = grandparent.borrow().children.clone();
+                                for child in children.iter().rev() {
+                                    if let AstNode::Case { end_pos, potential_otherwise_pos, .. } = child.as_ref() {
+                                        potential_otherwise_pos.set(bytecode.pos as i32);
+                                        end_pos.set(target_pos as i32);
+                                        self.bytecode_tags[target_index].tag = BytecodeTag::EndCase;
+                                        return None;
+                                    }
+                                }
+                            }
+                            return None;
+                        }
+                        _ => {}
+                    }
                 }
             }
         }
 
-        if self.bytecode_tags[target_index].tag == BytecodeTag::NextRepeatTarget {
-            return Some(Rc::new(AstNode::NextRepeat));
-        }
-
-        // Check for else branch
-        if index + 1 < bytecode_array.len() {
-            let next_bytecode = &bytecode_array[index + 1];
-            if next_bytecode.pos as u32 == self.current_block.borrow().end_pos {
-                // This is the end of an if block, update the else block
-                // The parent if statement should handle this
-                return None;
+        // Check for case statement starting with 'otherwise'
+        if target_index < bytecode_array.len() {
+            let target_bytecode = &bytecode_array[target_index];
+            if target_bytecode.opcode == OpCode::Pop && target_bytecode.obj == 1 {
+                let value = self.pop();
+                let case_stmt = Rc::new(AstNode::Case {
+                    value,
+                    first_label: RefCell::new(None),
+                    otherwise: RefCell::new(None),
+                    end_pos: Cell::new(target_pos as i32),
+                    potential_otherwise_pos: Cell::new(-1),
+                });
+                self.bytecode_tags[target_index].tag = BytecodeTag::EndCase;
+                // Add otherwise
+                let ow = Rc::new(RefCell::new(OtherwiseNode::new()));
+                if let AstNode::Case { otherwise, .. } = case_stmt.as_ref() {
+                    otherwise.borrow_mut().replace(ow.clone());
+                }
+                *next_block = Some((ow.borrow().block.clone(), BlockContext::CaseOtherwise));
+                return Some(case_stmt);
             }
         }
 
-        Some(Rc::new(AstNode::Comment("jmp".to_string())))
+        Some(Rc::new(AstNode::Comment("ERROR: Could not identify jmp".to_string())))
     }
 
-    fn translate_jmpifz(&mut self, index: usize, obj: i64, next_block: &mut Option<Rc<RefCell<BlockNode>>>) -> Option<Rc<AstNode>> {
-        let bytecode = &self.handler.bytecode_array[index];
-        let end_pos = (bytecode.pos as i64 + obj) as u32;
-        let tag = self.bytecode_tags[index].tag;
-
-        match tag {
-            BytecodeTag::RepeatWhile => {
-                let condition = self.pop();
-                let block = Rc::new(RefCell::new(BlockNode::new()));
-                block.borrow_mut().end_pos = end_pos;
-                *next_block = Some(block.clone());
-                Some(Rc::new(AstNode::RepeatWhile {
-                    condition,
-                    block,
-                    start_index: index as u32,
-                }))
-            }
-
-            BytecodeTag::RepeatWithIn => {
-                let list = self.pop();
-                let var_name = self.get_var_name_from_set(index + 5);
-                let block = Rc::new(RefCell::new(BlockNode::new()));
-                block.borrow_mut().end_pos = end_pos;
-                *next_block = Some(block.clone());
-                Some(Rc::new(AstNode::RepeatWithIn {
-                    var_name,
-                    list,
-                    block,
-                    start_index: index as u32,
-                }))
-            }
-
-            BytecodeTag::RepeatWithTo | BytecodeTag::RepeatWithDownTo => {
-                let up = tag == BytecodeTag::RepeatWithTo;
-                let end = self.pop();
-                let start = self.pop();
-
-                let bytecode_array = &self.handler.bytecode_array;
-                let end_index = self.bytecode_pos_map.get(&(end_pos as usize)).copied().unwrap_or(index);
-                let end_repeat = &bytecode_array[end_index.saturating_sub(1)];
-                let condition_start_pos = end_repeat.pos.saturating_sub(end_repeat.obj as usize);
-                let condition_start_index = self.bytecode_pos_map.get(&condition_start_pos).copied().unwrap_or(0);
-                let var_name = if condition_start_index > 0 {
-                    self.get_var_name_from_set(condition_start_index - 1)
-                } else {
-                    "i".to_string()
-                };
-
-                let block = Rc::new(RefCell::new(BlockNode::new()));
-                block.borrow_mut().end_pos = end_pos;
-                *next_block = Some(block.clone());
-                Some(Rc::new(AstNode::RepeatWithTo {
-                    var_name,
-                    start,
-                    end,
-                    up,
-                    block,
-                    start_index: index as u32,
-                }))
-            }
-
-            _ => {
-                // Regular if statement
-                let condition = self.pop();
-                let block1 = Rc::new(RefCell::new(BlockNode::new()));
-                block1.borrow_mut().end_pos = end_pos;
-                let block2 = Rc::new(RefCell::new(BlockNode::new()));
-                *next_block = Some(block1.clone());
-                Some(Rc::new(AstNode::If {
-                    condition,
-                    block1,
-                    block2,
-                    has_else: false,
-                }))
-            }
-        }
-    }
-
-    fn translate_jmpifz_with_indices(&mut self, index: usize, obj: i64, next_block: &mut Option<Rc<RefCell<BlockNode>>>, indices: &mut Vec<usize>) -> Option<Rc<AstNode>> {
+    fn translate_jmpifz_with_indices(&mut self, index: usize, obj: i64, next_block: &mut Option<(Rc<RefCell<BlockNode>>, BlockContext)>, indices: &mut Vec<usize>) -> Option<Rc<AstNode>> {
         let bytecode = &self.handler.bytecode_array[index];
         let end_pos = (bytecode.pos as i64 + obj) as u32;
         let tag = self.bytecode_tags[index].tag;
@@ -1020,7 +1089,7 @@ impl<'a> DecompilerState<'a> {
                 let condition = self.pop_with_indices(indices);
                 let block = Rc::new(RefCell::new(BlockNode::new()));
                 block.borrow_mut().end_pos = end_pos;
-                *next_block = Some(block.clone());
+                *next_block = Some((block.clone(), BlockContext::Loop { start_index: index as u32 }));
                 Some(Rc::new(AstNode::RepeatWhile {
                     condition,
                     block,
@@ -1033,7 +1102,7 @@ impl<'a> DecompilerState<'a> {
                 let var_name = self.get_var_name_from_set(index + 5);
                 let block = Rc::new(RefCell::new(BlockNode::new()));
                 block.borrow_mut().end_pos = end_pos;
-                *next_block = Some(block.clone());
+                *next_block = Some((block.clone(), BlockContext::Loop { start_index: index as u32 }));
                 Some(Rc::new(AstNode::RepeatWithIn {
                     var_name,
                     list,
@@ -1060,7 +1129,7 @@ impl<'a> DecompilerState<'a> {
 
                 let block = Rc::new(RefCell::new(BlockNode::new()));
                 block.borrow_mut().end_pos = end_pos;
-                *next_block = Some(block.clone());
+                *next_block = Some((block.clone(), BlockContext::Loop { start_index: index as u32 }));
                 Some(Rc::new(AstNode::RepeatWithTo {
                     var_name,
                     start,
@@ -1077,15 +1146,121 @@ impl<'a> DecompilerState<'a> {
                 let block1 = Rc::new(RefCell::new(BlockNode::new()));
                 block1.borrow_mut().end_pos = end_pos;
                 let block2 = Rc::new(RefCell::new(BlockNode::new()));
-                *next_block = Some(block1.clone());
-                Some(Rc::new(AstNode::If {
+                let if_node = Rc::new(AstNode::If {
                     condition,
-                    block1,
+                    block1: block1.clone(),
                     block2,
-                    has_else: false,
-                }))
+                    has_else: Cell::new(false),
+                });
+                *next_block = Some((block1, BlockContext::IfBlock1(if_node.clone())));
+                Some(if_node)
             }
         }
+    }
+
+    /// Handle the Peek opcode - case statement processing
+    /// This recursively processes bytecodes until the comparison (eq/nteq) is found,
+    /// following the ProjectorRays C++ implementation.
+    fn translate_peek(&mut self, index: usize) -> usize {
+        let prev_label = self.current_block.borrow().current_case_label.clone();
+        let original_stack_size = self.stack.len();
+
+        // Process bytecodes until we find the eq/nteq comparison
+        // This follows the C++ do-while pattern: process a bytecode, then check the next one
+        let mut curr_index = index + 1;
+        loop {
+            if curr_index >= self.handler.bytecode_array.len() {
+                break;
+            }
+            self.current_bytecode_index = curr_index;
+            let consumed = self.translate_bytecode(curr_index);
+            curr_index += consumed;
+            // Check if the next bytecode is the comparison
+            if curr_index < self.handler.bytecode_array.len() {
+                let next_bc = &self.handler.bytecode_array[curr_index];
+                if self.stack.len() == original_stack_size + 1
+                    && (next_bc.opcode == OpCode::Eq || next_bc.opcode == OpCode::NtEq)
+                {
+                    break;
+                }
+            }
+        }
+
+        if curr_index >= self.handler.bytecode_array.len() {
+            let error = Rc::new(AstNode::Comment("ERROR: Expected eq or nteq!".to_string()));
+            self.add_statement(error, vec![index]);
+            return curr_index - index + 1;
+        }
+
+        // Check if the comparison is <> (equivalent case) or = (new case)
+        let not_eq = self.handler.bytecode_array[curr_index].opcode == OpCode::NtEq;
+        let case_value = self.pop(); // The case value to compare against
+
+        curr_index += 1;
+        if curr_index >= self.handler.bytecode_array.len()
+            || self.handler.bytecode_array[curr_index].opcode != OpCode::JmpIfZ
+        {
+            let error = Rc::new(AstNode::Comment("ERROR: Expected jmpifz!".to_string()));
+            self.add_statement(error, vec![index]);
+            return curr_index - index + 1;
+        }
+
+        let jmpifz = &self.handler.bytecode_array[curr_index];
+        let jmp_pos = (jmpifz.pos as i64 + jmpifz.obj) as usize;
+        let target_index = self.bytecode_pos_map.get(&jmp_pos).copied().unwrap_or(0);
+
+        let expect = if not_eq {
+            CaseExpect::Or
+        } else if target_index < self.handler.bytecode_array.len()
+            && self.handler.bytecode_array[target_index].opcode == OpCode::Peek
+        {
+            CaseExpect::Next
+        } else if target_index < self.handler.bytecode_array.len()
+            && self.handler.bytecode_array[target_index].opcode == OpCode::Pop
+            && self.handler.bytecode_array[target_index].obj == 1
+            && (target_index == 0
+                || self.handler.bytecode_array[target_index - 1].opcode != OpCode::Jmp
+                || (self.handler.bytecode_array[target_index - 1].pos as i64
+                    + self.handler.bytecode_array[target_index - 1].obj)
+                    == self.handler.bytecode_array[target_index].pos as i64)
+        {
+            CaseExpect::End
+        } else {
+            CaseExpect::Otherwise
+        };
+
+        let curr_label = Rc::new(RefCell::new(CaseLabelNode::new(case_value, expect)));
+        self.current_block.borrow_mut().current_case_label = Some(curr_label.clone());
+
+        if prev_label.is_none() {
+            // First case label - create the case statement
+            let peeked_value = self.pop();
+            let case_stmt = Rc::new(AstNode::Case {
+                value: peeked_value,
+                first_label: RefCell::new(Some(curr_label.clone())),
+                otherwise: RefCell::new(None),
+                end_pos: Cell::new(-1),
+                potential_otherwise_pos: Cell::new(-1),
+            });
+            self.add_statement(case_stmt, vec![index]);
+        } else if let Some(ref prev) = prev_label {
+            let prev_expect = prev.borrow().expect;
+            if prev_expect == CaseExpect::Or {
+                prev.borrow_mut().next_or = Some(curr_label.clone());
+            } else if prev_expect == CaseExpect::Next {
+                prev.borrow_mut().next_label = Some(curr_label.clone());
+            }
+        }
+
+        // Create a block for the case label body (unless expecting another equivalent case)
+        if expect != CaseExpect::Or {
+            let block = Rc::new(RefCell::new(BlockNode::new()));
+            block.borrow_mut().end_pos = jmp_pos as u32;
+            curr_label.borrow_mut().block = block.clone();
+            self.enter_block(block, BlockContext::CaseLabel);
+        }
+
+        curr_index - index + 1
     }
 
     fn translate_obj_call(&mut self, method: &str, arg_list: Rc<AstNode>) -> Option<Rc<AstNode>> {
@@ -1117,6 +1292,66 @@ impl<'a> DecompilerState<'a> {
                 }
                 "delete" if nargs == 1 => {
                     return Some(Rc::new(AstNode::ChunkDelete(args[0].clone())));
+                }
+                "getProp" | "getPropRef" if (nargs == 3 || nargs == 4) => {
+                    if let Some(datum) = args[1].get_value() {
+                        if datum.datum_type == DatumType::Symbol {
+                            let obj = args[0].clone();
+                            let prop_name = datum.string_value.clone();
+                            let i = args[2].clone();
+                            let i2 = if nargs == 4 { Some(args[3].clone()) } else { None };
+                            return Some(Rc::new(AstNode::ObjPropIndex {
+                                obj,
+                                prop: prop_name,
+                                index: i,
+                                index2: i2,
+                            }));
+                        }
+                    }
+                }
+                "setProp" if (nargs == 4 || nargs == 5) => {
+                    if let Some(datum) = args[1].get_value() {
+                        if datum.datum_type == DatumType::Symbol {
+                            let obj = args[0].clone();
+                            let prop_name = datum.string_value.clone();
+                            let i = args[2].clone();
+                            let i2 = if nargs == 5 { Some(args[3].clone()) } else { None };
+                            let prop_expr = Rc::new(AstNode::ObjPropIndex {
+                                obj,
+                                prop: prop_name,
+                                index: i,
+                                index2: i2,
+                            });
+                            let val = args[nargs - 1].clone();
+                            return Some(Rc::new(AstNode::Assignment {
+                                variable: prop_expr,
+                                value: val,
+                                force_verbose: false,
+                            }));
+                        }
+                    }
+                }
+                "count" if nargs == 2 => {
+                    if let Some(datum) = args[1].get_value() {
+                        if datum.datum_type == DatumType::Symbol {
+                            let obj = args[0].clone();
+                            let prop_name = datum.string_value.clone();
+                            let prop_expr = Rc::new(AstNode::ObjProp { obj, prop: prop_name });
+                            return Some(Rc::new(AstNode::ObjProp { obj: prop_expr, prop: "count".to_string() }));
+                        }
+                    }
+                }
+                "setContents" | "setContentsAfter" | "setContentsBefore" if nargs == 2 => {
+                    let put_type = match method {
+                        "setContents" => PutType::Into,
+                        "setContentsAfter" => PutType::After,
+                        _ => PutType::Before,
+                    };
+                    return Some(Rc::new(AstNode::Put {
+                        put_type,
+                        variable: args[0].clone(),
+                        value: args[1].clone(),
+                    }));
                 }
                 _ => {}
             }
@@ -1303,25 +1538,122 @@ impl<'a> DecompilerState<'a> {
         result
     }
 
-    fn read_v4_property(&self, property_type: i64, property_id: i32) -> Option<Rc<AstNode>> {
+    fn read_v4_property(&mut self, property_type: i64, property_id: i32) -> Option<Rc<AstNode>> {
         match property_type {
             0x00 => {
-                // Movie/system property
-                let prop_name = get_movie_property_name(property_id);
-                Some(Rc::new(AstNode::The(prop_name)))
+                if property_id <= 0x0b {
+                    // Movie/system property
+                    let prop_name = get_movie_property_name(property_id);
+                    Some(Rc::new(AstNode::The(prop_name)))
+                } else {
+                    // Last chunk
+                    let string = self.pop();
+                    let chunk_type = match property_id - 0x0b {
+                        1 => ChunkExprType::Char,
+                        2 => ChunkExprType::Word,
+                        3 => ChunkExprType::Item,
+                        4 => ChunkExprType::Line,
+                        _ => ChunkExprType::Char,
+                    };
+                    Some(Rc::new(AstNode::LastStringChunk { chunk_type, obj: string }))
+                }
             }
             0x01 => {
-                // Sound property
-                let sound_id = Rc::new(AstNode::Literal(Datum::int(property_id)));
-                Some(Rc::new(AstNode::SoundProp { sound_id, prop: 1 }))
+                // Number of chunks
+                let string = self.pop();
+                let chunk_type = match property_id {
+                    1 => ChunkExprType::Char,
+                    2 => ChunkExprType::Word,
+                    3 => ChunkExprType::Item,
+                    4 => ChunkExprType::Line,
+                    _ => ChunkExprType::Char,
+                };
+                Some(Rc::new(AstNode::StringChunkCount { chunk_type, obj: string }))
             }
             0x02 => {
+                // Menu property
+                let menu_id = self.pop();
+                Some(Rc::new(AstNode::MenuProp { menu_id, prop: property_id as u32 }))
+            }
+            0x03 => {
+                // Menu item property
+                let menu_id = self.pop();
+                let item_id = self.pop();
+                Some(Rc::new(AstNode::MenuItemProp { menu_id, item_id, prop: property_id as u32 }))
+            }
+            0x04 => {
+                // Sound property
+                let sound_id = self.pop();
+                Some(Rc::new(AstNode::SoundProp { sound_id, prop: property_id as u32 }))
+            }
+            0x05 => {
+                // Resource property - unused
+                Some(Rc::new(AstNode::Comment("ERROR: Resource property".to_string())))
+            }
+            0x06 => {
                 // Sprite property
-                let sprite_id = Rc::new(AstNode::Literal(Datum::int(property_id)));
-                Some(Rc::new(AstNode::SpriteProp { sprite_id, prop: 0 }))
+                let sprite_id = self.pop();
+                Some(Rc::new(AstNode::SpriteProp { sprite_id, prop: property_id as u32 }))
+            }
+            0x07 => {
+                // Animation property
+                let prop_name = get_animation_property_name(property_id);
+                Some(Rc::new(AstNode::The(prop_name)))
+            }
+            0x08 => {
+                // Animation 2 property
+                let prop_name = get_animation2_property_name(property_id);
+                if property_id == 0x02 && self.version >= 500 {
+                    let cast_lib = self.pop();
+                    // Check if castLib is non-zero
+                    let is_zero = if let AstNode::Literal(d) = cast_lib.as_ref() {
+                        d.datum_type == DatumType::Int && d.int_value == 0
+                    } else {
+                        false
+                    };
+                    if !is_zero {
+                        let cast_lib_node = Rc::new(AstNode::Member {
+                            member_type: "castLib".to_string(),
+                            member_id: cast_lib,
+                            cast_id: None,
+                        });
+                        return Some(Rc::new(AstNode::TheProp { obj: cast_lib_node, prop: prop_name }));
+                    }
+                }
+                Some(Rc::new(AstNode::The(prop_name)))
+            }
+            0x09..=0x15 => {
+                // Member properties (generic cast member, chunk of cast member, field, etc.)
+                let prop_name = get_member_property_name(property_id);
+                let cast_id = if self.version >= 500 {
+                    Some(self.pop())
+                } else {
+                    None
+                };
+                let member_id = self.pop();
+                let prefix = if property_type == 0x0b || property_type == 0x0c {
+                    "field"
+                } else if property_type == 0x14 || property_type == 0x15 {
+                    "script"
+                } else if self.version >= 500 {
+                    "member"
+                } else {
+                    "cast"
+                };
+                let member = Rc::new(AstNode::Member {
+                    member_type: prefix.to_string(),
+                    member_id,
+                    cast_id,
+                });
+                let entity = if property_type == 0x0a || property_type == 0x0c || property_type == 0x15 {
+                    self.read_chunk_ref(member)
+                } else {
+                    member
+                };
+                Some(Rc::new(AstNode::TheProp { obj: entity, prop: prop_name }))
             }
             _ => {
-                Some(Rc::new(AstNode::Comment(format!("Unknown property type {} id {}", property_type, property_id))))
+                Some(Rc::new(AstNode::Comment(format!("ERROR: Unknown property type {}", property_type))))
             }
         }
     }
@@ -1443,7 +1775,63 @@ fn get_movie_property_name(id: i32) -> String {
         0x04 => "keyDownScript".to_string(),
         0x05 => "keyUpScript".to_string(),
         0x06 => "timeoutScript".to_string(),
+        0x07 => "short time".to_string(),
+        0x08 => "abbr time".to_string(),
+        0x09 => "long time".to_string(),
+        0x0a => "short date".to_string(),
+        0x0b => "abbr date".to_string(),
         _ => format!("movieProp_{}", id),
+    }
+}
+
+fn get_animation_property_name(id: i32) -> String {
+    match id {
+        0x01 => "beepOn".to_string(),
+        0x02 => "buttonStyle".to_string(),
+        0x03 => "centerStage".to_string(),
+        0x04 => "checkBoxAccess".to_string(),
+        0x05 => "checkBoxType".to_string(),
+        0x06 => "colorDepth".to_string(),
+        0x07 => "colorQD".to_string(),
+        0x08 => "exitLock".to_string(),
+        0x09 => "fixStageSize".to_string(),
+        0x0a => "fullColorPermit".to_string(),
+        0x0b => "imageDirect".to_string(),
+        0x0c => "doubleClick".to_string(),
+        _ => format!("animProp_{}", id),
+    }
+}
+
+fn get_animation2_property_name(id: i32) -> String {
+    match id {
+        0x01 => "the number of castMembers".to_string(),
+        0x02 => "the number of castMembers".to_string(),
+        0x03 => "the number of menus".to_string(),
+        _ => format!("anim2Prop_{}", id),
+    }
+}
+
+fn get_member_property_name(id: i32) -> String {
+    match id {
+        0x01 => "name".to_string(),
+        0x02 => "text".to_string(),
+        0x03 => "textStyle".to_string(),
+        0x04 => "textFont".to_string(),
+        0x05 => "textHeight".to_string(),
+        0x06 => "textAlign".to_string(),
+        0x07 => "textSize".to_string(),
+        0x08 => "picture".to_string(),
+        0x09 => "hilite".to_string(),
+        0x0a => "number".to_string(),
+        0x0b => "size".to_string(),
+        0x0c => "loop".to_string(),
+        0x0d => "duration".to_string(),
+        0x0e => "controller".to_string(),
+        0x0f => "directToStage".to_string(),
+        0x10 => "sound".to_string(),
+        0x11 => "foreColor".to_string(),
+        0x12 => "backColor".to_string(),
+        _ => format!("memberProp_{}", id),
     }
 }
 
