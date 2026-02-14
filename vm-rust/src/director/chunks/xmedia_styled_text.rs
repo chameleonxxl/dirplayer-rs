@@ -444,7 +444,11 @@ fn parse_section_3(data: &[u8]) -> Result<Section3Data, String> {
     // Use Mac Roman decoding for bytes 0x80-0xFF (Director files use Mac Roman encoding)
     let mut text = String::new();
     for i in text_start..text_end {
-        text.push(mac_roman_to_char(data[i]));
+        let ch = mac_roman_to_char(data[i]);
+        if ch == '\0' {
+            break; // Stop at first null byte (padding)
+        }
+        text.push(ch);
     }
 
     debug!("    Section 3: {} chars", text.len());
