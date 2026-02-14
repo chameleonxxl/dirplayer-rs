@@ -214,10 +214,17 @@ fn escape_string(s: &str) -> String {
     result
 }
 
+/// A child statement within a block, pairing the AST node with its bytecode indices
+#[derive(Clone, Debug)]
+pub struct BlockChild {
+    pub node: Rc<AstNode>,
+    pub bytecode_indices: Vec<usize>,
+}
+
 /// Block node for containing statements
 #[derive(Clone, Debug)]
 pub struct BlockNode {
-    pub children: Vec<Rc<AstNode>>,
+    pub children: Vec<BlockChild>,
     pub end_pos: u32,
     pub current_case_label: Option<Rc<RefCell<CaseLabelNode>>>,
 }
@@ -231,8 +238,8 @@ impl BlockNode {
         }
     }
 
-    pub fn add_child(&mut self, child: Rc<AstNode>) {
-        self.children.push(child);
+    pub fn add_child(&mut self, child: Rc<AstNode>, bytecode_indices: Vec<usize>) {
+        self.children.push(BlockChild { node: child, bytecode_indices });
     }
 
     pub fn write_script(&self, code: &mut CodeWriter, dot: bool, sum: bool) {
@@ -246,7 +253,7 @@ impl BlockNode {
             return;
         }
         for child in &self.children {
-            child.write_script_with_depth(code, dot, sum, depth + 1);
+            child.node.write_script_with_depth(code, dot, sum, depth + 1);
             code.end_line();
         }
     }

@@ -84,8 +84,6 @@ struct DecompilerState<'a> {
     // Current bytecode index being processed
     current_bytecode_index: usize,
 
-    // Statement to bytecode indices mapping
-    statement_bytecode_indices: Vec<Vec<usize>>,
 }
 
 impl<'a> DecompilerState<'a> {
@@ -116,7 +114,6 @@ impl<'a> DecompilerState<'a> {
             bytecode_tags,
             bytecode_pos_map,
             current_bytecode_index: 0,
-            statement_bytecode_indices: Vec::new(),
         }
     }
 
@@ -209,8 +206,7 @@ impl<'a> DecompilerState<'a> {
     }
 
     fn add_statement(&mut self, node: Rc<AstNode>, bytecode_indices: Vec<usize>) {
-        self.current_block.borrow_mut().add_child(node);
-        self.statement_bytecode_indices.push(bytecode_indices);
+        self.current_block.borrow_mut().add_child(node, bytecode_indices);
     }
 
     /// Tag loops in the bytecode
@@ -537,7 +533,7 @@ impl<'a> DecompilerState<'a> {
                                     // We need to find the case statement in the current block's children
                                     let children = self.current_block.borrow().children.clone();
                                     for child in children.iter().rev() {
-                                        if let AstNode::Case { otherwise, potential_otherwise_pos, .. } = child.as_ref() {
+                                        if let AstNode::Case { otherwise, potential_otherwise_pos, .. } = child.node.as_ref() {
                                             let ow = Rc::new(RefCell::new(OtherwiseNode::new()));
                                             otherwise.borrow_mut().replace(ow.clone());
                                             // Tag the otherwise position
@@ -1037,7 +1033,7 @@ impl<'a> DecompilerState<'a> {
                                 let grandparent = &self.block_stack[self.block_stack.len() - 2];
                                 let children = grandparent.borrow().children.clone();
                                 for child in children.iter().rev() {
-                                    if let AstNode::Case { end_pos, potential_otherwise_pos, .. } = child.as_ref() {
+                                    if let AstNode::Case { end_pos, potential_otherwise_pos, .. } = child.node.as_ref() {
                                         potential_otherwise_pos.set(bytecode.pos as i32);
                                         end_pos.set(target_pos as i32);
                                         self.bytecode_tags[target_index].tag = BytecodeTag::EndCase;
@@ -1658,11 +1654,9 @@ impl<'a> DecompilerState<'a> {
         }
     }
 
-    /// Generate output lines from the parsed AST
+    /// Generate output lines from the parsed AST by walking the tree in render order.
+    /// This ensures bytecode indices are correctly associated with the lines they belong to.
     fn generate_output(&self) -> DecompiledHandler {
-        let mut code = CodeWriter::new();
-
-        // Write handler header
         let name = self.lctx.names.get(self.handler.name_id as usize)
             .cloned()
             .unwrap_or_else(|| format!("handler_{}", self.handler.name_id));
@@ -1671,84 +1665,11 @@ impl<'a> DecompilerState<'a> {
             .filter_map(|&id| self.lctx.names.get(id as usize).cloned())
             .collect();
 
-        // Write block contents
-        self.root_block.borrow().write_script(&mut code, true, false);
-
-        let output = code.into_string();
-
-        // Parse output into lines and create mappings
+        let dot = self.version >= 500;
         let mut lines = Vec::new();
         let mut bytecode_to_line = HashMap::new();
 
-        // Flatten all bytecode indices from statements
-        // Each statement contributes its bytecode indices to the corresponding output lines
-        let output_lines: Vec<&str> = output.lines().filter(|l| !l.trim().is_empty()).collect();
-
-        // If we have statement bytecode indices, use them
-        // Otherwise fall back to sequential assignment
-        if !self.statement_bytecode_indices.is_empty() && !output_lines.is_empty() {
-            // Match statements to output lines, skipping closing keywords (end if, end repeat, etc.)
-            // which don't correspond to any statement but appear in the output.
-            let statements_count = self.statement_bytecode_indices.len();
-            let mut statement_index = 0;
-
-            for (line_idx, line) in output_lines.iter().enumerate() {
-                let indent = line.chars().take_while(|c| *c == ' ').count() as u32 / 2;
-                let text = line.trim().to_string();
-
-                // Check if this is a closing keyword line (no executable bytecodes)
-                let is_closing_line = text == "end if" || text == "end repeat" ||
-                                      text == "end tell" || text == "end case" ||
-                                      text == "else";
-
-                let stmt_indices = if is_closing_line {
-                    // Closing lines have no executable bytecodes
-                    vec![]
-                } else if statement_index < statements_count {
-                    // Assign next statement's bytecodes to this line
-                    let indices = self.statement_bytecode_indices[statement_index].clone();
-                    statement_index += 1;
-                    indices
-                } else {
-                    vec![]
-                };
-
-                // Sort indices and use them
-                let mut sorted_indices = stmt_indices;
-                sorted_indices.sort_unstable();
-
-                // Tokenize the line for syntax highlighting
-                let spans = tokenize_line(&text);
-
-                lines.push(DecompiledLine {
-                    text,
-                    bytecode_indices: sorted_indices.clone(),
-                    indent,
-                    spans,
-                });
-
-                // Map each bytecode index to this line
-                for &bc_idx in &sorted_indices {
-                    bytecode_to_line.entry(bc_idx).or_insert(line_idx);
-                }
-            }
-        } else {
-            // Fallback: no statement tracking available
-            for (line_idx, line) in output_lines.iter().enumerate() {
-                let indent = line.chars().take_while(|c| *c == ' ').count() as u32 / 2;
-                let text = line.trim().to_string();
-
-                // Tokenize the line for syntax highlighting
-                let spans = tokenize_line(&text);
-
-                lines.push(DecompiledLine {
-                    text,
-                    bytecode_indices: vec![],
-                    indent,
-                    spans,
-                });
-            }
-        }
+        Self::collect_block_lines(&self.root_block.borrow(), dot, 0, &mut lines, &mut bytecode_to_line);
 
         DecompiledHandler {
             name,
@@ -1756,6 +1677,163 @@ impl<'a> DecompilerState<'a> {
             lines,
             bytecode_to_line,
         }
+    }
+
+    /// Render a line of text from an AST node (just the text, no newline)
+    fn render_node_text(node: &AstNode, dot: bool) -> String {
+        let mut code = CodeWriter::new();
+        node.write_script(&mut code, dot, false);
+        code.into_string()
+    }
+
+    /// Add a line with bytecode index tracking
+    fn push_line(text: String, indices: Vec<usize>, indent: u32, lines: &mut Vec<DecompiledLine>, bytecode_to_line: &mut HashMap<usize, usize>) {
+        let line_idx = lines.len();
+        let mut sorted_indices = indices;
+        sorted_indices.sort_unstable();
+        let spans = tokenize_line(&text);
+        for &bc_idx in &sorted_indices {
+            bytecode_to_line.entry(bc_idx).or_insert(line_idx);
+        }
+        lines.push(DecompiledLine {
+            text,
+            bytecode_indices: sorted_indices,
+            indent,
+            spans,
+        });
+    }
+
+    /// Walk a block's children in render order, collecting lines with correct indices
+    fn collect_block_lines(block: &BlockNode, dot: bool, indent: u32, lines: &mut Vec<DecompiledLine>, bytecode_to_line: &mut HashMap<usize, usize>) {
+        for child in &block.children {
+            Self::collect_statement_lines(&child.node, &child.bytecode_indices, dot, indent, lines, bytecode_to_line);
+        }
+    }
+
+    /// Walk a single statement, rendering its header line with its indices,
+    /// recursing into inner blocks, and adding structural closing lines
+    fn collect_statement_lines(node: &AstNode, indices: &[usize], dot: bool, indent: u32, lines: &mut Vec<DecompiledLine>, bytecode_to_line: &mut HashMap<usize, usize>) {
+        match node {
+            AstNode::If { condition, block1, block2, has_else } => {
+                // "if <condition> then"
+                let mut code = CodeWriter::new();
+                code.write("if ");
+                condition.write_script(&mut code, dot, false);
+                code.write(" then");
+                Self::push_line(code.into_string(), indices.to_vec(), indent, lines, bytecode_to_line);
+
+                // Block1 contents
+                Self::collect_block_lines(&block1.borrow(), dot, indent + 1, lines, bytecode_to_line);
+
+                // Else
+                if has_else.get() && !block2.borrow().children.is_empty() {
+                    Self::push_line("else".to_string(), vec![], indent, lines, bytecode_to_line);
+                    Self::collect_block_lines(&block2.borrow(), dot, indent + 1, lines, bytecode_to_line);
+                }
+
+                // End if
+                Self::push_line("end if".to_string(), vec![], indent, lines, bytecode_to_line);
+            }
+
+            AstNode::RepeatWhile { condition, block, .. } => {
+                let mut code = CodeWriter::new();
+                code.write("repeat while ");
+                condition.write_script(&mut code, dot, false);
+                Self::push_line(code.into_string(), indices.to_vec(), indent, lines, bytecode_to_line);
+                Self::collect_block_lines(&block.borrow(), dot, indent + 1, lines, bytecode_to_line);
+                Self::push_line("end repeat".to_string(), vec![], indent, lines, bytecode_to_line);
+            }
+
+            AstNode::RepeatWithIn { var_name, list, block, .. } => {
+                let mut code = CodeWriter::new();
+                code.write("repeat with ");
+                code.write(var_name);
+                code.write(" in ");
+                list.write_script(&mut code, dot, false);
+                Self::push_line(code.into_string(), indices.to_vec(), indent, lines, bytecode_to_line);
+                Self::collect_block_lines(&block.borrow(), dot, indent + 1, lines, bytecode_to_line);
+                Self::push_line("end repeat".to_string(), vec![], indent, lines, bytecode_to_line);
+            }
+
+            AstNode::RepeatWithTo { var_name, start, end, up, block, .. } => {
+                let mut code = CodeWriter::new();
+                code.write("repeat with ");
+                code.write(var_name);
+                code.write(" = ");
+                start.write_script(&mut code, dot, false);
+                if *up {
+                    code.write(" to ");
+                } else {
+                    code.write(" down to ");
+                }
+                end.write_script(&mut code, dot, false);
+                Self::push_line(code.into_string(), indices.to_vec(), indent, lines, bytecode_to_line);
+                Self::collect_block_lines(&block.borrow(), dot, indent + 1, lines, bytecode_to_line);
+                Self::push_line("end repeat".to_string(), vec![], indent, lines, bytecode_to_line);
+            }
+
+            AstNode::Tell { window, block } => {
+                let mut code = CodeWriter::new();
+                code.write("tell ");
+                window.write_script(&mut code, dot, false);
+                Self::push_line(code.into_string(), indices.to_vec(), indent, lines, bytecode_to_line);
+                Self::collect_block_lines(&block.borrow(), dot, indent + 1, lines, bytecode_to_line);
+                Self::push_line("end tell".to_string(), vec![], indent, lines, bytecode_to_line);
+            }
+
+            AstNode::Case { value, first_label, otherwise, .. } => {
+                // "case <value> of"
+                let mut code = CodeWriter::new();
+                code.write("case ");
+                value.write_script(&mut code, dot, false);
+                code.write(" of");
+                Self::push_line(code.into_string(), indices.to_vec(), indent, lines, bytecode_to_line);
+
+                // Case labels
+                let mut current_label = first_label.borrow().clone();
+                while let Some(label) = current_label {
+                    let label_ref = label.borrow();
+                    Self::collect_case_label_lines(&label_ref, dot, indent + 1, lines, bytecode_to_line);
+                    current_label = label_ref.next_label.clone();
+                }
+
+                // Otherwise
+                if let Some(ow) = &*otherwise.borrow() {
+                    let ow_ref = ow.borrow();
+                    Self::push_line("otherwise:".to_string(), vec![], indent + 1, lines, bytecode_to_line);
+                    Self::collect_block_lines(&ow_ref.block.borrow(), dot, indent + 2, lines, bytecode_to_line);
+                }
+
+                Self::push_line("end case".to_string(), vec![], indent, lines, bytecode_to_line);
+            }
+
+            // Simple statements (non-compound) - render as a single line
+            _ => {
+                let text = Self::render_node_text(node, dot);
+                Self::push_line(text, indices.to_vec(), indent, lines, bytecode_to_line);
+            }
+        }
+    }
+
+    /// Collect lines for a case label
+    fn collect_case_label_lines(label: &CaseLabelNode, dot: bool, indent: u32, lines: &mut Vec<DecompiledLine>, bytecode_to_line: &mut HashMap<usize, usize>) {
+        // Render the label value(s)
+        let mut code = CodeWriter::new();
+        label.value.write_script(&mut code, dot, false);
+
+        // Chained "or" values
+        let mut current_or = label.next_or.clone();
+        while let Some(or_label) = current_or {
+            code.write(", ");
+            or_label.borrow().value.write_script(&mut code, dot, false);
+            current_or = or_label.borrow().next_or.clone();
+        }
+
+        code.write(":");
+        Self::push_line(code.into_string(), vec![], indent, lines, bytecode_to_line);
+
+        // Case label block contents
+        Self::collect_block_lines(&label.block.borrow(), dot, indent + 1, lines, bytecode_to_line);
     }
 }
 
