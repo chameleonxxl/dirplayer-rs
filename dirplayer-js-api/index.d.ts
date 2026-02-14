@@ -20,7 +20,8 @@ type JsBridgeChunk = {
 }
 
 export type DebugContentBitmap = { type: 'bitmap'; width: number; height: number; data: Uint8Array };
-export type DebugContent = DebugContentBitmap;
+export type DebugContentDatum = { type: 'datum'; datumRef: DatumRef; snapshot: JsBridgeDatum };
+export type DebugContent = DebugContentBitmap | DebugContentDatum;
 
 type TVmCallbacks = {
   onMovieLoaded: Function,

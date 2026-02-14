@@ -46,6 +46,24 @@
   background-color: #004578;
 }
 
+.clearButton {
+  padding: 0.5rem 1rem;
+  background-color: #666;
+  color: white;
+  border: none;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 0.9rem;
+}
+
+.clearButton:hover {
+  background-color: #555;
+}
+
+.clearButton:active {
+  background-color: #444;
+}
+
 .debugMessages {
   white-space: pre-wrap;
   flex: 1;
@@ -59,4 +77,68 @@
   max-width: 100%;
   margin: 4px 0;
   border: 1px solid #ccc;
+}
+
+.datumInspector {
+  margin: 2px 0;
+}
+
+.datumLoading {
+  color: #999;
+  font-style: italic;
+}
+
+.datumExpandable {
+  cursor: pointer;
+  user-select: none;
+}
+
+.datumExpandable:hover {
+  text-decoration: underline;
+}
+
+.datumToggle {
+  font-size: 0.75em;
+}
+
+.datumChildren {
+  margin-left: 16px;
+  border-left: 1px solid #ddd;
+  padding-left: 8px;
+}
+
+.datumEntry {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.datumKey {
+  color: #666;
+}
+
+.pagination {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 4px;
+  font-size: 0.85em;
+}
+
+.pagination button {
+  background: none;
+  border: 1px solid #ccc;
+  border-radius: 3px;
+  padding: 1px 6px;
+  cursor: pointer;
+  font-size: 0.85em;
+}
+
+.pagination button:hover:not(:disabled) {
+  background-color: #eee;
+}
+
+.pagination button:disabled {
+  opacity: 0.4;
+  cursor: default;
 }

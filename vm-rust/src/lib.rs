@@ -240,6 +240,13 @@ pub fn request_datum(datum_id: u32) {
 }
 
 #[wasm_bindgen]
+pub fn clear_debug_messages() {
+    reserve_player_mut(|player| {
+        player.debug_datum_refs.clear();
+    });
+}
+
+#[wasm_bindgen]
 pub fn request_script_instance_snapshot(script_instance_id: u32) {
     reserve_player_ref(|player| {
         JsApi::dispatch_script_instance_snapshot(

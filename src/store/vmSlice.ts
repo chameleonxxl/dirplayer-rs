@@ -4,7 +4,8 @@ import { DebugContent, ICastMemberRef, JsBridgeBreakpoint, JsBridgeChunk } from 
 
 export type DebugMessageText = { type: 'text'; content: string };
 export type DebugMessageBitmap = { type: 'bitmap'; width: number; height: number; data: Uint8Array };
-export type DebugMessage = DebugMessageText | DebugMessageBitmap;
+export type DebugMessageDatum = { type: 'datum'; datumRef: DatumRef; snapshot: JsBridgeDatum };
+export type DebugMessage = DebugMessageText | DebugMessageBitmap | DebugMessageDatum;
 
 export type TMemberSubscription = {
   memberRef: ICastMemberIdentifier,
@@ -250,6 +251,12 @@ const vmSlice = createSlice({
         debugMessages: [...state.debugMessages, action.payload as DebugMessage],
       }
     },
+    debugMessagesCleared: (state) => {
+      return {
+        ...state,
+        debugMessages: [],
+      }
+    },
   }
 })
 
@@ -266,5 +273,5 @@ export const selectGlobals = (state: VMSliceState) => state.globals
 export const selectDebugMessages = (state: VMSliceState) => state.debugMessages
 
 // Action creators are generated for each case reducer function
-export const { ready, castListChanged, castLibNameChanged, castMemberListChanged, scoreChanged, frameChanged, scopeListChanged, onScriptError, breakpointListChanged, scriptErrorCleared, globalsChanged, setTimeoutHandle, removeTimeoutHandle, datumSnapshot, scriptInstanceSnapshot, channelChanged, memberSubscribed, memberUnsubscribed, castMemberChanged, channelDisplayNameChanged, movieLoaded, movieChunkListChanged, debugMessageAdded, debugContentAdded } = vmSlice.actions
+export const { ready, castListChanged, castLibNameChanged, castMemberListChanged, scoreChanged, frameChanged, scopeListChanged, onScriptError, breakpointListChanged, scriptErrorCleared, globalsChanged, setTimeoutHandle, removeTimeoutHandle, datumSnapshot, scriptInstanceSnapshot, channelChanged, memberSubscribed, memberUnsubscribed, castMemberChanged, channelDisplayNameChanged, movieLoaded, movieChunkListChanged, debugMessageAdded, debugContentAdded, debugMessagesCleared } = vmSlice.actions
 export default vmSlice.reducer

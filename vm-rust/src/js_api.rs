@@ -430,6 +430,15 @@ impl JsApi {
         Self::dispatch_debug_content(map.to_js_object());
     }
 
+    pub fn dispatch_debug_datum(datum_ref: &DatumRef, player: &DirPlayer) {
+        let map = js_sys::Map::new();
+        map.str_set("type", &safe_js_string("datum"));
+        map.str_set("datumRef", &JsValue::from_f64(datum_ref.unwrap() as f64));
+        let snapshot = datum_to_js_bridge(datum_ref, player, 0);
+        map.str_set("snapshot", &snapshot);
+        Self::dispatch_debug_content(map.to_js_object());
+    }
+
     pub fn get_mini_member_snapshot(member: &CastMember) -> js_sys::Map {
         let member_map = js_sys::Map::new();
         member_map.str_set("name", &safe_js_string(&member.name));

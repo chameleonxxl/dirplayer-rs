@@ -306,22 +306,35 @@ impl BuiltInHandlerManager {
                 "inspect requires exactly 1 argument".to_string(),
             ));
         }
-        reserve_player_ref(|player| {
+        reserve_player_mut(|player| {
             let datum = player.get_datum(&args[0]);
-            let bitmap_ref = datum.to_bitmap_ref()?;
-            let src = player
-                .bitmap_manager
-                .get_bitmap(*bitmap_ref)
-                .ok_or_else(|| ScriptError::new("Invalid bitmap reference".to_string()))?;
+            match datum {
+                Datum::BitmapRef(bitmap_ref) => {
+                    let src = player
+                        .bitmap_manager
+                        .get_bitmap(*bitmap_ref)
+                        .ok_or_else(|| ScriptError::new("Invalid bitmap reference".to_string()))?;
 
-            let w = src.width;
-            let h = src.height;
-            let palettes = player.movie.cast_manager.palettes();
-            let mut dest = Bitmap::new(w, h, 32, 32, 0, PaletteRef::BuiltIn(get_system_default_palette()));
-            let rect = IntRect::from(0, 0, w as i32, h as i32);
-            dest.copy_pixels(&palettes, src, rect.clone(), rect, &HashMap::new(), None);
+                    let w = src.width;
+                    let h = src.height;
+                    let palettes = player.movie.cast_manager.palettes();
+                    let mut dest = Bitmap::new(w, h, 32, 32, 0, PaletteRef::BuiltIn(get_system_default_palette()));
+                    let rect = IntRect::from(0, 0, w as i32, h as i32);
+                    dest.copy_pixels(&palettes, src, rect.clone(), rect, &HashMap::new(), None);
 
-            JsApi::dispatch_debug_bitmap(w as u32, h as u32, &dest.data);
+                    JsApi::dispatch_debug_bitmap(w as u32, h as u32, &dest.data);
+                }
+                Datum::List(..) | Datum::PropList(..) | Datum::ScriptInstanceRef(..) => {
+                    JsApi::dispatch_debug_datum(&args[0], player);
+                    player.debug_datum_refs.push(args[0].clone());
+                }
+                _ => {
+                    return Err(ScriptError::new(format!(
+                        "inspect does not support type: {}",
+                        datum.type_str()
+                    )));
+                }
+            }
             Ok(())
         })?;
         Ok(DatumRef::Void)

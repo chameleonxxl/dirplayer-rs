@@ -226,6 +226,7 @@ pub struct DirPlayer {
     /// When a filmloop sprite's behavior runs, this is set to the filmloop's ScoreRef
     /// so that sprite(n) accesses the filmloop's sprites, not the main stage.
     pub current_score_context: ScoreRef,
+    pub debug_datum_refs: Vec<DatumRef>,
 }
 
 impl DirPlayer {
@@ -333,6 +334,7 @@ impl DirPlayer {
             is_initializing_behavior_props: false,
             last_initialized_frame: None,
             current_score_context: ScoreRef::Stage,
+            debug_datum_refs: vec![],
         };
 
         result.reset();
@@ -893,6 +895,8 @@ impl DirPlayer {
         self.globals.clear();
         debug!("Clearing timeout manager");
         self.timeout_manager.clear();
+        debug!("Clearing debug datum refs");
+        self.debug_datum_refs.clear();
         // netManager.clear();
         debug!("Resetting score");
         self.movie.score.reset();
