@@ -1,11 +1,13 @@
 .propTable {
   padding: 2px 0;
   font-size: 12px;
+  width: fit-content;
+  min-width: 100%;
 }
 
 .propTableScrollable {
   height: 100%;
-  overflow-y: auto;
+  overflow: auto;
 }
 
 .propRow {
@@ -13,6 +15,7 @@
   align-items: baseline;
   padding: 1px 8px;
   line-height: 1.6;
+  white-space: nowrap;
 }
 
 .propRow:hover {
@@ -24,7 +27,6 @@
   flex-shrink: 0;
   font-weight: 500;
   padding-right: 8px;
-  word-break: break-word;
 }
 
 .propTable > .propRow > .propKey {
@@ -34,7 +36,6 @@
 .propValue {
   flex: 1;
   min-width: 0;
-  word-break: break-word;
 }
 
 .propString {

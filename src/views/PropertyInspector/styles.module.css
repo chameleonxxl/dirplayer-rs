@@ -162,7 +162,7 @@
 
 .chunkDetailContent {
   height: 100%;
-  overflow-y: auto;
+  overflow: auto;
   font-size: 12px;
 }
 
