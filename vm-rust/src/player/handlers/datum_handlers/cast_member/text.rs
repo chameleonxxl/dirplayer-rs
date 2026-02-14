@@ -105,7 +105,7 @@ impl TextMemberHandlers {
                 // Need mutable access - drop immutable borrows first
                 let cast_member = player.movie.cast_manager.find_mut_member_by_ref(&member_ref).unwrap();
                 let text_member = cast_member.member_type.as_text_mut().unwrap();
-                text_member.text = new_text;
+                text_member.text = new_text.trim_end_matches('\0').to_string();
                 Ok(DatumRef::Void)
             }
             _ => Err(ScriptError::new(format!(
@@ -1093,7 +1093,7 @@ impl TextMemberHandlers {
                 |player| value.string_value(),
                 |cast_member, value| {
                     let text_member = cast_member.member_type.as_text_mut().unwrap();
-                    let new_text = value?;
+                    let new_text = value?.trim_end_matches('\0').to_string();
 
                     let old_color = text_member.html_styled_spans.first()
                         .and_then(|s| s.style.color)

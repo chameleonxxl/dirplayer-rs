@@ -55,7 +55,7 @@ impl FieldMemberHandlers {
                     .member_type
                     .as_field_mut()
                     .unwrap();
-                member.text = new_contents;
+                member.text = new_contents.trim_end_matches('\0').to_string();
                 Ok(DatumRef::Void)
             }
             _ => Err(ScriptError::new(format!(
@@ -278,7 +278,7 @@ impl FieldMemberHandlers {
                 member_ref,
                 |player| value.string_value(),
                 |cast_member, value| {
-                    cast_member.member_type.as_field_mut().unwrap().text = value?;
+                    cast_member.member_type.as_field_mut().unwrap().text = value?.trim_end_matches('\0').to_string();
                     Ok(())
                 },
             ),
