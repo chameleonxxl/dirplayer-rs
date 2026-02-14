@@ -49,7 +49,7 @@ impl DirectorExt for BinaryReader {
 
     fn read_string(&mut self, len: usize) -> Result<String, std::io::Error> {
         let bytes = self.read_bytes(len).unwrap();
-        return Ok(unsafe { String::from_utf8_unchecked(bytes.to_vec()).to_string() });
+        return Ok(String::from_utf8_lossy(&bytes).into_owned());
     }
 
     fn read_apple_float_80(&mut self) -> Result<f64, String> {
