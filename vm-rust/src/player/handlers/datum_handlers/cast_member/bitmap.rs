@@ -38,11 +38,22 @@ impl BitmapMemberHandlers {
             "width" => Ok(Datum::Int(bitmap.map(|x| x.width as i32).unwrap_or(0))),
             "height" => Ok(Datum::Int(bitmap.map(|x| x.height as i32).unwrap_or(0))),
             "image" => Ok(Datum::BitmapRef(bitmap_ref)),
-            "paletteRef" => Ok(Datum::PaletteRef(
-                bitmap
+            "paletteRef" => {
+                let palette = bitmap
                     .map(|x| x.palette_ref.clone())
-                    .unwrap_or(PaletteRef::BuiltIn(BuiltInPalette::GrayScale)),
-            )),
+                    .unwrap_or(PaletteRef::BuiltIn(BuiltInPalette::GrayScale));
+                match palette {
+                    PaletteRef::BuiltIn(builtin) => Ok(Datum::Symbol(builtin.symbol_string())),
+                    PaletteRef::Member(member_ref) => {
+                        let member_ref = CastMemberRef {
+                            cast_member: member_ref.cast_member,
+                            cast_lib: member_ref.cast_lib,
+                        };
+                        Ok(Datum::CastMember(member_ref))
+                    }
+                    PaletteRef::Default => Ok(Datum::PaletteRef(PaletteRef::Default)),
+                }
+            },
             "regPoint" => Ok(Datum::Point([
                 player.alloc_datum(Datum::Int(reg_x)),
                 player.alloc_datum(Datum::Int(reg_y)),
