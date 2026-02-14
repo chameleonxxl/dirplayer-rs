@@ -138,3 +138,38 @@
 .chunkSave:hover {
   text-decoration: underline;
 }
+
+.chunkNodeSelected {
+  background-color: #d0e8ff;
+}
+
+.chunkNodeSelected:hover {
+  background-color: #b8dcff;
+}
+
+/* Chunk detail panel */
+
+.chunkDetailEmpty {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  color: #999;
+  font-size: 12px;
+  padding: 16px;
+  text-align: center;
+}
+
+.chunkDetailContent {
+  height: 100%;
+  overflow-y: auto;
+  font-size: 12px;
+}
+
+.chunkDetailTitle {
+  padding: 6px 8px;
+  border-bottom: 1px solid #eee;
+  background-color: #f8f8f8;
+  font-size: 12px;
+}
+

@@ -42,7 +42,8 @@ use binary_reader::Endian;
 pub struct DirectorFile {
     pub base_path: Url,
     pub file_name: String,
-    //pub endian: Endian,
+    pub endian: Endian,
+    pub after_burned: bool,
     pub version: u16,
     pub cast_entries: Vec<CastListEntry>,
     pub casts: Vec<CastDef>,
@@ -81,10 +82,12 @@ impl DirectorFile {
         };
 
         let meta_fourcc = reader.read_u32().unwrap();
-        if meta_fourcc == FOURCC("XFIR") {
+        let endian = if meta_fourcc == FOURCC("XFIR") {
             reader.set_endian(binary_reader::Endian::Little);
-        }
-        //self.endian = reader.endian;
+            binary_reader::Endian::Little
+        } else {
+            binary_reader::Endian::Big
+        };
 
         let _ = reader.read_u32().unwrap(); // meta length
         let codec = reader.read_u32().unwrap();
@@ -150,6 +153,8 @@ impl DirectorFile {
         return Ok(DirectorFile {
             base_path,
             file_name,
+            endian,
+            after_burned,
             version: rifx.dir_version,
             casts,
             cast_entries,

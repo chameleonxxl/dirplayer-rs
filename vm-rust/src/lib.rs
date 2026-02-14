@@ -281,6 +281,13 @@ pub fn get_chunk_bytes(cast_number: u32, chunk_id: u32) -> Option<Vec<u8>> {
 }
 
 #[wasm_bindgen]
+pub fn get_parsed_chunk(cast_number: u32, chunk_id: u32) -> JsValue {
+    reserve_player_ref(|player| {
+        JsApi::get_parsed_chunk(player, cast_number, chunk_id).into()
+    })
+}
+
+#[wasm_bindgen]
 pub fn clear_debug_messages() {
     reserve_player_mut(|player| {
         player.debug_datum_refs.clear();

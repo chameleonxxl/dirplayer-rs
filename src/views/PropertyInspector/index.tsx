@@ -1,9 +1,9 @@
-import { JSONTree } from "react-json-tree";
 import styles from "./styles.module.css";
 import { TSelectedObject } from "../../store/uiSlice";
 import { useSelectedObjects } from "../../hooks/selection";
 import { useCallback, useMemo } from "react";
 import { Layout, Model, TabNode } from "flexlayout-react";
+import PropertyTable from "../../components/PropertyTable";
 import MovieChunksView from "./MovieChunksView";
 
 interface PropertyInspectorProps {
@@ -59,13 +59,13 @@ export default function PropertyInspector({
   const factory = useCallback((node: TabNode) => {
     switch (node.getComponent()) {
       case "scoreBehavior":
-        return <JSONTree keyPath={["scoreBehavior"]} data={scoreBehaviorRef} />;
+        return <PropertyTable data={scoreBehaviorRef as unknown as Record<string, unknown>} scrollable />;
       case "sprite":
-        return <JSONTree keyPath={["sprite"]} data={{ ...selectedSprite }} />;
+        return <PropertyTable data={{ ...selectedSprite } as unknown as Record<string, unknown>} scrollable />;
       case "member":
-        return <JSONTree keyPath={["member"]} data={member} />;
+        return <PropertyTable data={member as unknown as Record<string, unknown>} scrollable />;
       case "secondaryMember":
-        return <JSONTree keyPath={["secondaryMember"]} data={secondaryMember} />;
+        return <PropertyTable data={secondaryMember as unknown as Record<string, unknown>} scrollable />;
       case "movie":
         return <MovieChunksView />;
       default:

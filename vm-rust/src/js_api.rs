@@ -6,10 +6,11 @@ use wasm_bindgen::prelude::*;
 
 use crate::{
     director::{
-        chunks::script::ScriptChunk,
+        chunks::{self, script::ScriptChunk, Chunk},
         enums::ScriptType,
         file::{DirectorFile, get_variable_multiplier},
         lingo::{datum::Datum, decompiler, script::ScriptContext},
+        rifx::RIFXReaderContext,
         utils::fourcc_to_string,
     },
     player::{
@@ -486,6 +487,316 @@ impl JsApi {
 
         let dir_file = dir_file?;
         dir_file.chunk_container.cached_chunk_views.get(&chunk_id).cloned()
+    }
+
+    fn chunk_to_js(chunk: &Chunk) -> js_sys::Object {
+        let map = js_sys::Map::new();
+        match chunk {
+            Chunk::Cast(c) => {
+                map.str_set("type", &JsValue::from_str("CAS*"));
+                let ids = js_sys::Array::new();
+                for id in &c.member_ids {
+                    ids.push(&JsValue::from_f64(*id as f64));
+                }
+                map.str_set("member_ids", &ids);
+            }
+            Chunk::CastMember(c) => {
+                map.str_set("type", &JsValue::from_str("CASt"));
+                map.str_set("member_type", &JsValue::from_str(&format!("{:?}", c.member_type)));
+                if let Some(info) = &c.member_info {
+                    map.str_set("name", &JsValue::from_str(&ascii_safe(&info.name)));
+                    if !info.script_src_text.is_empty() {
+                        map.str_set("script_src_text", &JsValue::from_str(&ascii_safe(&info.script_src_text)));
+                    }
+                    map.str_set("script_id", &JsValue::from_f64(info.header.script_id as f64));
+                    map.str_set("flags", &JsValue::from_f64(info.header.flags as f64));
+                }
+                // Serialize type-specific data
+                match &c.specific_data {
+                    crate::director::chunks::cast_member::CastMemberSpecificData::Script(st) => {
+                        map.str_set("script_type", &JsValue::from_str(&format!("{:?}", st)));
+                    }
+                    crate::director::chunks::cast_member::CastMemberSpecificData::Bitmap(bi) => {
+                        let bm = js_sys::Map::new();
+                        bm.str_set("width", &JsValue::from_f64(bi.width as f64));
+                        bm.str_set("height", &JsValue::from_f64(bi.height as f64));
+                        bm.str_set("reg_x", &JsValue::from_f64(bi.reg_x as f64));
+                        bm.str_set("reg_y", &JsValue::from_f64(bi.reg_y as f64));
+                        bm.str_set("bit_depth", &JsValue::from_f64(bi.bit_depth as f64));
+                        bm.str_set("palette_id", &JsValue::from_f64(bi.palette_id as f64));
+                        map.str_set("bitmap_info", &bm.to_js_object());
+                    }
+                    crate::director::chunks::cast_member::CastMemberSpecificData::Text(ti) => {
+                        let tm = js_sys::Map::new();
+                        tm.str_set("width", &JsValue::from_f64(ti.width as f64));
+                        tm.str_set("height", &JsValue::from_f64(ti.height as f64));
+                        tm.str_set("editable", &JsValue::from_bool(ti.editable));
+                        tm.str_set("box_type", &JsValue::from_f64(ti.box_type as f64));
+                        tm.str_set("anti_alias", &JsValue::from_bool(ti.anti_alias));
+                        map.str_set("text_info", &tm.to_js_object());
+                    }
+                    crate::director::chunks::cast_member::CastMemberSpecificData::Field(fi) => {
+                        let fm = js_sys::Map::new();
+                        fm.str_set("alignment", &JsValue::from_f64(fi.alignment as f64));
+                        map.str_set("field_info", &fm.to_js_object());
+                    }
+                    _ => {}
+                }
+            }
+            Chunk::CastList(c) => {
+                map.str_set("type", &JsValue::from_str("MCsL"));
+                let entries = js_sys::Array::new();
+                for entry in &c.entries {
+                    let em = js_sys::Map::new();
+                    em.str_set("name", &JsValue::from_str(&ascii_safe(&entry.name)));
+                    em.str_set("file_path", &JsValue::from_str(&ascii_safe(&entry.file_path)));
+                    em.str_set("id", &JsValue::from_f64(entry.id as f64));
+                    em.str_set("min_member", &JsValue::from_f64(entry.min_member as f64));
+                    em.str_set("max_member", &JsValue::from_f64(entry.max_member as f64));
+                    em.str_set("preload_settings", &JsValue::from_f64(entry.preload_settings as f64));
+                    entries.push(&em.to_js_object());
+                }
+                map.str_set("entries", &entries);
+            }
+            Chunk::KeyTable(kt) => {
+                map.str_set("type", &JsValue::from_str("KEY*"));
+                map.str_set("used_count", &JsValue::from_f64(kt.used_count as f64));
+                map.str_set("entry_count", &JsValue::from_f64(kt.entry_count as f64));
+                let entries = js_sys::Array::new();
+                for entry in kt.entries.iter().take(kt.used_count as usize) {
+                    let em = js_sys::Map::new();
+                    em.str_set("section_id", &JsValue::from_f64(entry.section_id as f64));
+                    em.str_set("cast_id", &JsValue::from_f64(entry.cast_id as f64));
+                    em.str_set("fourcc", &JsValue::from_str(&fourcc_to_string(entry.fourcc)));
+                    entries.push(&em.to_js_object());
+                }
+                map.str_set("entries", &entries);
+            }
+            Chunk::ScriptContext(sc) => {
+                map.str_set("type", &JsValue::from_str("Lctx"));
+                map.str_set("entry_count", &JsValue::from_f64(sc.entry_count as f64));
+                map.str_set("lnam_section_id", &JsValue::from_f64(sc.lnam_section_id as f64));
+                let entries = js_sys::Array::new();
+                for entry in &sc.section_map {
+                    let em = js_sys::Map::new();
+                    em.str_set("section_id", &JsValue::from_f64(entry.section_id as f64));
+                    entries.push(&em.to_js_object());
+                }
+                map.str_set("section_map", &entries);
+            }
+            Chunk::ScriptNames(sn) => {
+                map.str_set("type", &JsValue::from_str("Lnam"));
+                let names = js_sys::Array::new();
+                for name in &sn.names {
+                    names.push(&JsValue::from_str(&ascii_safe(name)));
+                }
+                map.str_set("names", &names);
+            }
+            Chunk::Script(sc) => {
+                map.str_set("type", &JsValue::from_str("Lscr"));
+                map.str_set("handler_count", &JsValue::from_f64(sc.handlers.len() as f64));
+                map.str_set("literal_count", &JsValue::from_f64(sc.literals.len() as f64));
+                let prop_ids = js_sys::Array::new();
+                for id in &sc.property_name_ids {
+                    prop_ids.push(&JsValue::from_f64(*id as f64));
+                }
+                map.str_set("property_name_ids", &prop_ids);
+                let handlers = js_sys::Array::new();
+                for handler in &sc.handlers {
+                    let hm = js_sys::Map::new();
+                    hm.str_set("name_id", &JsValue::from_f64(handler.name_id as f64));
+                    hm.str_set("bytecode_count", &JsValue::from_f64(handler.bytecode_array.len() as f64));
+                    let arg_ids = js_sys::Array::new();
+                    for id in &handler.argument_name_ids {
+                        arg_ids.push(&JsValue::from_f64(*id as f64));
+                    }
+                    hm.str_set("argument_name_ids", &arg_ids);
+                    let local_ids = js_sys::Array::new();
+                    for id in &handler.local_name_ids {
+                        local_ids.push(&JsValue::from_f64(*id as f64));
+                    }
+                    hm.str_set("local_name_ids", &local_ids);
+                    let global_ids = js_sys::Array::new();
+                    for id in &handler.global_name_ids {
+                        global_ids.push(&JsValue::from_f64(*id as f64));
+                    }
+                    hm.str_set("global_name_ids", &global_ids);
+                    handlers.push(&hm.to_js_object());
+                }
+                map.str_set("handlers", &handlers);
+            }
+            Chunk::Config(c) => {
+                map.str_set("type", &JsValue::from_str("VWCF"));
+                map.str_set("director_version", &JsValue::from_f64(c.director_version as f64));
+                map.str_set("movie_top", &JsValue::from_f64(c.movie_top as f64));
+                map.str_set("movie_left", &JsValue::from_f64(c.movie_left as f64));
+                map.str_set("movie_bottom", &JsValue::from_f64(c.movie_bottom as f64));
+                map.str_set("movie_right", &JsValue::from_f64(c.movie_right as f64));
+                map.str_set("min_member", &JsValue::from_f64(c.min_member as f64));
+                map.str_set("max_member", &JsValue::from_f64(c.max_member as f64));
+                map.str_set("frame_rate", &JsValue::from_f64(c.frame_rate as f64));
+                map.str_set("bit_depth", &JsValue::from_f64(c.bit_depth as f64));
+                map.str_set("platform", &JsValue::from_f64(c.platform as f64));
+            }
+            Chunk::Text(t) => {
+                map.str_set("type", &JsValue::from_str("STXT"));
+                map.str_set("text", &JsValue::from_str(&ascii_safe(&t.text)));
+                map.str_set("text_length", &JsValue::from_f64(t.text_length as f64));
+                let runs = t.parse_formatting_runs();
+                let runs_arr = js_sys::Array::new();
+                for run in &runs {
+                    let rm = js_sys::Map::new();
+                    rm.str_set("start_position", &JsValue::from_f64(run.start_position as f64));
+                    rm.str_set("font_id", &JsValue::from_f64(run.font_id as f64));
+                    rm.str_set("font_size", &JsValue::from_f64(run.font_size as f64));
+                    rm.str_set("style", &JsValue::from_f64(run.style as f64));
+                    runs_arr.push(&rm.to_js_object());
+                }
+                map.str_set("formatting_runs", &runs_arr);
+            }
+            Chunk::Palette(p) => {
+                map.str_set("type", &JsValue::from_str("CLUT"));
+                let colors = js_sys::Array::new();
+                for (r, g, b) in &p.colors {
+                    colors.push(&JsValue::from_str(&format!("#{:02x}{:02x}{:02x}", r, g, b)));
+                }
+                map.str_set("colors", &colors);
+            }
+            Chunk::Sound(s) => {
+                map.str_set("type", &JsValue::from_str("snd "));
+                map.str_set("channels", &JsValue::from_f64(s.channels() as f64));
+                map.str_set("sample_rate", &JsValue::from_f64(s.sample_rate() as f64));
+                map.str_set("bits_per_sample", &JsValue::from_f64(s.bits_per_sample() as f64));
+                map.str_set("sample_count", &JsValue::from_f64(s.sample_count() as f64));
+                map.str_set("codec", &JsValue::from_str(&ascii_safe(&s.codec())));
+                map.str_set("data_size", &JsValue::from_f64(s.data().len() as f64));
+            }
+            Chunk::Score(sc) => {
+                map.str_set("type", &JsValue::from_str("VWSC"));
+                map.str_set("entry_count", &JsValue::from_f64(sc.header.entry_count as f64));
+                map.str_set("frame_interval_count", &JsValue::from_f64(sc.frame_intervals.len() as f64));
+            }
+            Chunk::FrameLabels(fl) => {
+                map.str_set("type", &JsValue::from_str("VWLB"));
+                let labels = js_sys::Array::new();
+                for label in &fl.labels {
+                    let lm = js_sys::Map::new();
+                    lm.str_set("frame_num", &JsValue::from_f64(label.frame_num as f64));
+                    lm.str_set("label", &JsValue::from_str(&ascii_safe(&label.label)));
+                    labels.push(&lm.to_js_object());
+                }
+                map.str_set("labels", &labels);
+            }
+            Chunk::Bitmap(b) => {
+                map.str_set("type", &JsValue::from_str("BITD"));
+                map.str_set("data_size", &JsValue::from_f64(b.data.len() as f64));
+                map.str_set("version", &JsValue::from_f64(b.version as f64));
+            }
+            Chunk::XMedia(xm) => {
+                map.str_set("type", &JsValue::from_str("XMED"));
+                map.str_set("data_size", &JsValue::from_f64(xm.raw_data.len() as f64));
+                if xm.is_pfr_font() {
+                    map.str_set("content_type", &JsValue::from_str("PFR1 Font"));
+                    if let Some(font) = xm.parse_pfr_font() {
+                        map.str_set("font_name", &JsValue::from_str(&ascii_safe(&font.font_name)));
+                        map.str_set("outline_glyph_count", &JsValue::from_f64(font.parsed.glyphs.len() as f64));
+                        map.str_set("bitmap_glyph_count", &JsValue::from_f64(font.parsed.bitmap_glyphs.len() as f64));
+                        map.str_set("target_em_px", &JsValue::from_f64(font.parsed.target_em_px as f64));
+                    }
+                } else if xm.is_styled_text() {
+                    map.str_set("content_type", &JsValue::from_str("Styled Text"));
+                    if let Some(st) = xm.parse_styled_text() {
+                        map.str_set("text", &JsValue::from_str(&ascii_safe(&st.text)));
+                        map.str_set("alignment", &JsValue::from_str(&format!("{:?}", st.alignment)));
+                        map.str_set("word_wrap", &JsValue::from_bool(st.word_wrap));
+                        map.str_set("width", &JsValue::from_f64(st.width as f64));
+                        map.str_set("height", &JsValue::from_f64(st.height as f64));
+                        map.str_set("line_count", &JsValue::from_f64(st.line_count as f64));
+                        map.str_set("fixed_line_space", &JsValue::from_f64(st.fixed_line_space as f64));
+                        let spans = js_sys::Array::new();
+                        for span in &st.styled_spans {
+                            let sm = js_sys::Map::new();
+                            sm.str_set("text", &JsValue::from_str(&ascii_safe(&span.text)));
+                            if let Some(face) = &span.style.font_face {
+                                sm.str_set("font_face", &JsValue::from_str(&ascii_safe(face)));
+                            }
+                            if let Some(size) = span.style.font_size {
+                                sm.str_set("font_size", &JsValue::from_f64(size as f64));
+                            }
+                            sm.str_set("bold", &JsValue::from_bool(span.style.bold));
+                            sm.str_set("italic", &JsValue::from_bool(span.style.italic));
+                            sm.str_set("underline", &JsValue::from_bool(span.style.underline));
+                            if let Some(color) = span.style.color {
+                                sm.str_set("color", &JsValue::from_str(&format!("#{:06x}", color)));
+                            }
+                            spans.push(&sm.to_js_object());
+                        }
+                        map.str_set("styled_spans", &spans);
+                    }
+                } else {
+                    map.str_set("content_type", &JsValue::from_str("Unknown"));
+                }
+            }
+            _ => {
+                map.str_set("type", &JsValue::from_str("unsupported"));
+            }
+        }
+        map.to_js_object()
+    }
+
+    /// Returns parsed chunk data as a JS object. Re-parses from cached raw bytes on demand.
+    pub fn get_parsed_chunk(player: &DirPlayer, cast_number: u32, chunk_id: u32) -> js_sys::Object {
+        let error_result = |msg: &str| -> js_sys::Object {
+            let map = js_sys::Map::new();
+            map.str_set("error", &JsValue::from_str(&ascii_safe(msg)));
+            map.to_js_object()
+        };
+
+        let dir_file = if cast_number == 0 {
+            player.movie.file.as_ref()
+        } else {
+            let cast_lib = match player.movie.cast_manager.get_cast_or_null(cast_number) {
+                Some(c) => c,
+                None => return error_result("Cast not found"),
+            };
+            if cast_lib.is_external {
+                player.dir_cache.get(cast_lib.file_name.as_str())
+            } else {
+                player.movie.file.as_ref()
+            }
+        };
+
+        let dir_file = match dir_file {
+            Some(f) => f,
+            None => return error_result("DirectorFile not found"),
+        };
+
+        let chunk_info = match dir_file.chunk_container.chunk_info.get(&chunk_id) {
+            Some(ci) => ci,
+            None => return error_result("Chunk info not found"),
+        };
+
+        let raw_bytes = match dir_file.chunk_container.cached_chunk_views.get(&chunk_id) {
+            Some(b) => b,
+            None => return error_result("Raw bytes not found"),
+        };
+
+        // Determine lctx_capital_x for this chunk's cast
+        let lctx_capital_x = dir_file.casts.iter().find(|cd| {
+            cd.lctx_child_section_ids.contains(&chunk_id)
+        }).map(|cd| cd.capital_x).unwrap_or(false);
+
+        let mut rifx = RIFXReaderContext {
+            after_burned: dir_file.after_burned,
+            ils_body_offset: 0,
+            dir_version: dir_file.version,
+            lctx_capital_x,
+        };
+
+        match chunks::make_chunk(dir_file.endian, &mut rifx, chunk_info.fourcc, raw_bytes) {
+            Ok(chunk) => Self::chunk_to_js(&chunk),
+            Err(e) => error_result(&e),
+        }
     }
 
     pub fn dispatch_cast_name_changed(cast_number: u32) {
