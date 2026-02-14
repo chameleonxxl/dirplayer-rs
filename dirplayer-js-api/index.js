@@ -59,6 +59,10 @@ export function onDebugMessage(message) {
   vmCallbacks.onDebugMessage(message)
 }
 
+export function onDebugContent(content) {
+  vmCallbacks.onDebugContent(content)
+}
+
 export function onScheduleTimeout(name, period) {
   vmCallbacks.onScheduleTimeout(name, period)
 }

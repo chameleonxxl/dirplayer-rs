@@ -1,6 +1,10 @@
 import { PayloadAction, createSlice } from "@reduxjs/toolkit";
 import { CastSnapshot, DatumRef, ICastMemberIdentifier, IVMScope, JsBridgeDatum, MemberSnapshot, ScoreSnapshot, ScoreSpriteSnapshot, ScriptInstanceId } from "../vm";
-import { ICastMemberRef, JsBridgeBreakpoint, JsBridgeChunk } from "dirplayer-js-api";
+import { DebugContent, ICastMemberRef, JsBridgeBreakpoint, JsBridgeChunk } from "dirplayer-js-api";
+
+export type DebugMessageText = { type: 'text'; content: string };
+export type DebugMessageBitmap = { type: 'bitmap'; width: number; height: number; data: Uint8Array };
+export type DebugMessage = DebugMessageText | DebugMessageBitmap;
 
 export type TMemberSubscription = {
   memberRef: ICastMemberIdentifier,
@@ -24,7 +28,7 @@ interface VMSliceState {
   subscribedMemberTokens: TMemberSubscription[],
   isMovieLoaded: boolean,
   movieChunkList: Partial<Record<number, JsBridgeChunk>>,
-  debugMessages: string[],
+  debugMessages: DebugMessage[],
 }
 
 const initialState: VMSliceState = {
@@ -237,7 +241,13 @@ const vmSlice = createSlice({
     debugMessageAdded: (state, action: PayloadAction<string>) => {
       return {
         ...state,
-        debugMessages: [...state.debugMessages, action.payload],
+        debugMessages: [...state.debugMessages, { type: 'text' as const, content: action.payload }],
+      }
+    },
+    debugContentAdded: (state, action: PayloadAction<DebugContent>) => {
+      return {
+        ...state,
+        debugMessages: [...state.debugMessages, action.payload as DebugMessage],
       }
     },
   }
@@ -256,5 +266,5 @@ export const selectGlobals = (state: VMSliceState) => state.globals
 export const selectDebugMessages = (state: VMSliceState) => state.debugMessages
 
 // Action creators are generated for each case reducer function
-export const { ready, castListChanged, castLibNameChanged, castMemberListChanged, scoreChanged, frameChanged, scopeListChanged, onScriptError, breakpointListChanged, scriptErrorCleared, globalsChanged, setTimeoutHandle, removeTimeoutHandle, datumSnapshot, scriptInstanceSnapshot, channelChanged, memberSubscribed, memberUnsubscribed, castMemberChanged, channelDisplayNameChanged, movieLoaded, movieChunkListChanged, debugMessageAdded } = vmSlice.actions
+export const { ready, castListChanged, castLibNameChanged, castMemberListChanged, scoreChanged, frameChanged, scopeListChanged, onScriptError, breakpointListChanged, scriptErrorCleared, globalsChanged, setTimeoutHandle, removeTimeoutHandle, datumSnapshot, scriptInstanceSnapshot, channelChanged, memberSubscribed, memberUnsubscribed, castMemberChanged, channelDisplayNameChanged, movieLoaded, movieChunkListChanged, debugMessageAdded, debugContentAdded } = vmSlice.actions
 export default vmSlice.reducer

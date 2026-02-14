@@ -215,6 +215,7 @@ extern "C" {
     pub fn onGlobalListChanged(data: js_sys::Object);
     pub fn onScriptErrorCleared();
     pub fn onDebugMessage(message: &str);
+    pub fn onDebugContent(content: js_sys::Object);
     pub fn onScheduleTimeout(timeout_name: &str, interval: u32);
     pub fn onClearTimeout(timeout_name: &str);
     pub fn onClearTimeouts();
@@ -414,6 +415,19 @@ impl JsApi {
 
     pub fn dispatch_debug_message(message: &str) {
         onDebugMessage(&&safe_string(message));
+    }
+
+    pub fn dispatch_debug_content(content: js_sys::Object) {
+        onDebugContent(content);
+    }
+
+    pub fn dispatch_debug_bitmap(width: u32, height: u32, data: &[u8]) {
+        let map = js_sys::Map::new();
+        map.str_set("type", &safe_js_string("bitmap"));
+        map.str_set("width", &JsValue::from_f64(width as f64));
+        map.str_set("height", &JsValue::from_f64(height as f64));
+        map.str_set("data", &js_sys::Uint8Array::from(data));
+        Self::dispatch_debug_content(map.to_js_object());
     }
 
     pub fn get_mini_member_snapshot(member: &CastMember) -> js_sys::Map {

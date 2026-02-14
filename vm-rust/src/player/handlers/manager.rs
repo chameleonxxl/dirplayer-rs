@@ -15,11 +15,15 @@ use super::{
     string::StringHandlers,
     types::TypeHandlers,
 };
+use std::collections::HashMap;
+
 use crate::{
     director::lingo::datum::{datum_bool, Datum, DatumType},
     js_api::JsApi,
     player::{
+        bitmap::bitmap::{get_system_default_palette, Bitmap, PaletteRef},
         datum_formatting::{format_concrete_datum, format_datum},
+        geometry::IntRect,
         handlers::datum_handlers::xml::XmlHelper,
         keyboard_map, player_alloc_datum, player_call_script_handler, reserve_player_mut,
         reserve_player_ref, player_call_global_handler,
@@ -296,6 +300,33 @@ impl BuiltInHandlerManager {
         }
     }
 
+    pub fn inspect(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+        if args.len() != 1 {
+            return Err(ScriptError::new(
+                "inspect requires exactly 1 argument".to_string(),
+            ));
+        }
+        reserve_player_ref(|player| {
+            let datum = player.get_datum(&args[0]);
+            let bitmap_ref = datum.to_bitmap_ref()?;
+            let src = player
+                .bitmap_manager
+                .get_bitmap(*bitmap_ref)
+                .ok_or_else(|| ScriptError::new("Invalid bitmap reference".to_string()))?;
+
+            let w = src.width;
+            let h = src.height;
+            let palettes = player.movie.cast_manager.palettes();
+            let mut dest = Bitmap::new(w, h, 32, 32, 0, PaletteRef::BuiltIn(get_system_default_palette()));
+            let rect = IntRect::from(0, 0, w as i32, h as i32);
+            dest.copy_pixels(&palettes, src, rect.clone(), rect, &HashMap::new(), None);
+
+            JsApi::dispatch_debug_bitmap(w as u32, h as u32, &dest.data);
+            Ok(())
+        })?;
+        Ok(DatumRef::Void)
+    }
+
     fn clear_globals(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
         reserve_player_mut(|player| {
             player.globals.clear();
@@ -548,6 +579,7 @@ impl BuiltInHandlerManager {
             "numtochar" => StringHandlers::num_to_char(args),
             "float" => TypeHandlers::float(args),
             "put" => Self::put(args),
+            "inspect" => Self::inspect(args),
             "random" => Self::random(args),
             "bitand" => Self::bit_and(args),
             "bitor" => Self::bit_or(args),

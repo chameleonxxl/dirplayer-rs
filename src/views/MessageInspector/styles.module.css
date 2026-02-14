@@ -53,3 +53,10 @@
   font-family: monospace;
   padding: 8px;
 }
+
+.bitmapCanvas {
+  display: block;
+  max-width: 100%;
+  margin: 4px 0;
+  border: 1px solid #ccc;
+}

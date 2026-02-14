@@ -19,6 +19,9 @@ type JsBridgeChunk = {
   fourcc: string,
 }
 
+export type DebugContentBitmap = { type: 'bitmap'; width: number; height: number; data: Uint8Array };
+export type DebugContent = DebugContentBitmap;
+
 type TVmCallbacks = {
   onMovieLoaded: Function,
   onMovieChunkListChanged: (chunks: Partial<Record<number, JsBridgeChunk>>) => void,
@@ -34,6 +37,7 @@ type TVmCallbacks = {
   onScriptErrorCleared: Function,
   onGlobalListChanged: (globals: Map<string, JsBridgeDatum>) => void,
   onDebugMessage: (message: string) => void,
+  onDebugContent: (content: DebugContent) => void,
   onScheduleTimeout: (timeoutName: string, periodMs: number) => void,
   onClearTimeout: (timeoutName: string) => void,
   onClearAllTimeouts: () => void,

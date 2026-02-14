@@ -2,13 +2,43 @@ import { useEffect, useRef, useState } from 'react';
 import styles from './styles.module.css';
 import { eval_command } from "vm-rust";
 import { useAppSelector } from '../../store/hooks';
-import { selectDebugMessages } from '../../store/vmSlice';
+import { DebugMessage, selectDebugMessages } from '../../store/vmSlice';
+
+function BitmapCanvas({ width, height, data }: { width: number; height: number; data: Uint8Array }) {
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    canvas.width = width;
+    canvas.height = height;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return;
+    const imageData = new ImageData(
+      new Uint8ClampedArray(data.buffer, data.byteOffset, data.byteLength),
+      width,
+      height,
+    );
+    ctx.putImageData(imageData, 0, 0);
+  }, [width, height, data]);
+
+  return <canvas ref={canvasRef} className={styles.bitmapCanvas} />;
+}
+
+function DebugMessageEntry({ message }: { message: DebugMessage }) {
+  switch (message.type) {
+    case 'text':
+      return <span>{message.content}{'\n'}</span>;
+    case 'bitmap':
+      return <BitmapCanvas width={message.width} height={message.height} data={message.data} />;
+  }
+}
 
 export default function MessageInspector() {
   const [command, setCommand] = useState('');
   const [history, setHistory] = useState<string[]>([]);
   const [historyIndex, setHistoryIndex] = useState(-1);
-  const debugMessages = useAppSelector(({ vm }) => selectDebugMessages(vm)).join('\n');
+  const debugMessages = useAppSelector(({ vm }) => selectDebugMessages(vm));
   const messageLogRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -56,7 +86,9 @@ export default function MessageInspector() {
   return (
     <div className={styles.container}>
       <div ref={messageLogRef} className={styles.debugMessages}>
-        {debugMessages}
+        {debugMessages.map((msg, i) => (
+          <DebugMessageEntry key={i} message={msg} />
+        ))}
       </div>
       <div className={styles.evalSection}>
         <div className={styles.inputGroup}>
