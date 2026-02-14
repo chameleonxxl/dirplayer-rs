@@ -17,6 +17,11 @@ type JsBridgeBreakpoint = {
 type JsBridgeChunk = {
   id: string,
   fourcc: string,
+  len: number,
+  owner?: number,
+  castLib?: number,
+  memberNumber?: number,
+  memberName?: string,
 }
 
 export type DebugContentBitmap = { type: 'bitmap'; width: number; height: number; data: Uint8Array };
@@ -25,7 +30,6 @@ export type DebugContent = DebugContentBitmap | DebugContentDatum;
 
 type TVmCallbacks = {
   onMovieLoaded: Function,
-  onMovieChunkListChanged: (chunks: Partial<Record<number, JsBridgeChunk>>) => void,
   onCastListChanged: Function,
   onCastLibNameChanged: (castLib: number, name: string) => void,
   onCastMemberListChanged: Function,

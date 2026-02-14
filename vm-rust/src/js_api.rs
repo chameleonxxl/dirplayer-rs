@@ -6,7 +6,7 @@ use wasm_bindgen::prelude::*;
 
 use crate::{
     director::{
-        chunks::{script::ScriptChunk, ChunkContainer, score::ScoreFrameChannelData},
+        chunks::script::ScriptChunk,
         enums::ScriptType,
         file::{DirectorFile, get_variable_multiplier},
         lingo::{datum::Datum, decompiler, script::ScriptContext},
@@ -200,7 +200,6 @@ impl CastMemberRef {
 #[wasm_bindgen(module = "dirplayer-js-api")]
 extern "C" {
     pub fn onMovieLoaded(test: OnMovieLoadedCallbackData);
-    pub fn onMovieChunkListChanged(chunks: Object);
     pub fn onCastListChanged(names: Array);
     pub fn onCastLibNameChanged(cast_number: u32, name: &str);
     pub fn onCastMemberListChanged(cast_number: u32, members: js_sys::Object);
@@ -261,28 +260,232 @@ impl JsApi {
             .collect_vec()
             .join(", ");
 
-        let chunk_list = Self::get_chunk_container_map(&dir_file.chunk_container);
         onMovieLoaded(OnMovieLoadedCallbackData {
             version: dir_file.version,
             test_val: test,
         });
-        onMovieChunkListChanged(chunk_list.to_js_object())
     }
 
-    fn get_chunk_container_map(chunk_container: &ChunkContainer) -> js_sys::Map {
+    /// Collects all chunk IDs that are transitive descendants of `root_id` in the KeyTable,
+    /// plus root_id itself. This walks the parent→children relationship recursively:
+    /// KeyTable entries map section_id (child) → cast_id (parent).
+    fn collect_cast_descendants(
+        root_id: u32,
+        children_map: &HashMap<u32, Vec<u32>>,
+    ) -> std::collections::HashSet<u32> {
+        let mut result = std::collections::HashSet::new();
+        let mut stack = vec![root_id];
+        while let Some(id) = stack.pop() {
+            if result.insert(id) {
+                if let Some(children) = children_map.get(&id) {
+                    for child in children {
+                        stack.push(*child);
+                    }
+                }
+            }
+        }
+        result
+    }
+
+    /// Builds a parent→children adjacency map from the KeyTable.
+    fn build_children_map(dir_file: &DirectorFile) -> HashMap<u32, Vec<u32>> {
+        let mut children_map: HashMap<u32, Vec<u32>> = HashMap::new();
+        if let Some(kt) = dir_file.key_table.as_ref() {
+            for entry in kt.entries.iter().take(kt.used_count as usize) {
+                children_map.entry(entry.cast_id).or_default().push(entry.section_id);
+            }
+        }
+        children_map
+    }
+
+    pub fn get_cast_chunk_list_for(player: &DirPlayer, cast_number: u32) -> js_sys::Object {
         let result = js_sys::Map::new();
-        for (chunk_id, chunk) in &chunk_container.chunk_info {
-            let fourcc_str = fourcc_to_string(chunk.fourcc);
+
+        let cast_lib = match player.movie.cast_manager.get_cast_or_null(cast_number) {
+            Some(c) => c,
+            None => return result.to_js_object(),
+        };
+
+        // Find the DirectorFile that contains the chunks
+        let dir_file = if cast_lib.is_external {
+            player.dir_cache.get(cast_lib.file_name.as_str())
+        } else {
+            player.movie.file.as_ref()
+        };
+
+        let dir_file = match dir_file {
+            Some(f) => f,
+            None => return result.to_js_object(),
+        };
+
+        // Find the CastDef that matches this cast
+        let cast_def = if cast_lib.is_external {
+            dir_file.casts.first()
+        } else {
+            let cast_entry = dir_file.cast_entries.get((cast_number as usize).wrapping_sub(1));
+            cast_entry.and_then(|entry| {
+                dir_file.casts.iter().find(|cd| cd.id == entry.id)
+            })
+        };
+
+        let cast_def = match cast_def {
+            Some(cd) => cd,
+            None => return result.to_js_object(),
+        };
+
+        let chunk_container = &dir_file.chunk_container;
+        let key_table = dir_file.key_table.as_ref();
+
+        // Build owner_map (child → parent) from KeyTable
+        let owner_map: HashMap<u32, u32> = key_table
+            .map(|kt| {
+                kt.entries.iter()
+                    .take(kt.used_count as usize)
+                    .map(|e| (e.section_id, e.cast_id))
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        // Build parent → children map and collect ALL transitive descendants of the cast root.
+        // This captures structural chunks like Lctx → Lscr, Lnam, etc.
+        let children_map = Self::build_children_map(dir_file);
+        let mut cast_chunk_ids = Self::collect_cast_descendants(cast_def.id, &children_map);
+
+        // Also include all chunks from section_to_member (CASt member chunks and their media
+        // children). These are referenced from the CAS* member_ids array, not through the
+        // KeyTable parent-child chain, so collect_cast_descendants doesn't find them.
+        for section_id in cast_def.section_to_member.keys() {
+            cast_chunk_ids.insert(*section_id);
+        }
+
+        // Also include Lscr and Lnam chunks referenced internally by the Lctx chunk.
+        // These are NOT in the KeyTable as children of Lctx, so neither
+        // collect_cast_descendants nor section_to_member finds them.
+        for section_id in &cast_def.lctx_child_section_ids {
+            cast_chunk_ids.insert(*section_id);
+        }
+
+        // Emit all chunks that belong to this cast
+        for chunk_id in &cast_chunk_ids {
+            let chunk_info = match chunk_container.chunk_info.get(chunk_id) {
+                Some(ci) => ci,
+                None => continue,
+            };
+
+            let fourcc_str = fourcc_to_string(chunk_info.fourcc);
             let chunk_map = js_sys::Map::new();
             chunk_map.str_set("id", &JsValue::from_f64(*chunk_id as f64));
             chunk_map.str_set("fourcc", &safe_js_string(&fourcc_str));
+            chunk_map.str_set("len", &JsValue::from_f64(chunk_info.len as f64));
+            chunk_map.str_set("castLib", &JsValue::from_f64(cast_number as f64));
+
+            if let Some(owner_id) = owner_map.get(chunk_id) {
+                chunk_map.str_set("owner", &JsValue::from_f64(*owner_id as f64));
+            } else if cast_def.lctx_child_section_ids.contains(chunk_id) {
+                // Lscr/Lnam chunks aren't in the KeyTable, so set their owner
+                // to the Lctx section_id so they appear under it in the tree view.
+                if let Some(lctx_sid) = cast_def.lctx_section_id {
+                    chunk_map.str_set("owner", &JsValue::from_f64(lctx_sid as f64));
+                }
+            }
+
+            // Annotate with member info if this chunk belongs to a specific member
+            if let Some((member_number, member_name)) = cast_def.section_to_member.get(chunk_id) {
+                chunk_map.str_set("memberNumber", &JsValue::from_f64(*member_number as f64));
+                chunk_map.str_set("memberName", &safe_js_string(member_name));
+            }
 
             result.set(
                 &JsValue::from_f64(*chunk_id as f64),
                 &chunk_map.to_js_object(),
             );
         }
-        return result;
+
+        result.to_js_object()
+    }
+
+    /// Returns all chunks from the main movie file that are NOT associated with any cast.
+    pub fn get_movie_top_level_chunks(player: &DirPlayer) -> js_sys::Object {
+        let result = js_sys::Map::new();
+
+        let dir_file = match player.movie.file.as_ref() {
+            Some(f) => f,
+            None => return result.to_js_object(),
+        };
+
+        let chunk_container = &dir_file.chunk_container;
+        let key_table = dir_file.key_table.as_ref();
+
+        // Build parent → children map and collect ALL transitive descendants of every cast root
+        let children_map = Self::build_children_map(dir_file);
+        let mut cast_section_ids = std::collections::HashSet::new();
+        for cast_def in &dir_file.casts {
+            let descendants = Self::collect_cast_descendants(cast_def.id, &children_map);
+            for id in descendants {
+                cast_section_ids.insert(id);
+            }
+            // Also exclude chunks belonging to cast members (CASt chunks and their media
+            // children). These are referenced from the CAS* member_ids array, not through
+            // the KeyTable parent-child chain, so collect_cast_descendants doesn't find them.
+            for section_id in cast_def.section_to_member.keys() {
+                cast_section_ids.insert(*section_id);
+            }
+            // Also exclude Lscr and Lnam chunks referenced internally by Lctx.
+            for section_id in &cast_def.lctx_child_section_ids {
+                cast_section_ids.insert(*section_id);
+            }
+        }
+
+        // Build owner_map from KeyTable
+        let owner_map: HashMap<u32, u32> = key_table
+            .map(|kt| {
+                kt.entries.iter()
+                    .take(kt.used_count as usize)
+                    .map(|e| (e.section_id, e.cast_id))
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        for (chunk_id, chunk_info) in &chunk_container.chunk_info {
+            if cast_section_ids.contains(chunk_id) {
+                continue;
+            }
+
+            let fourcc_str = fourcc_to_string(chunk_info.fourcc);
+            let chunk_map = js_sys::Map::new();
+            chunk_map.str_set("id", &JsValue::from_f64(*chunk_id as f64));
+            chunk_map.str_set("fourcc", &safe_js_string(&fourcc_str));
+            chunk_map.str_set("len", &JsValue::from_f64(chunk_info.len as f64));
+
+            if let Some(owner_id) = owner_map.get(chunk_id) {
+                chunk_map.str_set("owner", &JsValue::from_f64(*owner_id as f64));
+            }
+
+            result.set(
+                &JsValue::from_f64(*chunk_id as f64),
+                &chunk_map.to_js_object(),
+            );
+        }
+
+        result.to_js_object()
+    }
+
+    /// Returns the raw bytes of a chunk by ID from the specified cast's DirectorFile.
+    /// If cast_number is 0, uses the main movie file.
+    pub fn get_chunk_bytes(player: &DirPlayer, cast_number: u32, chunk_id: u32) -> Option<Vec<u8>> {
+        let dir_file = if cast_number == 0 {
+            player.movie.file.as_ref()
+        } else {
+            let cast_lib = player.movie.cast_manager.get_cast_or_null(cast_number)?;
+            if cast_lib.is_external {
+                player.dir_cache.get(cast_lib.file_name.as_str())
+            } else {
+                player.movie.file.as_ref()
+            }
+        };
+
+        let dir_file = dir_file?;
+        dir_file.chunk_container.cached_chunk_views.get(&chunk_id).cloned()
     }
 
     pub fn dispatch_cast_name_changed(cast_number: u32) {

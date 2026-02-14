@@ -55,6 +55,7 @@ pub struct DirectorFile {
     pub cast_info: Option<CastInfoChunk>,
     pub effect: Option<EffectChunk>,
     pub thum: Option<ThumChunk>,
+    pub key_table: Option<KeyTableChunk>,
     pub chunk_container: ChunkContainer,
 }
 
@@ -161,6 +162,7 @@ impl DirectorFile {
             cast_info,
             effect,
             thum,
+            key_table: Some(key_table),
             chunk_container,
         });
     }

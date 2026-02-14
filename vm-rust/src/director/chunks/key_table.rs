@@ -2,6 +2,7 @@ use binary_reader::BinaryReader;
 
 use crate::utils::log_i;
 
+#[derive(Clone)]
 pub struct KeyTableEntry {
     pub section_id: u32, // TODO i32?
     pub cast_id: u32,    // TODO i32?
@@ -21,6 +22,7 @@ impl KeyTableEntry {
     }
 }
 
+#[derive(Clone)]
 pub struct KeyTableChunk {
     pub entry_size: u16, // Should always be 12 (3 uint32's)
     pub entry_size2: u16,

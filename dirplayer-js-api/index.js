@@ -7,10 +7,6 @@ export function onMovieLoaded(result) {
   vmCallbacks.onMovieLoaded(result)
 }
 
-export function onMovieChunkListChanged(chunkList) {
-  vmCallbacks.onMovieChunkListChanged(chunkList)
-}
-
 export function onCastListChanged(castList) {
   vmCallbacks.onCastListChanged(castList)
 }

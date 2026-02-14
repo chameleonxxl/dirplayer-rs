@@ -29,6 +29,13 @@ pub struct CastDef {
     pub lctx: Option<ScriptContext>,
     pub capital_x: bool,
     pub dir_version: u16,
+    /// Maps section_id -> (member_number, member_name) for all chunks belonging to members
+    pub section_to_member: HashMap<u32, (u32, String)>,
+    /// The section_id of the Lctx/LctX chunk for this cast (if any)
+    pub lctx_section_id: Option<u32>,
+    /// Section IDs of chunks referenced internally by Lctx (Lscr scripts + Lnam names).
+    /// These are NOT in the KeyTable as children of Lctx, so they must be tracked separately.
+    pub lctx_child_section_ids: Vec<u32>,
 }
 
 impl CastDef {
@@ -64,8 +71,10 @@ impl CastDef {
             )
         });
         let capital_x = lctx_entry.is_some() && lctx_entry.unwrap().fourcc == FOURCC("LctX");
+        let lctx_section_id = lctx_entry.map(|e| e.section_id);
 
         let mut members: HashMap<u32, CastMemberDef> = HashMap::new();
+        let mut section_to_member: HashMap<u32, (u32, String)> = HashMap::new();
         for i in 0..member_ids.len() {
             let section_id = member_ids[i];
             if section_id <= 0 {
@@ -74,6 +83,17 @@ impl CastDef {
             let member_id = i as u16 + min_member;
             let member = get_cast_member_chunk(reader, chunk_container, rifx, section_id);
             let children_entries = get_children_of_chunk(&section_id, key_table);
+
+            let member_name = member.member_info.as_ref()
+                .map(|info| info.name.clone())
+                .unwrap_or_default();
+
+            // Map the CASt chunk itself and all its children to this member
+            section_to_member.insert(section_id, (member_id as u32, member_name.clone()));
+            for child_entry in &children_entries {
+                section_to_member.insert(child_entry.section_id, (member_id as u32, member_name.clone()));
+            }
+
             let children = children_entries
                 .iter()
                 .map(|x| {
@@ -99,10 +119,17 @@ impl CastDef {
         }
 
         let mut scripts: HashMap<u32, ScriptChunk> = HashMap::new();
+        let mut lctx_child_section_ids: Vec<u32> = Vec::new();
         if let Some(lctx) = &lctx {
+            // Collect Lnam section_id
+            if lctx.lnam_section_id > 0 {
+                lctx_child_section_ids.push(lctx.lnam_section_id);
+            }
             for i in 0..lctx.entry_count {
                 let section = &lctx.section_map[i as usize];
                 if section.section_id > -1 {
+                    // Collect Lscr section_id
+                    lctx_child_section_ids.push(section.section_id as u32);
                     let script = get_script_chunk(
                         reader,
                         chunk_container,
@@ -127,6 +154,9 @@ impl CastDef {
             }),
             capital_x,
             dir_version: rifx.dir_version,
+            section_to_member,
+            lctx_section_id,
+            lctx_child_section_ids,
         });
     }
 }

@@ -260,6 +260,27 @@ pub fn request_datum(datum_id: u32) {
 }
 
 #[wasm_bindgen]
+pub fn get_cast_chunk_list(cast_number: u32) -> JsValue {
+    reserve_player_ref(|player| {
+        JsApi::get_cast_chunk_list_for(player, cast_number).into()
+    })
+}
+
+#[wasm_bindgen]
+pub fn get_movie_top_level_chunks() -> JsValue {
+    reserve_player_ref(|player| {
+        JsApi::get_movie_top_level_chunks(player).into()
+    })
+}
+
+#[wasm_bindgen]
+pub fn get_chunk_bytes(cast_number: u32, chunk_id: u32) -> Option<Vec<u8>> {
+    reserve_player_ref(|player| {
+        JsApi::get_chunk_bytes(player, cast_number, chunk_id)
+    })
+}
+
+#[wasm_bindgen]
 pub fn clear_debug_messages() {
     reserve_player_mut(|player| {
         player.debug_datum_refs.clear();
