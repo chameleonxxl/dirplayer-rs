@@ -1,10 +1,7 @@
 use crate::{
     director::lingo::datum::Datum,
     player::{
-        bitmap::bitmap::{BuiltInPalette, PaletteRef},
-        cast_lib::CastMemberRef,
-        handlers::datum_handlers::cast_member_ref::{borrow_member_mut, CastMemberRefHandlers},
-        reserve_player_mut, DirPlayer, ScriptError,
+        DirPlayer, ScriptError, bitmap::bitmap::{BuiltInPalette, PaletteRef}, cast_lib::CastMemberRef, cast_member::Media, handlers::datum_handlers::cast_member_ref::{CastMemberRefHandlers, borrow_member_mut}, reserve_player_mut
     },
 };
 use num_traits::FromPrimitive;
@@ -38,6 +35,7 @@ impl BitmapMemberHandlers {
             "width" => Ok(Datum::Int(bitmap.map(|x| x.width as i32).unwrap_or(0))),
             "height" => Ok(Datum::Int(bitmap.map(|x| x.height as i32).unwrap_or(0))),
             "image" => Ok(Datum::BitmapRef(bitmap_ref)),
+            "media" => Ok(Datum::Media(Media::Bitmap(bitmap.unwrap().clone()))),
             "paletteRef" => {
                 let palette = bitmap
                     .map(|x| x.palette_ref.clone())
@@ -118,6 +116,26 @@ impl BitmapMemberHandlers {
                     bitmap_member.info.width = new_width as u16;
                     bitmap_member.info.height = new_height as u16;
 
+                    Ok(())
+                })
+            }
+            "media" => {
+                let media = value.media_value()?;
+                let media_bitmap = match media {
+                    Media::Bitmap(bitmap) => bitmap,
+                    _ => return Err(ScriptError::new("Expected a bitmap media".to_string())),
+                };
+                reserve_player_mut(|player| {
+                    let member_image_ref = {
+                        let cast_member = player
+                            .movie
+                            .cast_manager
+                            .find_member_by_ref(member_ref)
+                            .unwrap();
+                        let bitmap_member = cast_member.member_type.as_bitmap().unwrap();
+                        bitmap_member.image_ref
+                    };
+                    player.bitmap_manager.replace_bitmap(member_image_ref, media_bitmap.clone());
                     Ok(())
                 })
             }

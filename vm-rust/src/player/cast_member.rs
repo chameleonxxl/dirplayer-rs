@@ -35,6 +35,7 @@ pub struct CastMember {
 #[derive(Clone)]
 pub enum Media {
     Field(FieldMember),
+    Bitmap(Bitmap),
     Palette(PaletteMember)
 }
 
