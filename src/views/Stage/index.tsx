@@ -8,28 +8,14 @@ import {
   mouse_up,
   key_down,
   key_up,
+  player_set_picking_mode,
+  player_get_sprite_at,
+  player_set_debug_selected_channel,
 } from "vm-rust";
+import { useAppDispatch } from "../../store/hooks";
+import { channelSelected } from "../../store/uiSlice";
 
 import styles from "./styles.module.css";
-
-type MouseEventName = "move" | "down" | "up";
-function onMouseEvent(name: MouseEventName, e: React.MouseEvent) {
-  const rect = e.currentTarget.getBoundingClientRect();
-  const x = e.clientX - rect.left;
-  const y = e.clientY - rect.top;
-  
-  switch (name) {
-    case "move":
-      mouse_move(x, y);
-      break;
-    case "down":
-      mouse_down(x, y);
-      break;
-    case "up":
-      mouse_up(x, y);
-      break;
-  }
-}
 
 function ZoomSlider({ scale, setScale }: { scale: number; setScale: (scale: number) => void }) {
   return (
@@ -52,7 +38,9 @@ export default function Stage({ showControls }: { showControls?: boolean }) {
   const isStageCanvasCreated = useRef(false);
   const containerRef = useRef<HTMLDivElement | null>(null);
   const [scale, setScale] = useState(1);
-  
+  const [pickingMode, setPickingMode] = useState(false);
+  const dispatch = useAppDispatch();
+
   const onContainerRef = useCallback(
     (element: HTMLDivElement | null) => {
       containerRef.current = element;
@@ -76,10 +64,47 @@ export default function Stage({ showControls }: { showControls?: boolean }) {
     set_stage_size(width, height);
   }, [width, height]);
 
+  useEffect(() => {
+    player_set_picking_mode(pickingMode);
+  }, [pickingMode]);
+
+  function onMouseEvent(name: "move" | "down" | "up", e: React.PointerEvent) {
+    const rect = e.currentTarget.getBoundingClientRect();
+    const x = e.clientX - rect.left;
+    const y = e.clientY - rect.top;
+
+    if (pickingMode) {
+      // Always forward mouse_move so the renderer can track the cursor for hover highlight
+      if (name === "move") {
+        mouse_move(x, y);
+      }
+      if (name === "down") {
+        const channel = player_get_sprite_at(x, y);
+        if (channel > 0) {
+          player_set_debug_selected_channel(channel);
+          dispatch(channelSelected(channel));
+        }
+      }
+      return;
+    }
+
+    switch (name) {
+      case "move":
+        mouse_move(x, y);
+        break;
+      case "down":
+        mouse_down(x, y);
+        break;
+      case "up":
+        mouse_up(x, y);
+        break;
+    }
+  }
+
   return (
     <div className={styles.container} ref={onContainerRef}>
       <div
-        style={{ transform: `scale(${scale})` }}
+        style={{ transform: `scale(${scale})`, cursor: pickingMode ? 'crosshair' : undefined }}
         tabIndex={0}
         id="stage_canvas_container"
         onPointerMove={(e) => onMouseEvent('move', e)}
@@ -93,6 +118,13 @@ export default function Stage({ showControls }: { showControls?: boolean }) {
       ></div>
       {showControls && (
         <div className={styles.controlBar}>
+          <button
+            className={pickingMode ? styles.pickButtonActive : styles.pickButton}
+            onClick={() => setPickingMode(!pickingMode)}
+            title="Pick sprite"
+          >
+            Pick
+          </button>
           <ZoomSlider scale={scale} setScale={setScale} />
         </div>
       )}

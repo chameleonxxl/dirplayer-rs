@@ -21,7 +21,9 @@ use player::{
     commands::{player_dispatch, PlayerVMCommand},
     datum_ref::DatumId,
     eval::eval_lingo_command,
-    init_player, reserve_player_mut, reserve_player_ref, PLAYER_OPT,
+    init_player, reserve_player_mut, reserve_player_ref,
+    score::get_sprite_at,
+    PLAYER_OPT,
 };
 
 #[wasm_bindgen]
@@ -225,6 +227,24 @@ pub fn key_down(key: String, code: u16) {
 #[wasm_bindgen]
 pub fn key_up(key: String, code: u16) {
     player_dispatch(PlayerVMCommand::KeyUp(key, code));
+}
+
+// Picking mode commands bypass the command queue for synchronous access.
+
+#[wasm_bindgen]
+pub fn player_set_picking_mode(enabled: bool) {
+    reserve_player_mut(|player| {
+        player.picking_mode = enabled;
+    });
+}
+
+#[wasm_bindgen]
+pub fn player_get_sprite_at(x: f64, y: f64) -> i32 {
+    reserve_player_ref(|player| {
+        get_sprite_at(player, x as i32, y as i32, false)
+            .map(|n| n as i32)
+            .unwrap_or(0)
+    })
 }
 
 // Inspector commands bypass the command queue to allow inspecting state

@@ -1549,8 +1549,9 @@ pub fn render_score_to_bitmap_with_offset(
     }
 
     // Draw pick rect
-    let is_picking_sprite = player.keyboard_manager.is_alt_down()
-        && (player.keyboard_manager.is_control_down() || player.keyboard_manager.is_command_down());
+    let is_picking_sprite = player.picking_mode
+        || (player.keyboard_manager.is_alt_down()
+            && (player.keyboard_manager.is_control_down() || player.keyboard_manager.is_command_down()));
     if is_picking_sprite {
         let hovered_sprite = get_sprite_at(player, player.mouse_loc.0, player.mouse_loc.1, false);
         if let Some(hovered_sprite) = hovered_sprite {

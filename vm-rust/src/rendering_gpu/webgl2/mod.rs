@@ -209,6 +209,15 @@ impl WebGL2Renderer {
             // and calls gl.use_program(None), which desynchronizes the manager's cached state
             self.shader_manager.clear_active();
         }
+
+        // Draw pick highlight for hovered sprite
+        if player.picking_mode {
+            let hovered = get_sprite_at(player, player.mouse_loc.0, player.mouse_loc.1, false);
+            if let Some(channel) = hovered {
+                self.draw_pick_highlight(player, channel as i16);
+                self.shader_manager.clear_active();
+            }
+        }
     }
 
     /// Draw the custom cursor sprite at the mouse position.
@@ -628,6 +637,98 @@ impl WebGL2Renderer {
         gl.draw_arrays(WebGl2RenderingContext::POINTS, 0, 1);
 
         // Cleanup - unbind and delete everything to restore state
+        gl.bind_vertex_array(None);
+        gl.bind_buffer(WebGl2RenderingContext::ARRAY_BUFFER, None);
+        gl.use_program(None);
+
+        gl.delete_vertex_array(Some(&vao));
+        gl.delete_buffer(Some(&buffer));
+        gl.delete_program(Some(&program));
+        gl.delete_shader(Some(&vs));
+        gl.delete_shader(Some(&fs));
+    }
+
+    /// Draw a green highlight rectangle around the hovered sprite during picking mode.
+    fn draw_pick_highlight(&self, player: &DirPlayer, channel_num: i16) {
+        let sprite = match player.movie.score.get_sprite(channel_num) {
+            Some(s) => s,
+            None => return,
+        };
+
+        let rect = get_concrete_sprite_rect(player, sprite);
+        let gl = self.context.gl();
+
+        let width = self.size.0 as f32;
+        let height = self.size.1 as f32;
+
+        let left = (rect.left as f32 / width) * 2.0 - 1.0;
+        let right = (rect.right as f32 / width) * 2.0 - 1.0;
+        let top = 1.0 - (rect.top as f32 / height) * 2.0;
+        let bottom = 1.0 - (rect.bottom as f32 / height) * 2.0;
+
+        let vertices: [f32; 16] = [
+            left, top,
+            right, top,
+            right, top,
+            right, bottom,
+            right, bottom,
+            left, bottom,
+            left, bottom,
+            left, top,
+        ];
+
+        let vao = gl.create_vertex_array().unwrap();
+        gl.bind_vertex_array(Some(&vao));
+
+        let buffer = gl.create_buffer().unwrap();
+        gl.bind_buffer(WebGl2RenderingContext::ARRAY_BUFFER, Some(&buffer));
+
+        unsafe {
+            let vert_array = js_sys::Float32Array::view(&vertices);
+            gl.buffer_data_with_array_buffer_view(
+                WebGl2RenderingContext::ARRAY_BUFFER,
+                &vert_array,
+                WebGl2RenderingContext::STATIC_DRAW,
+            );
+        }
+
+        let vs_source = "
+            attribute vec2 a_position;
+            void main() {
+                gl_Position = vec4(a_position, 0.0, 1.0);
+            }
+        ";
+        let fs_source = "
+            precision mediump float;
+            uniform vec4 u_color;
+            void main() {
+                gl_FragColor = u_color;
+            }
+        ";
+
+        let vs = gl.create_shader(WebGl2RenderingContext::VERTEX_SHADER).unwrap();
+        gl.shader_source(&vs, vs_source);
+        gl.compile_shader(&vs);
+
+        let fs = gl.create_shader(WebGl2RenderingContext::FRAGMENT_SHADER).unwrap();
+        gl.shader_source(&fs, fs_source);
+        gl.compile_shader(&fs);
+
+        let program = gl.create_program().unwrap();
+        gl.attach_shader(&program, &vs);
+        gl.attach_shader(&program, &fs);
+        gl.link_program(&program);
+        gl.use_program(Some(&program));
+
+        let pos_loc = gl.get_attrib_location(&program, "a_position") as u32;
+        gl.enable_vertex_attrib_array(pos_loc);
+        gl.vertex_attrib_pointer_with_i32(pos_loc, 2, WebGl2RenderingContext::FLOAT, false, 0, 0);
+
+        let color_loc = gl.get_uniform_location(&program, "u_color");
+        gl.uniform4f(color_loc.as_ref(), 0.0, 1.0, 0.0, 1.0); // Green color
+
+        gl.draw_arrays(WebGl2RenderingContext::LINES, 0, 8);
+
         gl.bind_vertex_array(None);
         gl.bind_buffer(WebGl2RenderingContext::ARRAY_BUFFER, None);
         gl.use_program(None);
