@@ -209,13 +209,19 @@ impl TextMemberHandlers {
                 } else {
                     player.font_manager.get_system_font().unwrap()
                 };
-                let (width, height) = measure_text(
+                let (width, measured_height) = measure_text(
                     &text_data.text,
                     &font,
                     None,
                     text_data.fixed_line_space,
                     text_data.top_spacing,
                 );
+                // For #adjust, always use measured height. For #fixed/#scroll, use stored height if set.
+                let height = if text_data.box_type != "adjust" && text_data.height > 0 {
+                    text_data.height
+                } else {
+                    measured_height
+                };
                 Ok(Datum::Rect([
                     player.alloc_datum(Datum::Int(0)),
                     player.alloc_datum(Datum::Int(0)),
@@ -224,8 +230,9 @@ impl TextMemberHandlers {
                 ]))
             }
             "height" => {
-                // Return the stored height if set, otherwise calculate from text
-                if text_data.height > 0 {
+                // For #adjust box type, always calculate from text measurement.
+                // For #fixed/#scroll, return stored height if set.
+                if text_data.box_type != "adjust" && text_data.height > 0 {
                     Ok(Datum::Int(text_data.height as i32))
                 } else {
                     let font = if !text_data.font.is_empty() {
@@ -593,12 +600,15 @@ impl TextMemberHandlers {
                     // For text members with an authored box width, keep wrapping constrained to that box.
                     box_width = w.max(1);
                 }
-                if text_data.height > 0 {
-                    box_height = box_height.max(text_data.height);
-                }
-                if let Some(ref info) = text_data.info {
-                    if info.height > 0 {
-                        box_height = box_height.max(info.height as u16);
+                // For #adjust box type, always use measured height. For #fixed/#scroll, use stored height.
+                if text_data.box_type != "adjust" {
+                    if text_data.height > 0 {
+                        box_height = box_height.max(text_data.height);
+                    }
+                    if let Some(ref info) = text_data.info {
+                        if info.height > 0 {
+                            box_height = box_height.max(info.height as u16);
+                        }
                     }
                 }
 
@@ -1325,7 +1335,8 @@ impl TextMemberHandlers {
                     if w > 0 {
                         text_data.width = w;
                     }
-                    if h > 0 {
+                    // Setting height via rect is a no-op for #adjust box type
+                    if h > 0 && text_data.box_type != "adjust" {
                         text_data.height = h;
                     }
 
@@ -1336,7 +1347,11 @@ impl TextMemberHandlers {
                 member_ref,
                 |player| value.int_value(),
                 |cast_member, value| {
-                    cast_member.member_type.as_text_mut().unwrap().height = value? as u16;
+                    let text_data = cast_member.member_type.as_text_mut().unwrap();
+                    // Setting height is a no-op for #adjust box type
+                    if text_data.box_type != "adjust" {
+                        text_data.height = value? as u16;
+                    }
                     Ok(())
                 },
             ),
