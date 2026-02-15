@@ -18,17 +18,10 @@ use super::{
 use std::collections::HashMap;
 
 use crate::{
-    director::lingo::datum::{datum_bool, Datum, DatumType},
+    director::lingo::datum::{Datum, DatumType, datum_bool},
     js_api::JsApi,
     player::{
-        bitmap::bitmap::{get_system_default_palette, Bitmap, PaletteRef},
-        datum_formatting::{format_concrete_datum, format_datum},
-        geometry::IntRect,
-        handlers::datum_handlers::xml::XmlHelper,
-        keyboard_map, player_alloc_datum, player_call_script_handler, reserve_player_mut,
-        reserve_player_ref, player_call_global_handler,
-        script_ref::ScriptInstanceRef,
-        DatumRef, DirPlayer, ScriptError,
+        DatumRef, DirPlayer, ScriptError, bitmap::bitmap::{Bitmap, PaletteRef, get_system_default_palette}, datum_formatting::{format_concrete_datum, format_datum}, geometry::IntRect, handlers::datum_handlers::xml::XmlHelper, keyboard_map, player_alloc_datum, player_call_global_handler, player_call_script_handler, reserve_player_mut, reserve_player_ref, script_ref::ScriptInstanceRef, xtra::manager::call_xtra_instance_handler
     },
 };
 
@@ -816,6 +809,10 @@ impl BuiltInHandlerManager {
                     SoundChannelDatumHandlers::call(player, &channel_datum, &"play".to_string(), args)
                 })
             }
+            "spritebox" => {
+                log::warn!("spriteBox is not implemented, returning <Void>");
+                Ok(DatumRef::Void)
+            }
             _ => {
                 // Check if first arg is an xtra instance - if so, forward to the xtra instance handler
                 if !args.is_empty() {
@@ -1182,20 +1179,28 @@ impl BuiltInHandlerManager {
             let arg = player.get_datum(&args[0]);
             
             match arg {
-                // If argument is an integer, return the marker name at that frame
-                Datum::Int(frame_num) => {
-                    let frame_num = *frame_num as i32;
-                    let marker = player
-                        .movie
-                        .score
-                        .frame_labels
-                        .iter()
-                        .find(|label| label.frame_num == frame_num);
-                    
-                    if let Some(label) = marker {
-                        Ok(player.alloc_datum(Datum::String(label.label.clone())))
+                // marker(n) returns the frame number of the nth marker relative to current frame.
+                // marker(0) = current marker (nearest at or before current frame)
+                // marker(1) = next marker, marker(-1) = previous marker, etc.
+                Datum::Int(offset) => {
+                    let offset = *offset;
+                    let current_frame = player.movie.current_frame as i32;
+                    let labels = &player.movie.score.frame_labels;
+
+                    // Find the index of the current marker (last marker at or before current frame)
+                    let current_idx = labels.iter().rposition(|l| l.frame_num <= current_frame);
+
+                    let target_idx = if offset >= 0 {
+                        current_idx.map(|i| i as i32 + offset).unwrap_or(offset - 1)
                     } else {
-                        Ok(player.alloc_datum(Datum::String(String::new())))
+                        current_idx.map(|i| i as i32 + offset).unwrap_or(-1)
+                    };
+
+                    if target_idx >= 0 && (target_idx as usize) < labels.len() {
+                        Ok(player.alloc_datum(Datum::Int(labels[target_idx as usize].frame_num)))
+                    } else {
+                        // Out of range - return 0
+                        Ok(player.alloc_datum(Datum::Int(0)))
                     }
                 }
                 // If argument is a string, return the frame number of that marker
