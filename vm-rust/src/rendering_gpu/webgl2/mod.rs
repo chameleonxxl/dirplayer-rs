@@ -873,6 +873,7 @@ impl WebGL2Renderer {
                         height,
                         "left",  // Font members default to left alignment
                         false,   // Font members default to no word wrap
+                        &font_member.font_info.name,
                         font_member.font_info.size,
                         Some(font_member.font_info.style),
                         font_member.fixed_line_space,
@@ -1125,6 +1126,7 @@ impl WebGL2Renderer {
                         height,
                         &text_member.alignment,
                         effective_word_wrap,
+                        &font_name,
                         font_size,
                         font_style,
                         text_member.fixed_line_space,
@@ -1215,6 +1217,7 @@ impl WebGL2Renderer {
                         height,
                         &field_member.alignment,
                         field_member.word_wrap,
+                        &field_member.font,
                         field_member.font_size,
                         if style == 0 { None } else { Some(style) },
                         field_member.fixed_line_space,
