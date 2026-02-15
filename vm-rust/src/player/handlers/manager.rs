@@ -817,6 +817,16 @@ impl BuiltInHandlerManager {
                 })
             }
             _ => {
+                // Check if first arg is an xtra instance - if so, forward to the xtra instance handler
+                if !args.is_empty() {
+                    let xtra_info = reserve_player_ref(|player| {
+                        player.get_datum(&args[0]).to_xtra_instance().map(|(n, id)| (n.clone(), *id)).ok()
+                    });
+                    if let Some((xtra_name, instance_id)) = xtra_info {
+                        let remaining_args = args[1..].to_vec();
+                        return call_xtra_instance_handler(&xtra_name, instance_id, &name.to_string(), &remaining_args);
+                    }
+                }
                 let formatted_args = reserve_player_ref(|player| {
                     let mut s = String::new();
                     for arg in args {
