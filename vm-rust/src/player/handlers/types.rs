@@ -60,7 +60,7 @@ impl TypeUtils {
             Datum::StringChunk(..) => Ok(vec!["string"]),
             Datum::CastLib(..) => Ok(vec!["castlib"]),
             Datum::Stage => Ok(vec!["stage"]),
-            Datum::SoundChannel(..) => Ok(vec!["sound"]),
+            Datum::SoundChannel(..) => Ok(vec!["instance"]),
             Datum::SoundRef(..) => Ok(vec!["sound"]),
             Datum::CursorRef(..) => Ok(vec!["cursor"]),
             Datum::Xtra(..) => Ok(vec!["xtra"]),
