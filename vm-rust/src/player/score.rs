@@ -574,8 +574,8 @@ impl Score {
                     // Shape ink encoding: mask off the high bit and divide by 5
                     sprite.ink = ((data.ink & 0x7F) / 5) as i32;
                 } else {
-                    // Non-shape sprites use standard encoding
-                    sprite.ink = data.ink as i32;
+                    // Non-shape sprites: mask off the high bit (bit 7 is a flag, not part of ink number)
+                    sprite.ink = (data.ink & 0x7F) as i32;
                     sprite.blend = if data.blend == 0 {
                         100
                     } else {
@@ -802,7 +802,7 @@ impl Score {
                 }
                 sprite.skew = data.skew as f64;
                 sprite.rotation = data.rotation as f64;
-                sprite.ink = data.ink as i32;
+                sprite.ink = (data.ink & 0x7F) as i32;
                 sprite.blend = if data.blend == 0 { 100 } else { data.blend as i32 };
             }
         }
