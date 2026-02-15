@@ -15,7 +15,7 @@ type RecentMovie = {
 };
 
 const RECENT_MOVIES_KEY = 'recentMovies';
-const MAX_RECENT_MOVIES = 10;
+const MAX_RECENT_MOVIES = 50;
 
 function paramsArrayToRecord(params: ExternalParam[]): Record<string, string> {
   const record: Record<string, string> = {};
