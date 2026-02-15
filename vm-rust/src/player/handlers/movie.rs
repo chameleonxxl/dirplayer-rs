@@ -677,41 +677,17 @@ impl MovieHandlers {
 
     pub async fn update_stage(_: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
         let should_yield = reserve_player_ref(|player| {
-
-            debug!("updateStage: handler_stack_depth = {:?}, is_in_frame_update = {}, in_frame_script = {}, in_enter_frame = {}, in_prepare_frame = {}, in_event_dispatch = {}", 
-                player.handler_stack_depth,
-                player.is_in_frame_update,
-                player.in_frame_script,
-                player.in_enter_frame,
-                player.in_prepare_frame,
-                player.in_event_dispatch
-            );
-
             Ok(player.is_yield_safe())
         })?;
 
         if should_yield {
-            // Synchronous render - only works with Canvas2D backend
-            reserve_player_mut(|player| {
-                crate::rendering::with_canvas2d_renderer_mut(|renderer| {
-                    crate::rendering::render_stage_to_bitmap(
-                        player,
-                        &mut renderer.bitmap,
-                        renderer.debug_selected_channel_num,
-                    );
-
-                    use wasm_bindgen::Clamped;
-                    let bitmap = &renderer.bitmap;
-                    if let Ok(image_data) =
-                        web_sys::ImageData::new_with_u8_clamped_array_and_sh(
-                            Clamped(&bitmap.data[..]),
-                            bitmap.width.into(),
-                            bitmap.height.into(),
-                        )
-                    {
-                        let _ = renderer.ctx2d.put_image_data(&image_data, 0.0, 0.0);
-                    }
-                });
+            // Render using whatever renderer is active (Canvas2D or WebGL)
+            use crate::rendering_gpu::Renderer;
+            crate::rendering::with_renderer_mut(|renderer_lock| {
+                if let Some(renderer) = renderer_lock {
+                    let player = unsafe { crate::player::PLAYER_OPT.as_mut().unwrap() };
+                    renderer.draw_frame(player);
+                }
             });
 
             async_std::task::sleep(std::time::Duration::from_millis(2)).await;
