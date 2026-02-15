@@ -624,6 +624,31 @@ impl JsApi {
                     handlers.push(&hm.to_js_object());
                 }
                 map.str_set("handlers", &handlers);
+                let literals = js_sys::Array::new();
+                for literal in &sc.literals {
+                    let lm = js_sys::Map::new();
+                    lm.str_set("type", &JsValue::from_str(&literal.type_str()));
+                    match literal {
+                        Datum::Int(v) => {
+                            lm.str_set("value", &JsValue::from_f64(*v as f64));
+                        }
+                        Datum::Float(v) => {
+                            lm.str_set("value", &JsValue::from_f64(*v));
+                        }
+                        Datum::String(s) => {
+                            lm.str_set("value", &JsValue::from_str(&ascii_safe(s)));
+                        }
+                        Datum::Symbol(s) => {
+                            lm.str_set("value", &JsValue::from_str(&ascii_safe(s)));
+                        }
+                        Datum::Void => {}
+                        _ => {
+                            lm.str_set("value", &JsValue::from_str(&literal.type_str()));
+                        }
+                    }
+                    literals.push(&lm.to_js_object());
+                }
+                map.str_set("literals", &literals);
             }
             Chunk::Config(c) => {
                 map.str_set("type", &JsValue::from_str("VWCF"));
