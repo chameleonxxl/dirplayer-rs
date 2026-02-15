@@ -125,200 +125,192 @@ impl Default for SoundChunk {
 
 impl SoundChunk {
     pub fn from_snd_chunk(reader: &mut BinaryReader, version: u16) -> Result<SoundChunk, String> {
-        let mut data_test = Vec::new();
-
-        let r_begin = reader.pos;
-        while let Ok(byte) = reader.read_u8() {
-            data_test.push(byte);
-        }
-
-        let hex_dump = data_test
-            .iter()
-            .map(|b| format!("{:02X} ", b))
-            .collect::<Vec<String>>()
-            .join(" ");
-        debug!(
-            "WAV Hex Dump (Full File, {} bytes):\n{}",
-            data_test.len(),
-            hex_dump
-        );
-
-        reader.pos = r_begin;
-
-        debug!("Parsing Director MX 2004 snd chunk (Finalized Multi-offset check)");
-
         let original_endian = reader.endian;
         reader.endian = Endian::Big;
 
-        let read_start = reader.pos;
+        let start_pos = reader.pos;
 
-        // --- Header Reading (for logging) ---
-        // Note: The BinaryReader position must be reset after reading the header for logging.
-        let mut header_bytes = Vec::new();
-        for _ in 0..64 {
-            match reader.read_u8() {
-                Ok(byte) => header_bytes.push(byte),
-                Err(_) => break,
+        // Read all bytes for reference
+        let mut all_bytes = Vec::new();
+        while let Ok(byte) = reader.read_u8() {
+            all_bytes.push(byte);
+        }
+        reader.pos = start_pos;
+
+        if all_bytes.len() < 10 {
+            reader.endian = original_endian;
+            return Err(format!("snd chunk too short: {} bytes", all_bytes.len()));
+        }
+
+        debug!("Parsing Mac snd resource ({} bytes)", all_bytes.len());
+
+        // --- Parse Mac snd resource header ---
+        // Format: type 1 (0x0001) or type 2 (0x0002)
+        let format_type = reader.read_u16().map_err(|e| format!("Failed to read format type: {}", e))?;
+
+        let num_commands: u16;
+        match format_type {
+            1 => {
+                // Type 1: number of data types (modifiers), then modifiers, then commands
+                let num_data_types = reader.read_u16().map_err(|e| format!("Type 1: {}", e))?;
+                for _ in 0..num_data_types {
+                    let _modifier_type = reader.read_u16().map_err(|e| format!("Modifier type: {}", e))?;
+                    let _modifier_data = reader.read_u32().map_err(|e| format!("Modifier data: {}", e))?;
+                }
+                num_commands = reader.read_u16().map_err(|e| format!("Num commands: {}", e))?;
+            }
+            2 => {
+                // Type 2: reference count, then commands
+                let _ref_count = reader.read_u16().map_err(|e| format!("Ref count: {}", e))?;
+                num_commands = reader.read_u16().map_err(|e| format!("Num commands: {}", e))?;
+            }
+            _ => {
+                // Unknown format type - could be raw audio data or different format
+                // Fall back: treat entire data as audio with default settings
+                reader.endian = original_endian;
+                debug!("Unknown snd format type 0x{:04X}, treating as raw audio", format_type);
+                return Ok(SoundChunk {
+                    channels: 1,
+                    sample_rate: 22050,
+                    bits_per_sample: 16,
+                    sample_count: (all_bytes.len() / 2) as u32,
+                    codec: "raw_pcm".to_string(),
+                    data: all_bytes,
+                    version,
+                });
             }
         }
 
-        if !header_bytes.is_empty() {
-            // ... (Header logging code remains here) ...
+        // Read sound commands, look for bufferCmd (0x8051 or 0x0051)
+        let mut sound_header_offset: Option<usize> = None;
+        for _ in 0..num_commands {
+            let cmd = reader.read_u16().map_err(|e| format!("Command: {}", e))?;
+            let _param1 = reader.read_u16().map_err(|e| format!("Param1: {}", e))?;
+            let param2 = reader.read_u32().map_err(|e| format!("Param2: {}", e))?;
+
+            // bufferCmd = 0x0051, with data offset flag = 0x8051
+            if (cmd & 0x7FFF) == 0x0051 {
+                sound_header_offset = Some(param2 as usize);
+            }
         }
 
-        reader.pos = read_start; // Reset position to start reading fields
+        // Sound data header follows commands, or is at the offset specified by bufferCmd
+        let header_pos = match sound_header_offset {
+            Some(offset) => start_pos + offset,
+            None => reader.pos, // Immediately after commands
+        };
+        reader.pos = header_pos;
 
-        // --- 1. Read All Candidate Sample Rates ---
+        // --- Parse Sound Data Header ---
+        let _sample_ptr = reader.read_u32().map_err(|e| format!("samplePtr: {}", e))?;
+        let length_or_channels = reader.read_u32().map_err(|e| format!("length/channels: {}", e))?;
+        let sample_rate_fixed = reader.read_u32().map_err(|e| format!("sampleRate: {}", e))?;
+        let _loop_start = reader.read_u32().map_err(|e| format!("loopStart: {}", e))?;
+        let _loop_end = reader.read_u32().map_err(|e| format!("loopEnd: {}", e))?;
+        let encode = reader.read_u8().map_err(|e| format!("encode: {}", e))?;
+        let _base_frequency = reader.read_u8().map_err(|e| format!("baseFrequency: {}", e))?;
 
-        // Offsets 0x00 - 0x03 (4 bytes)
-        let _ = reader
-            .read_u32()
-            .map_err(|e| format!("Failed to read 0x00: {}", e))?; // Skip 0x00-0x03
+        // Convert Fixed-point 16.16 sample rate to integer
+        let sample_rate = sample_rate_fixed >> 16;
 
-        // Offset 0x04 (4 bytes): Sample Rate ENCODED (Rate A - 16000 Hz target)
-        let sample_rate_encoded = reader
-            .read_u32()
-            .map_err(|e| format!("Failed to read 0x04: {}", e))?;
+        let (channels, bits_per_sample, sample_count, audio_data_start);
 
-        // Calculate 16000 Hz target rate and snap to 16000
-        let mut rate_a = (sample_rate_encoded as f64 / 6.144).round() as u32;
-        if rate_a > 15990 && rate_a < 16020 {
-            rate_a = 16000;
-        }
-
-        // Skip to 0x16 (We are at 0x08, need to skip 14 bytes)
-        for _ in 0..14 {
-            let _ = reader
-                .read_u8()
-                .map_err(|e| format!("Failed to skip to 0x16: {}", e))?;
-        }
-
-        // Offset 0x16 (2 bytes): Sample Rate u16 (Rate B - 22050 Hz target)
-        let rate_b_u16 = reader
-            .read_u16()
-            .map_err(|e| format!("Failed to read 0x16: {}", e))?;
-        let rate_b = rate_b_u16 as u32;
-
-        // Skip to 0x2A (We are at 0x18, need to skip 18 bytes)
-        for _ in 0..(0x2A - 0x18) {
-            let _ = reader
-                .read_u8()
-                .map_err(|e| format!("Failed to skip to 0x2A: {}", e))?;
-        }
-
-        // Offset 0x2A (2 bytes): Sample Rate u16 (Rate C - 44100 Hz target)
-        let rate_c_u16 = reader
-            .read_u16()
-            .map_err(|e| format!("Failed to read 0x2A: {}", e))?;
-        let rate_c = rate_c_u16 as u32;
-
-        // --- 2. Determine Final Sample Rate, Channels & Bits Per Sample ---
-
-        let mut sample_rate: u32;
-        let mut bits_per_sample: u16;
-        let mut channels: u16;
-
-        // Priority 1: Check for 22050 Hz (Rate B)
-        if rate_b == 22050 {
-            // These sounds must be 16-bit mono to yield the correct short durations (0.5s, 1s, 2s, 4s)
-            sample_rate = 22050;
-            bits_per_sample = 16;
-            channels = 1;
-        }
-        // Priority 2: Check for 44100 Hz (Rate C)
-        else if rate_c == 44100 {
-            // These sounds are 16-bit mono to yield the correct durations (1.95s, 1.56s, etc.)
-            sample_rate = 44100;
-            bits_per_sample = 16;
-            channels = 1;
-        }
-        // Priority 3: Fallback (Rate A / 16000 Hz)
-        else {
-            // This handles the first chunk
-            sample_rate = rate_a;
-            bits_per_sample = 16;
-            channels = 1;
-        }
-
-        // Log the selection
-        debug!(
-            "Selected Format: {} Hz, {}-bit, {} channels (RateA={}, RateB={}, RateC={})",
-            sample_rate, bits_per_sample, channels, rate_a, rate_b, rate_c
-        );
-
-        // --- 3. Skip Remaining Header and Read Data ---
-
-        // We are at offset 0x2C (byte 44). Skip the remaining 64 - 44 = 20 bytes of header.
-        for _ in 0..(0x40 - 0x2C) {
-            let _ = reader
-                .read_u8()
-                .map_err(|e| format!("Failed to skip remaining header: {}", e))?;
-        }
-
-        // Read audio data (starts after the 64-byte header)
-        let mut data = Vec::new();
-        while let Ok(byte) = reader.read_u8() {
-            data.push(byte);
+        match encode {
+            0x00 => {
+                // Standard Sound Header (stdSH) - 8-bit unsigned mono
+                // length_or_channels = numSamples
+                channels = 1;
+                bits_per_sample = 8;
+                sample_count = length_or_channels;
+                // Audio data starts immediately after the 22-byte header
+                audio_data_start = (header_pos - start_pos) + 22;
+                debug!(
+                    "stdSH: {} Hz, 8-bit mono, {} samples, audio at offset {}",
+                    sample_rate, sample_count, audio_data_start
+                );
+            }
+            0xFF => {
+                // Extended Sound Header (extSH) - can be 8 or 16 bit, mono or stereo
+                // length_or_channels = numChannels
+                channels = length_or_channels as u16;
+                let num_frames = reader.read_u32().map_err(|e| format!("numFrames: {}", e))?;
+                // Skip: AIFFSampleRate (10) + markerChunk (4) + instrumentChunks (4) + AESRecording (4)
+                for _ in 0..22 {
+                    let _ = reader.read_u8();
+                }
+                let sample_size = reader.read_u16().map_err(|e| format!("sampleSize: {}", e))?;
+                bits_per_sample = if sample_size == 0 { 16 } else { sample_size };
+                sample_count = num_frames;
+                // Audio data starts at offset 64 from sound data header
+                audio_data_start = (header_pos - start_pos) + 64;
+                debug!(
+                    "extSH: {} Hz, {}-bit, {} ch, {} frames, audio at offset {}",
+                    sample_rate, bits_per_sample, channels, num_frames, audio_data_start
+                );
+            }
+            0xFE => {
+                // Compressed Sound Header (cmpSH)
+                // Similar to extended header but with compression info
+                channels = length_or_channels as u16;
+                let num_frames = reader.read_u32().map_err(|e| format!("numFrames: {}", e))?;
+                // Skip to get compression format info
+                for _ in 0..22 {
+                    let _ = reader.read_u8();
+                }
+                let sample_size = reader.read_u16().map_err(|e| format!("sampleSize: {}", e))?;
+                bits_per_sample = if sample_size == 0 { 16 } else { sample_size };
+                sample_count = num_frames;
+                audio_data_start = (header_pos - start_pos) + 64;
+                debug!(
+                    "cmpSH: {} Hz, {}-bit, {} ch, {} frames, audio at offset {}",
+                    sample_rate, bits_per_sample, channels, num_frames, audio_data_start
+                );
+            }
+            _ => {
+                // Unknown encode byte - default to 16-bit
+                channels = 1;
+                bits_per_sample = 16;
+                sample_count = length_or_channels;
+                audio_data_start = (header_pos - start_pos) + 22;
+                debug!(
+                    "Unknown encode 0x{:02X}: {} Hz, defaulting to 16-bit mono, audio at offset {}",
+                    encode, sample_rate, audio_data_start
+                );
+            }
         }
 
         reader.endian = original_endian;
 
-        if data.is_empty() {
-            return Err("snd chunk contains no audio data after header".to_string());
+        // Extract only the audio data bytes (no snd resource header)
+        let audio_data = if audio_data_start < all_bytes.len() {
+            all_bytes[audio_data_start..].to_vec()
+        } else {
+            debug!("Warning: audio_data_start {} >= data length {}", audio_data_start, all_bytes.len());
+            Vec::new()
+        };
+
+        if audio_data.is_empty() {
+            return Err("snd chunk contains no audio data".to_string());
         }
 
-        // --- 4. Detect Codec (MP3 vs PCM) ---
-        
-        // Check for MP3 sync bytes (0xFF 0xFX where X is typically 0xF3, 0xFB, etc.)
-        let is_mp3 = if data.len() >= 2 {
-            data[0] == 0xFF && (data[1] & 0xF0) == 0xF0
-        } else {
-            false
-        };
+        // Detect codec (MP3 vs PCM)
+        let is_mp3 = audio_data.len() >= 2 && audio_data[0] == 0xFF && (audio_data[1] & 0xE0) == 0xE0;
+        let codec = if is_mp3 { "mp3" } else { "raw_pcm" };
 
-        let codec = if is_mp3 {
-            String::from("mp3")
-        } else {
-            String::from("raw_pcm")
-        };
-
-        // --- 5. Final Calculation ---
-
-        let sample_count = if is_mp3 {
-            // For MP3, we CANNOT trust Director's sample_count!
-            // The browser will decode at its native rate (often 48000 Hz)
-            // Set to 0 and let the browser tell us the real count after decoding
-            0
-        } else {
-            // For PCM, calculate normally
-            let bytes_per_sample = (bits_per_sample / 8) as u32;
-            let bytes_per_frame = channels as u32 * bytes_per_sample;
-            data.len() as u32 / bytes_per_frame
-        };
-
-        let duration = if is_mp3 {
-            0.0 // Unknown until decoded
-        } else {
-            (sample_count as f64 / sample_rate as f64 * 1000.0).round() / 1000.0
-        };
+        let final_sample_count = if is_mp3 { 0 } else { sample_count };
 
         debug!(
-            "Final snd: {} Hz, {}-bit, codec={}, {} bytes → {} samples, {:.3}s",
-            sample_rate,
-            bits_per_sample,
-            codec,
-            data.len(),
-            sample_count,
-            duration
+            "Final snd: {} Hz, {}-bit, {} ch, codec={}, {} audio bytes, {} samples",
+            sample_rate, bits_per_sample, channels, codec, audio_data.len(), final_sample_count
         );
 
         Ok(SoundChunk {
             channels,
             sample_rate,
             bits_per_sample,
-            sample_count,
-            codec,
-            data: data_test,
+            sample_count: final_sample_count,
+            codec: codec.to_string(),
+            data: audio_data,
             version,
         })
     }

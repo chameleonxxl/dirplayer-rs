@@ -2772,28 +2772,21 @@ impl SoundChannel {
             return Err("sound_bytes empty".into());
         }
 
-        // --- STEP 1: Skip Director/Media headers ---
-        let mut header_size = 0;
-        if sound_bytes.len() >= 128 {
-            let potential_audio_start =
-                sound_bytes[64..128].iter().any(|&b| b >= 0x70 && b <= 0x90);
-            if potential_audio_start {
-                header_size = 64;
-            } else if sound_bytes[96..128].iter().any(|&b| b >= 0x70 && b <= 0x90) {
-                header_size = 96;
-            } else {
-                header_size = 128;
-            }
-        } else if sound_bytes.len() >= 64 {
-            header_size = 64;
-        }
-        if sound_bytes.len() < header_size {
-            return Err(format!(
-                "Sound data too short ({}) for header ({})",
-                sound_bytes.len(),
-                header_size
-            ));
-        }
+        // --- STEP 1: Check for residual headers ---
+        // SoundChunk and MediaChunk now store only audio data (headers stripped at parse time).
+        // Check for Mac snd resource signature in case unstripped data arrives.
+        let header_size = if sound_bytes.len() >= 4
+            && sound_bytes[0] == 0x00
+            && (sound_bytes[1] == 0x01 || sound_bytes[1] == 0x02)
+        {
+            // Looks like a Mac snd resource (type 1 or 2) that wasn't stripped.
+            // Try to skip past it. Most type 1 with 1 modifier + 1 command + extended header = 84 bytes.
+            // This is a best-effort fallback; proper stripping happens in from_snd_chunk.
+            console::log_1(&"Detected unstripped snd resource header in audio data".into());
+            if sound_bytes.len() >= 84 { 84 } else { 0 }
+        } else {
+            0
+        };
         let data = &sound_bytes[header_size..];
 
         console::log_1(
