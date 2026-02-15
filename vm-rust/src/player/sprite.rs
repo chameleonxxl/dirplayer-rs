@@ -10,9 +10,9 @@ pub enum ColorRef {
 impl ColorRef {
     pub fn from_hex(hex: &str) -> ColorRef {
         let hex = hex.trim_start_matches('#');
-        let r = u8::from_str_radix(&hex[0..2], 16).unwrap();
-        let g = u8::from_str_radix(&hex[2..4], 16).unwrap();
-        let b = u8::from_str_radix(&hex[4..6], 16).unwrap();
+        let r = u8::from_str_radix(&hex[0..2], 16).unwrap_or(255);
+        let g = u8::from_str_radix(&hex[2..4], 16).unwrap_or(255);
+        let b = u8::from_str_radix(&hex[4..6], 16).unwrap_or(0);
         ColorRef::Rgb(r, g, b)
     }
     // Convert a ColorRef to a palette index using a palette slice.
