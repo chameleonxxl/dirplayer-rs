@@ -19,7 +19,7 @@ string_interior =  {
 }
 WHITESPACE      = _{ " " | "\t" | ("\\" ~ ("\r\n" | "\n" | "\r")) | "\r\n" | "\n" | "\r" }
 
-symbol         = ${ "#" ~ ident }
+symbol         = ${ "#" ~ WHITESPACE* ~ ident }
 nohash_symbol  =  { (ident) }
 quote          = _{ "\"" }
 string         = ${ quote ~ (string_interior) ~ quote }
