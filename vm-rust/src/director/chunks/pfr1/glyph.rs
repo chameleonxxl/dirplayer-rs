@@ -144,6 +144,9 @@ pub struct Pfr1HeaderParser<'a> {
     glyph_gps_offset: i32,
     known_gps_offsets: Option<&'a [usize]>,
 
+    // Recursion guard for compound glyphs
+    recursion_depth: u32,
+
     // Hint state
     hint_pos: i32,
     hint_nibble_high: i32,
@@ -158,6 +161,8 @@ pub struct Pfr1HeaderParser<'a> {
     // Recursion depth for compound glyph parsing
     depth: u32,
 }
+
+const MAX_RECURSION_DEPTH: u32 = 10;
 
 impl<'a> Pfr1HeaderParser<'a> {
     pub fn new(
@@ -309,6 +314,7 @@ impl<'a> Pfr1HeaderParser<'a> {
             gps_len,
             glyph_gps_offset,
             known_gps_offsets,
+            recursion_depth: 0,
             hint_pos: -1,
             hint_nibble_high: 0,
             hint_repeat_count: 0,
@@ -704,6 +710,10 @@ impl<'a> Pfr1HeaderParser<'a> {
 
     /// Parse a glyph from GPS data
     pub fn parse(&mut self) -> OutlineGlyph {
+        if self.recursion_depth >= MAX_RECURSION_DEPTH {
+            return OutlineGlyph::new();
+        }
+
         self.init_transform_flags();
         self.compute_coord_shift();
         // Apply deferred component scale (fold AFTER ComputeCoordShift)
@@ -2459,7 +2469,7 @@ impl<'a> Pfr1HeaderParser<'a> {
                 self.target_em_px,
             );
 
-            sub_parser.depth = self.depth + 1;
+            sub_parser.recursion_depth = self.recursion_depth + 1;
             sub_parser.diag_char_code = self.diag_char_code;
             if self.font_stroke_tables_available {
                 sub_parser.font_stroke_x_count = self.font_stroke_x_count;
