@@ -74,6 +74,20 @@ pub fn _format_player_cmd(command: &PlayerVMCommand) -> String {
     }
 }
 
+/// Check if a movie callback script (mouseDownScript, mouseUpScript, etc.)
+/// contains actual executable content. Comments like "--nothing" are stored
+/// but don't block event propagation in Director.
+fn has_executable_callback(callback: &Option<ScriptReceiver>) -> bool {
+    match callback {
+        Some(ScriptReceiver::ScriptText(text)) => {
+            let trimmed = text.trim();
+            !trimmed.is_empty() && !trimmed.starts_with("--")
+        }
+        Some(_) => true, // ScriptInstance or Script refs are always executable
+        None => false,
+    }
+}
+
 pub async fn run_command_loop(rx: Receiver<PlayerVMExecutionItem>) {
     warn!("Starting command loop");
 
@@ -213,17 +227,43 @@ pub async fn run_player_command(command: PlayerVMCommand) -> Result<DatumRef, Sc
             if !player_is_playing().await {
                 return Ok(DatumRef::Void);
             }
-            let instance_ids = reserve_player_mut(|player| {
+            // In Director, mouseDownScript intercepts BEFORE sprites get the event.
+            // Only block when it contains executable content (not just a comment).
+            // Comments like "--nothing" are stored but don't block propagation.
+            let mouse_down_script_active = reserve_player_ref(|player| {
+                has_executable_callback(&player.movie.mouse_down_script)
+            });
+            if mouse_down_script_active {
+                reserve_player_mut(|player| {
+                    let now = Local::now().timestamp_millis().abs();
+                    let is_double_click = (now - player.last_mouse_down_time) < 500;
+                    player.mouse_loc = (x, y);
+                    player.movie.mouse_down = true;
+                    player.movie.click_loc = (x, y);
+                    player.is_double_click = is_double_click;
+                    player.last_mouse_down_time = now;
+                });
+                player_dispatch_movie_callback("mouseDown").await?;
+                return Ok(DatumRef::Void);
+            }
+
+            // Use scripted=true so only sprites with scripts (behavior or cast member)
+            // are detected. Non-scripted sprites (decorations, overlays) are skipped,
+            // matching Director behavior.
+            reserve_player_mut(|player| {
                 let now = Local::now().timestamp_millis().abs();
                 let is_double_click = (now - player.last_mouse_down_time) < 500;
                 player.mouse_loc = (x, y);
-                player.movie.mouse_down = true;  // Track mouse button state
-                player.movie.click_loc = (x, y); // Store click location
+                player.movie.mouse_down = true;
+                player.movie.click_loc = (x, y);
                 player.is_double_click = is_double_click;
                 player.last_mouse_down_time = now;
-                let sprite = get_sprite_at(player, x, y, true);
-                if let Some(sprite_number) = sprite {
-                    debug!("🖱️  MouseDown on sprite #{}", sprite_number);
+
+                // "the clickOn" should return the topmost sprite at the click point
+                // regardless of whether it has a script — use unscripted lookup.
+                let any_sprite = get_sprite_at(player, x, y, false);
+                if let Some(sprite_number) = any_sprite {
+                    player.click_on_sprite = sprite_number as i16;
                     let sprite = player.movie.score.get_sprite(sprite_number as i16);
                     let sprite_member = sprite
                         .and_then(|x| x.member.as_ref())
@@ -237,34 +277,56 @@ pub async fn run_player_command(command: PlayerVMCommand) -> Result<DatumRef, Sc
                             }
                             _ => {}
                         }
-                        player.mouse_down_sprite = sprite_number as i16;
-                        player.click_on_sprite = sprite_number as i16;
-                    } else {
-                        player.mouse_down_sprite = -1;
-                        player.click_on_sprite = 0;
                     }
-
-                    let instances = sprite.map(|x| x.script_instance_list.clone());
-                    if let Some(ref inst) = instances {
-                        debug!("🖱️  Sprite has {} behaviors", inst.len());
-                    }
-
-                    instances
                 } else {
-                    None
+                    player.click_on_sprite = 0;
+                }
+
+                // For event dispatch targeting, use scripted lookup —
+                // only sprites with behaviors or cast member scripts receive mouseDown.
+                let scripted_sprite = get_sprite_at(player, x, y, true);
+                if let Some(sprite_number) = scripted_sprite {
+                    debug!("MouseDown on sprite #{}", sprite_number);
+                    player.mouse_down_sprite = sprite_number as i16;
+                } else {
+                    player.mouse_down_sprite = -1;
                 }
             });
 
-            // Get the sprite number we just stored
-            let sprite_num = reserve_player_ref(|player| {
+            // Temporarily clear ALL is_yield_safe() flags so that updateStage()
+            // called from within mouseDown handlers will render AND yield.
+            // MouseDown commands can be processed at any .await point in the frame
+            // loop, where multiple flags may be true simultaneously (e.g.
+            // is_in_frame_update AND in_enter_frame during enterFrame dispatch).
+            let saved_yield_flags = reserve_player_mut(|player| {
+                let saved = (
+                    player.is_in_frame_update,
+                    player.in_frame_script,
+                    player.in_enter_frame,
+                    player.in_prepare_frame,
+                    player.in_event_dispatch,
+                );
+                player.is_in_frame_update = false;
+                player.in_frame_script = false;
+                player.in_enter_frame = false;
+                player.in_prepare_frame = false;
+                player.in_event_dispatch = false;
+                saved
+            });
+
+            // Dispatch to sprite behaviors if the sprite has any, otherwise
+            // fall through to frame/movie scripts per Director's propagation chain.
+            let sprite_with_behaviors = reserve_player_ref(|player| {
                 if player.mouse_down_sprite > 0 {
-                    Some(player.mouse_down_sprite as u16)
-                } else {
-                    None
+                    let sprite = player.movie.score.get_sprite(player.mouse_down_sprite);
+                    if sprite.map_or(false, |s| !s.script_instance_list.is_empty()) {
+                        return Some(player.mouse_down_sprite as u16);
+                    }
                 }
+                None
             });
 
-            if let Some(sprite_num) = sprite_num {
+            if let Some(sprite_num) = sprite_with_behaviors {
                 player_dispatch_event_to_sprite_targeted(
                     &"mouseDown".to_string(),
                     &vec![],
@@ -274,7 +336,7 @@ pub async fn run_player_command(command: PlayerVMCommand) -> Result<DatumRef, Sc
                 player_invoke_frame_and_movie_scripts(
                     &"mouseDown".to_string(),
                     &vec![]
-                ).await;
+                ).await?;
             }
 
             // Execute cast member script if it exists
@@ -282,51 +344,51 @@ pub async fn run_player_command(command: PlayerVMCommand) -> Result<DatumRef, Sc
                 if player.mouse_down_sprite <= 0 {
                     return None;
                 }
-                
+
                 let sprite = player.movie.score.get_sprite(player.mouse_down_sprite)?;
                 let member_ref = sprite.member.as_ref()?;
                 let member = player.movie.cast_manager.find_member_by_ref(member_ref)?;
-                
+
                 // First check for member behavior script (stored in member_script_ref)
                 if let Some(script_ref) = member.get_member_script_ref() {
                     debug!(
                         "Cast member '{}' has behavior script (cast_lib={}, member={}), executing mouseDown",
                         member.name, script_ref.cast_lib, script_ref.cast_member
                     );
-                    
+
                     if let Some(script) = player.movie.cast_manager.get_script_by_ref(script_ref) {
                         if let Some(handler) = script.get_own_handler_ref(&"mouseDown".to_string()) {
                             return Some((None, handler, vec![]));
                         }
                     }
                 }
-                
+
                 // Fallback: check for script_id and get directly from lctx.scripts
                 let script_id = member.get_script_id()?;
-                
+
                 debug!(
                     "Cast member '{}' has script {}, getting from lctx.scripts for mouseDown",
                     member.name, script_id
                 );
-                
+
                 let script = {
                     let cast_lib = player.movie.cast_manager.get_cast_mut(member_ref.cast_lib as u32);
                     cast_lib.get_behavior_script_from_lctx(script_id)
                 };
-                
+
                 let script = match script {
                     Some(s) => {
-                       debug!("✓ Behavior script {} found for mouseDown", script_id);
+                       debug!("Behavior script {} found for mouseDown", script_id);
                         s
                     }
                     None => {
-                        debug!("✗ Behavior script {} NOT FOUND in lctx.scripts for mouseDown", script_id);
+                        debug!("Behavior script {} NOT FOUND in lctx.scripts for mouseDown", script_id);
                         return None;
                     }
                 };
-                
+
                 let handler = script.get_own_handler_ref(&"mouseDown".to_string())?;
-                
+
                 Some((None, handler, vec![]))
             });
 
@@ -334,7 +396,18 @@ pub async fn run_player_command(command: PlayerVMCommand) -> Result<DatumRef, Sc
                 player_call_script_handler(receiver, handler, &args).await?;
             }
 
+            // Dispatch mouseDownScript last as well (for cases where it was set
+            // during sprite handler execution, e.g. not set at start of event)
             player_dispatch_movie_callback("mouseDown").await?;
+
+            // Restore all is_yield_safe() flags
+            reserve_player_mut(|player| {
+                player.is_in_frame_update = saved_yield_flags.0;
+                player.in_frame_script = saved_yield_flags.1;
+                player.in_enter_frame = saved_yield_flags.2;
+                player.in_prepare_frame = saved_yield_flags.3;
+                player.in_event_dispatch = saved_yield_flags.4;
+            });
 
             return Ok(DatumRef::Void);
         }
@@ -342,9 +415,27 @@ pub async fn run_player_command(command: PlayerVMCommand) -> Result<DatumRef, Sc
             if !player_is_playing().await {
                 return Ok(DatumRef::Void);
             }
+            // In Director, mouseUpScript intercepts BEFORE sprites get the event.
+            let mouse_up_script_active = reserve_player_ref(|player| {
+                has_executable_callback(&player.movie.mouse_up_script)
+            });
+            if mouse_up_script_active {
+                reserve_player_mut(|player| {
+                    player.mouse_loc = (x, y);
+                    player.movie.mouse_down = false;
+                    player.mouse_down_sprite = -1;
+                });
+                player_dispatch_movie_callback("mouseUp").await?;
+                reserve_player_mut(|player| {
+                    player.is_double_click = false;
+                });
+                return Ok(DatumRef::Void);
+            }
+
+            // Update mouse state and determine which sprite to notify
             let result = reserve_player_mut(|player| {
                 player.mouse_loc = (x, y);
-                player.movie.mouse_down = false;  // Track mouse button state
+                player.movie.mouse_down = false;
                 let sprite_num_to_notify = player.mouse_down_sprite;
                 let sprite = if player.mouse_down_sprite > 0 {
                     player.movie.score.get_sprite(player.mouse_down_sprite)
@@ -360,110 +451,106 @@ pub async fn run_player_command(command: PlayerVMCommand) -> Result<DatumRef, Sc
                 }
             });
             let is_inside = result.as_ref().map(|x| x.1).unwrap_or(true);
-            let instance_ids = result.as_ref().map(|x| &x.0);
             let event_name = if is_inside {
                 "mouseUp"
             } else {
                 "mouseUpOutSide"
             };
-            
-            // Get the sprite number from result
-            if let Some((_, _, sprite_num)) = result.as_ref() {
+
+            // Temporarily clear ALL is_yield_safe() flags so that updateStage()
+            // called from within mouseUp handlers will render AND yield.
+            // Same rationale as mouseDown: multiple flags may be true when
+            // the mouseUp command is processed at a frame loop .await point.
+            let saved_yield_flags = reserve_player_mut(|player| {
+                let saved = (
+                    player.is_in_frame_update,
+                    player.in_frame_script,
+                    player.in_enter_frame,
+                    player.in_prepare_frame,
+                    player.in_event_dispatch,
+                );
+                player.is_in_frame_update = false;
+                player.in_frame_script = false;
+                player.in_enter_frame = false;
+                player.in_prepare_frame = false;
+                player.in_event_dispatch = false;
+                saved
+            });
+
+            // Dispatch to the sprite that originally received mouseDown,
+            // or fall through to frame/movie scripts if no sprite was involved.
+            let dispatched_to_sprite = if let Some((_, _, sprite_num)) = result.as_ref() {
                 if *sprite_num > 0 {
                     player_dispatch_event_to_sprite_targeted(
                         &event_name.to_string(),
                         &vec![],
                         *sprite_num as u16,
                     ).await;
+                    true
+                } else {
+                    false
                 }
+            } else {
+                false
+            };
+
+            if !dispatched_to_sprite {
+                player_invoke_frame_and_movie_scripts(
+                    &event_name.to_string(),
+                    &vec![]
+                ).await;
             }
 
+            // Execute cast member script using the ORIGINAL sprite that had mouseDown,
+            // consistent with Director behavior
             let cast_member_script_call = reserve_player_mut(|player| {
-                let sprite_num = get_sprite_at(player, x, y, false)?;
-                debug!("Getting sprite at ({}, {}): sprite #{}", x, y, sprite_num);
-                
-                let sprite = player.movie.score.get_sprite(sprite_num as i16)?;
+                let sprite_num_to_notify = result.as_ref().map(|r| r.2).unwrap_or(-1);
+                if sprite_num_to_notify <= 0 {
+                    return None;
+                }
+
+                let sprite = player.movie.score.get_sprite(sprite_num_to_notify)?;
                 let member_ref = sprite.member.as_ref()?;
-
-                debug!("Sprite {} uses member: cast_lib={}, cast_member={}", 
-                    sprite_num, member_ref.cast_lib, member_ref.cast_member);
-
                 let member = player.movie.cast_manager.find_member_by_ref(member_ref)?;
-
-                debug!("Member '{}' (type: {:?})", member.name, 
-                    match &member.member_type {
-                        CastMemberType::Bitmap(_) => "Bitmap",
-                        CastMemberType::Script(_) => "Script",
-                        _ => "Other"
-                    }
-                );
 
                 let handler_name = if is_inside { "mouseUp" } else { "mouseUpOutSide" };
 
-                // Get script_id from bitmap member and look it up in lctx.scripts
-                debug!("Getting script_id from member...");
-                let script_id = match member.get_script_id() {
-                    Some(id) => {
-                        debug!("Member has script_id: {}", id);
-                        id
+                // First check for member behavior script (stored in member_script_ref)
+                if let Some(script_ref) = member.get_member_script_ref() {
+                    if let Some(script) = player.movie.cast_manager.get_script_by_ref(script_ref) {
+                        if let Some(handler) = script.get_own_handler_ref(&handler_name.to_string()) {
+                            return Some((None, handler, vec![]));
+                        }
                     }
-                    None => {
-                        debug!("⚠️  Member has NO script_id");
-                        return None;
-                    }
-                };
-                
-                // Get the behavior script directly from lctx.scripts
-                debug!("Looking up behavior script {} from lctx.scripts...", script_id);
-                
+                }
+
+                // Fallback: check for script_id and get directly from lctx.scripts
+                let script_id = member.get_script_id()?;
+
                 let script = {
                     let cast_lib = player.movie.cast_manager.get_cast_mut(member_ref.cast_lib as u32);
                     cast_lib.get_behavior_script_from_lctx(script_id)
                 };
-                
-                let script = match script {
-                    Some(s) => {
-                        debug!("✓ Behavior script {} found! Type: {:?}", script_id, s.script_type);
-                        debug!("Available handlers: {:?}", 
-                            s.handlers.keys().collect::<Vec<_>>()
-                        );
-                        s
-                    }
-                    None => {
-                        debug!("✗ Behavior script {} NOT FOUND in lctx.scripts!", script_id);
-                        return None;
-                    }
-                };
 
-                debug!(
-                    "Looking for '{}' handler in script {}",
-                    handler_name, script_id
-                );
+                let script = script?;
+                let handler = script.get_own_handler_ref(&handler_name.to_lowercase())?;
 
-                // Try to get the handler - convert to lowercase for lookup
-                let handler = script.get_own_handler_ref(&handler_name.to_lowercase());
-                
-                // ADD THIS CHECK:
-                if handler.is_none() {
-                    debug!("⚠️  Handler '{}' NOT FOUND in script {}", handler_name, script_id);
-                    return None;
-                }
-                
-                debug!("✓ Handler '{}' found!", handler_name);
-                
-                Some((None, handler.unwrap(), vec![]))
+                Some((None, handler, vec![]))
             });
 
             if let Some((receiver, handler, args)) = cast_member_script_call {
-                debug!("Calling player_call_script_handler...");
-                
                 player_call_script_handler(receiver, handler, &args).await?;
-                debug!("✓ Handler executed successfully");
             }
 
             player_dispatch_movie_callback("mouseUp").await?;
 
+            // Restore all is_yield_safe() flags
             reserve_player_mut(|player| {
+                player.is_in_frame_update = saved_yield_flags.0;
+                player.in_frame_script = saved_yield_flags.1;
+                player.in_enter_frame = saved_yield_flags.2;
+                player.in_prepare_frame = saved_yield_flags.3;
+                player.in_event_dispatch = saved_yield_flags.4;
                 player.is_double_click = false;
             });
             return Ok(DatumRef::Void);

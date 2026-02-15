@@ -196,7 +196,7 @@ pub async fn player_invoke_frame_and_movie_scripts(
         let mut active_static_scripts: Vec<CastMemberRef> = vec![];
         
         // Frame script first
-        if let Some(frame_script) = frame_script {
+        if let Some(frame_script) = &frame_script {
             let script_ref = CastMemberRef {
                 cast_lib: frame_script.cast_lib.into(),
                 cast_member: frame_script.cast_member.into(),
@@ -236,10 +236,20 @@ pub async fn player_invoke_frame_and_movie_scripts(
         
         let result = player_call_script_handler(
             receiver,  // Changed from None to receiver
-            (script_member_ref, handler_name.to_owned()),
+            (script_member_ref.clone(), handler_name.to_owned()),
             args
-        ).await?;
-        
+        ).await;
+        match &result {
+            Ok(_) => {}
+            Err(err) => {
+                web_sys::console::warn_1(&format!(
+                    "  {} handler on {:?} ERROR: {}",
+                    handler_name, script_member_ref, err.message
+                ).into());
+            }
+        }
+        let result = result?;
+
         if !result.passed {
             break;
         }
@@ -350,7 +360,12 @@ pub async fn player_invoke_global_event(
 pub async fn player_dispatch_movie_callback(
     handler_name: &str,
 ) -> Result<(), ScriptError> {
-    let call_params = reserve_player_ref(|player| {
+    enum CallbackAction {
+        CallHandler(Option<ScriptInstanceRef>, (CastMemberRef, String)),
+        EvalText(String),
+    }
+
+    let action = reserve_player_ref(|player| {
         let callback = match handler_name {
             "mouseDown" => &player.movie.mouse_down_script,
             "mouseUp" => &player.movie.mouse_up_script,
@@ -364,25 +379,30 @@ pub async fn player_dispatch_movie_callback(
                 let script_instance = player.allocator.get_script_instance(instance_ref);
                 let script = player.movie.cast_manager.get_script_by_ref(&script_instance.script)?;
                 let handler = script.get_own_handler_ref(&handler_name.to_string())?;
-                Some((Some(instance_ref.clone()), handler))
+                Some(CallbackAction::CallHandler(Some(instance_ref.clone()), handler))
             }
             ScriptReceiver::Script(script_ref) => {
                 let script = player.movie.cast_manager.get_script_by_ref(script_ref)?;
                 let handler = script.get_own_handler_ref(&handler_name.to_string())?;
-                Some((None, handler))
+                Some(CallbackAction::CallHandler(None, handler))
             }
             ScriptReceiver::ScriptText(text) => {
                 if text.trim().starts_with("--") || text.trim().is_empty() {
                     None
                 } else {
-                    warn!("Script text execution not yet implemented for {}: {}", handler_name, text);
-                    None
+                    Some(CallbackAction::EvalText(text.to_owned()))
                 }
             }
         }
     });
-    if let Some((receiver, handler)) = call_params {
-        player_call_script_handler(receiver, handler, &vec![]).await?;
+    match action {
+        Some(CallbackAction::CallHandler(receiver, handler)) => {
+            player_call_script_handler(receiver, handler, &vec![]).await?;
+        }
+        Some(CallbackAction::EvalText(text)) => {
+            super::eval::eval_lingo_command(text).await?;
+        }
+        None => {}
     }
     Ok(())
 }
