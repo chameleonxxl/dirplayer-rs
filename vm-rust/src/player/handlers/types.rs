@@ -18,6 +18,7 @@ use crate::{
 };
 
 use super::datum_handlers::{
+    cast_member_ref::CastMemberRefHandlers,
     date::DateObject,
     list_handlers::ListDatumHandlers,
     player_call_datum_handler,
@@ -660,8 +661,20 @@ impl TypeHandlers {
                     Ok(DatumRef::Void)
                 } else if arg.is_list() {
                     let list = arg.to_list()?;
-                    // TODO why not: let members = list.clone().iter().map(|x| player.get_datum(x).int_value()).collect_vec();
-                    let members = list.clone().iter().map(|x| x.unwrap() as i32).collect_vec();
+                    let mut members = vec![];
+                    for item in list {
+                        let datum = player.get_datum(item);
+                        let slot = match datum {
+                            Datum::CastMember(member_ref) => {
+                                CastMemberRefHandlers::get_cast_slot_number(
+                                    member_ref.cast_lib as u32,
+                                    member_ref.cast_member as u32,
+                                ) as i32
+                            }
+                            _ => datum.int_value()?,
+                        };
+                        members.push(slot);
+                    }
                     player.cursor = CursorRef::Member(members);
                     Ok(DatumRef::Void)
                 } else {

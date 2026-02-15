@@ -462,7 +462,13 @@ impl CastMemberRefHandlers {
         match prop.as_str() {
             "name" => Ok(Datum::String(name)),
             "memberNum" => Ok(Datum::Int(member_num as i32)),
-            "number" => Ok(Datum::Int(slot_number)),
+            "number" => {
+                if player.movie.dir_version >= 700 {
+                    Ok(Datum::Int(slot_number))
+                } else {
+                    Ok(Datum::Int(member_num as i32))
+                }
+            }
             "type" => Ok(Datum::Symbol(member_type.symbol_string()?.to_string())),
             "castLibNum" => Ok(Datum::Int(cast_member_ref.cast_lib as i32)),
             "color" => Ok(Datum::ColorRef(color)),
