@@ -855,7 +855,14 @@ impl DirPlayer {
         } else if let Some(next_frame) = self.next_frame {
             return next_frame;
         } else {
-            return self.movie.current_frame + 1;
+            let next = self.movie.current_frame + 1;
+            // Loop back to frame 1 when past the last frame
+            if let Some(frame_count) = self.movie.score.frame_count {
+                if next > frame_count {
+                    return 1;
+                }
+            }
+            return next;
         }
     }
 
@@ -871,8 +878,10 @@ impl DirPlayer {
         self.next_frame = None;
         self.movie.current_frame = next_frame;
 
-        // Advance filmloop frames
-        self.advance_filmloop_frames();
+        // NOTE: Filmloop frames are advanced solely by update_filmloop_frames() in the main loop.
+        // Do NOT call advance_filmloop_frames() here - it would cause double advancement since
+        // advance_frame() is also called from the `go` handler, and update_filmloop_frames()
+        // runs separately in the main loop.
 
         // Only dispatch and render if updateLock is off
         if !self.movie.update_lock && prev_frame != self.movie.current_frame {
@@ -1421,14 +1430,17 @@ impl DirPlayer {
     pub async fn update_filmloop_frames(&mut self) -> Vec<(CastMemberRef, u32, u32)> {
         let mut changed_filmloops = Vec::new();
 
-        // First, collect unique filmloop member refs from active sprites
+        // First, collect unique filmloop member refs from active sprites.
+        // Use `visible` filter (not `entered && !exited`) because filmloop sprites
+        // may not have entered/exited flags set properly in all game states
+        // (e.g., during `go to the frame` loops).
         let unique_filmloop_refs: Vec<CastMemberRef> = {
             let mut seen = std::collections::HashSet::new();
             self.movie
                 .score
                 .channels
                 .iter()
-                .filter(|channel| channel.sprite.entered && !channel.sprite.exited)
+                .filter(|channel| channel.sprite.visible && channel.sprite.member.is_some())
                 .filter_map(|channel| channel.sprite.member.clone())
                 .filter(|member_ref| {
                     // Only include each unique member_ref once

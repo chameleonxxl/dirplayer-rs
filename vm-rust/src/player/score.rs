@@ -101,6 +101,11 @@ pub struct Score {
     pub sprite_details: HashMap<u32, crate::director::chunks::score::SpriteDetailInfo>,
     /// Track the last frame where we cleared sound triggers (to prevent double-clearing)
     pub last_sound_clear_frame: Option<u32>,
+    /// D5 movies need per-frame sprite property updates from channel_initialization_data
+    /// (since sprite properties can change every frame via delta compression)
+    pub needs_per_frame_updates: bool,
+    /// Total frame count (used for auto-looping back to frame 1 when past last frame)
+    pub frame_count: Option<u32>,
 }
 
 fn get_sprite_rect(player: &DirPlayer, sprite_id: i16) -> IntRectTuple {
@@ -180,6 +185,8 @@ impl Score {
             keyframes_cache: HashMap::new(),
             sprite_details: HashMap::new(),
             last_sound_clear_frame: None,
+            needs_per_frame_updates: false,
+            frame_count: None,
         }
     }
 
@@ -508,11 +515,13 @@ impl Score {
                     );
                 }
 
-                // Resolve cast_lib 65535 to cast 1 ONLY for main stage sprites.
-                // Cast 65535 is a "relative cast" reference - for filmloops it should
-                // stay as 65535 so it resolves relative to the filmloop's cast.
-                // For the main stage, it should resolve to the default cast (1).
+                // Resolve cast_lib to the correct value:
+                // - cast_lib 65535 is a "relative cast" reference - for the main stage
+                //   it resolves to the default cast (1), for filmloops it stays as 65535
+                // - cast_lib 0 means "default cast" = cast 1 (D5 uses 0 for single cast)
                 let resolved_cast_lib = if data.cast_lib == 65535 && matches!(score_ref, ScoreRef::Stage) {
+                    1
+                } else if data.cast_lib == 0 {
                     1
                 } else {
                     data.cast_lib as i32
@@ -536,8 +545,13 @@ impl Score {
                 }
                 sprite.loc_h = data.pos_x as i32;
                 sprite.loc_v = data.pos_y as i32;
-                sprite.width = data.width as i32;
-                sprite.height = data.height as i32;
+                // Only set width/height when non-zero (0 means "use member's natural size")
+                if data.width != 0 {
+                    sprite.width = data.width as i32;
+                }
+                if data.height != 0 {
+                    sprite.height = data.height as i32;
+                }
                 sprite.skew = data.skew as f64;
                 sprite.rotation = data.rotation as f64;
 
@@ -706,9 +720,90 @@ impl Score {
                 sprite.base_color = sprite.color.clone();
                 sprite.base_bg_color = sprite.bg_color.clone();
 
-                // Reset size flags when sprite re-enters
+                // Reset size flags when sprite re-enters.
                 sprite.has_size_tweened = false;
-                sprite.has_size_changed = false;
+                let has_explicit_size = data.width != 0 || data.height != 0;
+                sprite.has_size_changed = has_explicit_size;
+                // Score data dimensions are authoritative - dont let bitmap intrinsic
+                // size override them in renderer
+                if has_explicit_size {
+                    sprite.bitmap_size_owned_by_sprite = false;
+                }
+            }
+        }
+
+        // D5 per-frame sprite property updates:
+        // In D5, sprite properties (member, position, ink, etc.) can change every frame
+        // via delta-compressed score data. Update already-entered, non-puppeted sprites
+        // from the current frame's channel_initialization_data.
+        if self.needs_per_frame_updates {
+            // Collect updates first to avoid borrow conflicts
+            let updates: Vec<(i16, ScoreFrameChannelData)> = self.channel_initialization_data
+                .iter()
+                .filter_map(|(frame_idx, channel_idx, data)| {
+                    if frame_idx + 1 != frame_num {
+                        return None;
+                    }
+                    let channel_number = get_channel_number_from_index(*channel_idx as u32);
+                    if channel_number < 1 {
+                        return None; // Skip frame scripts and effect channels
+                    }
+                    let sprite_num = channel_number as i16;
+                    // Skip if this sprite was just entered above (already initialized)
+                    if spans_to_enter.iter().any(|s| s.channel_number == channel_number) {
+                        return None;
+                    }
+                    let sprite = self.get_sprite(sprite_num)?;
+                    if !sprite.entered || sprite.puppet {
+                        return None;
+                    }
+                    Some((sprite_num, data.clone()))
+                })
+                .collect();
+
+            for (sprite_num, data) in updates {
+                let resolved_cast_lib = if data.cast_lib == 65535 && matches!(score_ref, ScoreRef::Stage) {
+                    1
+                } else if data.cast_lib == 0 {
+                    1
+                } else {
+                    data.cast_lib as i32
+                };
+
+                let member = CastMemberRef {
+                    cast_lib: resolved_cast_lib,
+                    cast_member: data.cast_member as i32,
+                };
+
+                // Update member if changed
+                let current_member = self.get_sprite(sprite_num).and_then(|s| s.member.clone());
+                match &score_ref {
+                    ScoreRef::Stage => {
+                        if current_member.as_ref() != Some(&member) {
+                            let _ = sprite_set_prop(sprite_num, "member", Datum::CastMember(member.clone()));
+                        }
+                    }
+                    ScoreRef::FilmLoop(_) => {
+                        let sprite = self.get_sprite_mut(sprite_num);
+                        sprite.member = Some(member.clone());
+                    }
+                }
+                let sprite = self.get_sprite_mut(sprite_num);
+                sprite.loc_h = data.pos_x as i32;
+                sprite.loc_v = data.pos_y as i32;
+                // Only update width/height when non-zero (0 means "use member's natural size").
+                if data.width != 0 {
+                    sprite.width = data.width as i32;
+                    sprite.has_size_changed = true;
+                }
+                if data.height != 0 {
+                    sprite.height = data.height as i32;
+                    sprite.has_size_changed = true;
+                }
+                sprite.skew = data.skew as f64;
+                sprite.rotation = data.rotation as f64;
+                sprite.ink = data.ink as i32;
+                sprite.blend = if data.blend == 0 { 100 } else { data.blend as i32 };
             }
         }
 
@@ -1078,6 +1173,15 @@ impl Score {
                     );
 
                     // Create the behavior instance
+                    let sprite_cast_lib = if data.cast_lib == 0 || data.cast_lib == 65535 {
+                        default_cast_lib.unwrap_or(1)
+                    } else {
+                        data.cast_lib as i32
+                    };
+                    let sprite_member = CastMemberRef {
+                        cast_lib: sprite_cast_lib,
+                        cast_member: data.cast_member as i32,
+                    };
                     let behavior_result = Self::create_behavior(
                         behavior.cast_lib as i32,
                         behavior.cast_member as i32,
@@ -1155,10 +1259,20 @@ impl Score {
                     script_cast_lib
                 };
 
-                debug!(
-                    "D5 sprite script: channel {} -> cast {}/{}",
-                    channel_num, resolved_cast_lib, script_member
-                );
+                let sprite_cast_lib = if data.cast_lib == 0 || data.cast_lib == 65535 {
+                    default_cast_lib.unwrap_or(1)
+                } else {
+                    data.cast_lib as i32
+                };
+                let sprite_member = CastMemberRef {
+                    cast_lib: sprite_cast_lib,
+                    cast_member: data.cast_member as i32,
+                };
+                web_sys::console::log_1(&format!(
+                    "D5 sprite ch={}: scriptId=({},{}), sprite_member=({},{})",
+                    channel_num, resolved_cast_lib, script_member,
+                    sprite_cast_lib, data.cast_member
+                ).into());
 
                 let behavior_result = Self::create_behavior(
                     resolved_cast_lib,
@@ -1166,60 +1280,81 @@ impl Score {
                     default_cast_lib,
                 );
 
-                let (script_instance_ref, datum_ref) = match behavior_result {
-                    Some(result) => result,
-                    None => {
-                        debug!("Skipping D5 sprite script cast {}/{} - script not found",
-                            resolved_cast_lib, script_member);
-                        continue;
-                    }
-                };
+                match behavior_result {
+                    Some((script_instance_ref, datum_ref)) => {
+                        let actual_instance_ref = reserve_player_mut(|player| {
+                            let datum = player.get_datum(&datum_ref);
+                            match datum {
+                                Datum::ScriptInstanceRef(ref instance_ref) => Ok(instance_ref.clone()),
+                                _ => Err(ScriptError::new("Expected ScriptInstanceRef".to_string())),
+                            }
+                        })
+                        .expect("Failed to extract ScriptInstanceRef");
 
-                let actual_instance_ref = reserve_player_mut(|player| {
-                    let datum = player.get_datum(&datum_ref);
-                    match datum {
-                        Datum::ScriptInstanceRef(ref instance_ref) => Ok(instance_ref.clone()),
-                        _ => Err(ScriptError::new("Expected ScriptInstanceRef".to_string())),
-                    }
-                })
-                .expect("Failed to extract ScriptInstanceRef");
+                        reserve_player_mut(|player| {
+                            let sprite_num_ref = player.alloc_datum(Datum::Int(channel_num as i32));
+                            let _ = script_set_prop(
+                                player,
+                                &actual_instance_ref,
+                                &"spriteNum".to_string(),
+                                &sprite_num_ref,
+                                false,
+                            );
+                        });
 
-                reserve_player_mut(|player| {
-                    let sprite_num_ref = player.alloc_datum(Datum::Int(channel_num as i32));
-                    let _ = script_set_prop(
-                        player,
-                        &actual_instance_ref,
-                        &"spriteNum".to_string(),
-                        &sprite_num_ref,
-                        false,
-                    );
-                });
+                        let score_ref_clone = score_ref.clone();
+                        reserve_player_mut(|player| {
+                            let sprite_num = channel_num as i16;
 
-                let score_ref_clone = score_ref.clone();
-                reserve_player_mut(|player| {
-                    let sprite_num = channel_num as i16;
-
-                    let sprite = match &score_ref_clone {
-                        ScoreRef::Stage => {
-                            player.movie.score.get_sprite_mut(sprite_num)
-                        }
-                        ScoreRef::FilmLoop(member_ref) => {
-                            if let Some(member) = player.movie.cast_manager.find_mut_member_by_ref(member_ref) {
-                                if let super::cast_member::CastMemberType::FilmLoop(film_loop) = &mut member.member_type {
-                                    film_loop.score.get_sprite_mut(sprite_num)
-                                } else {
+                            let sprite = match &score_ref_clone {
+                                ScoreRef::Stage => {
                                     player.movie.score.get_sprite_mut(sprite_num)
                                 }
-                            } else {
-                                player.movie.score.get_sprite_mut(sprite_num)
-                            }
-                        }
-                    };
+                                ScoreRef::FilmLoop(member_ref) => {
+                                    if let Some(member) = player.movie.cast_manager.find_mut_member_by_ref(member_ref) {
+                                        if let super::cast_member::CastMemberType::FilmLoop(film_loop) = &mut member.member_type {
+                                            film_loop.score.get_sprite_mut(sprite_num)
+                                        } else {
+                                            player.movie.score.get_sprite_mut(sprite_num)
+                                        }
+                                    } else {
+                                        player.movie.score.get_sprite_mut(sprite_num)
+                                    }
+                                }
+                            };
 
-                    sprite.script_instance_list.push(actual_instance_ref.clone());
-                    Ok::<(), ScriptError>(())
-                })
-                .expect("Failed to attach D5 sprite script to sprite");
+                            sprite.script_instance_list.push(actual_instance_ref.clone());
+                            Ok::<(), ScriptError>(())
+                        })
+                        .expect("Failed to attach D5 sprite script to sprite");
+                    }
+                    None => {
+                        // Script not found — store the scriptId on the sprite as a fallback
+                        // reference for potential future event-time resolution
+                        let score_ref_clone = score_ref.clone();
+                        reserve_player_mut(|player| {
+                            let sprite_num = channel_num as i16;
+                            let sprite = match &score_ref_clone {
+                                ScoreRef::Stage => {
+                                    player.movie.score.get_sprite_mut(sprite_num)
+                                }
+                                ScoreRef::FilmLoop(member_ref) => {
+                                    if let Some(member) = player.movie.cast_manager.find_mut_member_by_ref(member_ref) {
+                                        if let super::cast_member::CastMemberType::FilmLoop(film_loop) = &mut member.member_type {
+                                            film_loop.score.get_sprite_mut(sprite_num)
+                                        } else {
+                                            player.movie.score.get_sprite_mut(sprite_num)
+                                        }
+                                    } else {
+                                        player.movie.score.get_sprite_mut(sprite_num)
+                                    }
+                                }
+                            };
+                            Ok::<(), ScriptError>(())
+                        })
+                        .expect("Failed to set D5 sprite scriptId fallback");
+                    }
+                }
             }
         }
 
@@ -1419,14 +1554,6 @@ impl Score {
             .collect();
 
         for (channel_num, data) in &sprites_to_init {
-            // Debug: Log channels 20-25 initialization (second loop)
-            if *channel_num >= 20 && *channel_num <= 25 {
-                web_sys::console::log_1(&format!(
-                    "[Score] Frame {} Ch {} SECOND INIT: cast_lib={} cast_member={}",
-                    frame_num, channel_num, data.cast_lib, data.cast_member
-                ).into());
-            }
-
             let sprite = self.get_sprite_mut(*channel_num);
             sprite.entered = true;
 
@@ -1940,6 +2067,25 @@ impl Score {
 
         // Copy sprite detail behaviors (D6+)
         self.sprite_details = score_chunk.sprite_details.clone();
+
+        // Compute frame count for auto-looping (applies to all movie versions)
+        if self.frame_count.is_none() {
+            let span_max = self.sprite_spans.iter()
+                .map(|span| span.end_frame)
+                .max()
+                .unwrap_or(1);
+            let init_data_max = self.channel_initialization_data.iter()
+                .map(|(frame_idx, _, _)| frame_idx + 1)
+                .max()
+                .unwrap_or(1);
+            let keyframes_max = self.keyframes_cache.values()
+                .filter_map(|channel_kf| channel_kf.path.as_ref())
+                .flat_map(|path_kf| path_kf.keyframes.iter())
+                .map(|kf| kf.frame)
+                .max()
+                .unwrap_or(1);
+            self.frame_count = Some(span_max.max(init_data_max).max(keyframes_max));
+        }
     }
 
     /// Generate sprite_spans from channel_initialization_data.
@@ -1960,7 +2106,9 @@ impl Score {
                 // D5 path: channel 0 holds frame scripts
                 if dir_version < 600 && data.cast_member != 0 {
                     let frame_num = *frame_idx + 1; // 0-based → 1-based
-                    frame_scripts.push((frame_num, data.cast_lib, data.cast_member));
+                    // D5 has a single cast library; cast_lib 0 means "default cast" which is 1
+                    let cast_lib = if data.cast_lib == 0 { 1 } else { data.cast_lib };
+                    frame_scripts.push((frame_num, cast_lib, data.cast_member));
                 }
                 continue;
             }
@@ -2030,10 +2178,25 @@ impl Score {
             i += 1;
         }
 
-        web_sys::console::log_1(&format!(
-            "Generated {} sprite_spans from channel_data for filmloop",
-            self.sprite_spans.len()
-        ).into());
+        // D5 movies need per-frame sprite property updates
+        self.needs_per_frame_updates = true;
+
+        // Compute D5 frame count for auto-looping
+        let init_data_max = self.channel_initialization_data.iter()
+            .map(|(frame_idx, _, _)| frame_idx + 1)
+            .max()
+            .unwrap_or(1);
+        let span_max = self.sprite_spans.iter()
+            .map(|span| span.end_frame)
+            .max()
+            .unwrap_or(1);
+        self.frame_count = Some(init_data_max.max(span_max));
+
+        debug!(
+            "Generated {} sprite_spans from channel_data (per-frame updates enabled, frame_count={})",
+            self.sprite_spans.len(),
+            self.frame_count.unwrap_or(0)
+        );
     }
 
     /// Extend sprite_spans with frame_channel_data when frame_intervals are incomplete.
@@ -2340,7 +2503,10 @@ pub fn sprite_get_prop(
                 Some(CursorRef::Member(ids)) => {
                     let id_refs = ids
                         .iter()
-                        .map(|id| player.alloc_datum(Datum::Int(*id)))
+                        .map(|id| {
+                            let member_ref = CastMemberRefHandlers::member_ref_from_slot_number(*id as u32);
+                            player.alloc_datum(Datum::CastMember(member_ref))
+                        })
                         .collect();
                     Ok(Datum::List(DatumType::List, id_refs, false))
                 }
@@ -2735,7 +2901,17 @@ pub fn sprite_set_prop(sprite_id: i16, prop_name: &str, value: Datum) -> Result<
                 } else if value.is_list() {
                     let mut cursor_ids = vec![];
                     for cursor_id in value.to_list()? {
-                        cursor_ids.push(player.get_datum(cursor_id).int_value()?);
+                        let datum = player.get_datum(cursor_id);
+                        let slot = match datum {
+                            Datum::CastMember(member_ref) => {
+                                CastMemberRefHandlers::get_cast_slot_number(
+                                    member_ref.cast_lib as u32,
+                                    member_ref.cast_member as u32,
+                                ) as i32
+                            }
+                            _ => datum.int_value()?,
+                        };
+                        cursor_ids.push(slot);
                     }
                     Ok(CursorRef::Member(cursor_ids))
                 } else {
@@ -2992,10 +3168,25 @@ pub fn concrete_sprite_hit_test(player: &DirPlayer, sprite: &Sprite, x: i32, y: 
     return x >= left && x < right && y >= top && y < bottom;
 }
 
+fn is_active_sprite(player: &DirPlayer, sprite: &Sprite) -> bool {
+    // Per Director docs, an "active sprite" has a sprite script (behavior) OR cast member script.
+    if sprite.script_instance_list.len() > 0 {
+        return true;
+    }
+    if let Some(member_ref) = sprite.member.as_ref() {
+        if let Some(member) = player.movie.cast_manager.find_member_by_ref(member_ref) {
+            if member.get_member_script_ref().is_some() || member.get_script_id().is_some() {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 pub fn get_sprite_at(player: &DirPlayer, x: i32, y: i32, scripted: bool) -> Option<u32> {
     for channel in player.movie.score.get_sorted_channels(player.movie.current_frame).iter().rev() {
         if concrete_sprite_hit_test(player, &channel.sprite, x, y)
-            && (!scripted || channel.sprite.script_instance_list.len() > 0)
+            && (!scripted || is_active_sprite(player, &channel.sprite))
         {
             return Some(channel.sprite.number as u32);
         }
@@ -3028,17 +3219,41 @@ pub fn get_concrete_sprite_rect(player: &DirPlayer, sprite: &Sprite) -> IntRect 
             // In some cases, we need to use the bitmap's original dimensions instead of
             // the sprite's dimensions. This matches Director's behavior where sprites
             // can either have explicitly set dimensions or inherit from their bitmap.
+            // Check if score dimensions represent a uniform scale of the bitmap.
+            // If scale_x and scale_y differ by more than 10%, the score dimensions
+            // are just a bounding box (not an intentional stretch) and we should
+            // use the bitmap's natural size instead.
+            let aspect_ratio_matches = if bitmap_width > 0 && bitmap_height > 0
+                && sprite.width > 0 && sprite.height > 0
+            {
+                let scale_x = sprite.width as f32 / bitmap_width as f32;
+                let scale_y = sprite.height as f32 / bitmap_height as f32;
+                let ratio = if scale_x > scale_y { scale_x / scale_y } else { scale_y / scale_x };
+                ratio <= 1.1
+            } else {
+                true // can't check, assume match
+            };
+
             let (sprite_width, sprite_height) = if sprite.bitmap_size_owned_by_sprite
                 && bitmap_width >= 10 && bitmap_height >= 10 {
                 // Sprite size is owned by bitmap, and bitmap is not tiny
-                // (avoid using 4×4 or other very small bitmaps that are meant to be stretched)
+                (bitmap_width, bitmap_height)
+            } else if !aspect_ratio_matches
+                && bitmap_width >= 10 && bitmap_height >= 10 {
+                // Score dimensions have a different aspect ratio than the bitmap,
+                // meaning they're a bounding box, not an intentional stretch.
+                // Use bitmap's natural dimensions.
                 (bitmap_width, bitmap_height)
             } else if !sprite.has_size_changed
                 && (bitmap_width + bitmap_height) > (sprite.width + sprite.height)
                 && bitmap_width >= 10 && bitmap_height >= 10 {
                 // Sprite hasn't been explicitly resized and bitmap is larger (by sum).
-                // This catches cases like a 145×43 bitmap in a 350×280 sprite,
-                // while avoiding 4×4 bitmaps stretched to 352×282.
+                (bitmap_width, bitmap_height)
+            } else if (sprite.width != bitmap_width || sprite.height != bitmap_height)
+                && (sprite.width as i64 * bitmap_height as i64 != sprite.height as i64 * bitmap_width as i64)
+                && bitmap_width >= 10 && bitmap_height >= 10 {
+                // Score dimensions differ from bitmap AND are not a clean proportional
+                // scale - they are an approximate bounding box. Use bitmap's natural size.
                 (bitmap_width, bitmap_height)
             } else {
                 // Use sprite's explicit dimensions (default case)
