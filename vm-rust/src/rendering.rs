@@ -199,7 +199,7 @@ pub fn render_score_to_bitmap(
 /// Recompute the initial_rect for a filmloop using actual bitmap dimensions.
 /// This is more accurate than the precomputed initial_rect because it uses
 /// the real cast member dimensions instead of the channel_data dimensions.
-fn compute_filmloop_initial_rect_with_members(
+pub fn compute_filmloop_initial_rect_with_members(
     player: &DirPlayer,
     member_ref: &CastMemberRef,
 ) -> Option<IntRect> {
@@ -487,16 +487,18 @@ fn render_filmloop_from_channel_data(
             (data.pos_x, data.pos_y)
         };
 
-        // For bitmaps, use channel data dimensions if they're valid (non-zero),
-        // otherwise fall back to member's actual dimensions.
-        // Also get the actual registration point from the bitmap member.
+        // Get actual member dimensions and registration point from the cast member.
+        // Must match compute_filmloop_initial_rect_with_members which also uses
+        // actual bitmap reg_point and dimensions for computing the bounding box.
         let (member_width, member_height, reg_x, reg_y) = match &member.member_type {
-            CastMemberType::Bitmap(bm) => (
-                bm.info.width as u16,
-                bm.info.height as u16,
-                bm.reg_point.0 as i32,
-                bm.reg_point.1 as i32,
-            ),
+            CastMemberType::Bitmap(bm) => {
+                let (w, h) = if let Some(bitmap) = player.bitmap_manager.get_bitmap(bm.image_ref) {
+                    (bitmap.width as u16, bitmap.height as u16)
+                } else {
+                    (bm.info.width as u16, bm.info.height as u16)
+                };
+                (w, h, bm.reg_point.0 as i32, bm.reg_point.1 as i32)
+            }
             _ => (data.width, data.height, data.width as i32 / 2, data.height as i32 / 2),
         };
 
@@ -559,7 +561,15 @@ fn render_filmloop_from_channel_data(
                 let src_bitmap = sprite_bitmap.unwrap();
 
                 let src_rect = IntRect::from(0, 0, src_bitmap.width as i32, src_bitmap.height as i32);
-                let dst_rect = sprite_rect;
+                // Use actual bitmap dimensions for dst_rect to avoid scaling/distortion.
+                // Channel data width/height may differ from actual bitmap dimensions
+                // (e.g., due to SCVW header parsing differences between D5/D7 formats).
+                let dst_rect = IntRect::from(
+                    sprite_rect.left,
+                    sprite_rect.top,
+                    sprite_rect.left + src_bitmap.width as i32,
+                    sprite_rect.top + src_bitmap.height as i32,
+                );
 
                 // Check if bitmap has actual data
                 let has_data = !src_bitmap.data.is_empty();
@@ -762,27 +772,23 @@ pub fn render_score_to_bitmap_with_offset(
             dest_rect.bottom,
         );
 
-        // The filmloop's rect is stored in info as:
-        // - reg_point = (left, top) coordinates of the rect
-        // - width = right coordinate
-        // - height = bottom coordinate
-        // This defines the coordinate space for internal sprite rendering.
-        let initial_rect = {
-            let member = player.movie.cast_manager.find_member_by_ref(member_ref);
-            if let Some(member) = member {
-                if let CastMemberType::FilmLoop(film_loop) = &member.member_type {
-                    let rect_left = film_loop.info.reg_point.0 as i32;
-                    let rect_top = film_loop.info.reg_point.1 as i32;
-                    let rect_right = film_loop.info.width as i32;
-                    let rect_bottom = film_loop.info.height as i32;
-                    IntRect::from(rect_left, rect_top, rect_right, rect_bottom)
+        // Use actual member dimensions to compute the initial_rect instead of
+        // channel data dimensions. The SCVW score data may have different width/height
+        // than the actual bitmap members, causing wrong filmloop bitmap size.
+        let initial_rect = compute_filmloop_initial_rect_with_members(player, member_ref)
+            .unwrap_or_else(|| {
+                // Fall back to load-time computed initial_rect
+                let member = player.movie.cast_manager.find_member_by_ref(member_ref);
+                if let Some(member) = member {
+                    if let CastMemberType::FilmLoop(film_loop) = &member.member_type {
+                        film_loop.initial_rect.clone()
+                    } else {
+                        IntRect::from(0, 0, 1, 1)
+                    }
                 } else {
                     IntRect::from(0, 0, 1, 1)
                 }
-            } else {
-                IntRect::from(0, 0, 1, 1)
-            }
-        };
+            });
 
         // Get parent sprite properties - use defaults if not provided
         let props = parent_props.unwrap_or(FilmLoopParentProps {
@@ -1383,16 +1389,10 @@ pub fn render_score_to_bitmap_with_offset(
             }
             CastMemberType::FilmLoop(film_loop) => {
                 // ---- 1. Snapshot sprite data ----
-                // The filmloop's rect is stored in info as:
-                // - reg_point = (left, top) coordinates of the rect
-                // - width = right coordinate
-                // - height = bottom coordinate
-                // So actual dimensions = (width - reg_point.0, height - reg_point.1)
-                let info_rect_left = film_loop.info.reg_point.0 as i32;
-                let info_rect_top = film_loop.info.reg_point.1 as i32;
-                let info_rect_right = film_loop.info.width as i32;
-                let info_rect_bottom = film_loop.info.height as i32;
-                let info_initial_rect = IntRect::from(info_rect_left, info_rect_top, info_rect_right, info_rect_bottom);
+                // Use the computed initial_rect (bounding box of all sprites across all frames)
+                // instead of the info header rect. ScummVM also recomputes the initial rect
+                // from actual sprite data rather than trusting the header values.
+                let computed_initial_rect = film_loop.initial_rect.clone();
 
                 let (
                     sprite_rect,
@@ -1405,8 +1405,6 @@ pub fn render_score_to_bitmap_with_offset(
                     logical_rect,
                     initial_rect,
                     current_frame,
-                    info_width,
-                    info_height,
                 ) = {
                     let sprite = get_score_sprite(&player.movie, score_source, channel_num).unwrap();
 
@@ -1421,10 +1419,8 @@ pub fn render_score_to_bitmap_with_offset(
                         sprite.rotation,
                         sprite.skew,
                         rect, // logical rect
-                        info_initial_rect,
+                        computed_initial_rect,
                         film_loop.current_frame,
-                        film_loop.info.width as i32,
-                        film_loop.info.height as i32,
                     )
                 };
 

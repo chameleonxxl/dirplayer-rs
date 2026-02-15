@@ -743,7 +743,7 @@ impl WebGL2Renderer {
     /// Render a single sprite
     fn render_sprite(&mut self, player: &mut DirPlayer, channel_num: i16) {
         // Get sprite and member info
-        let (member_ref, sprite_rect, ink, blend, flip_h, flip_v, rotation, skew, bg_color, fg_color, has_fore_color, has_back_color, is_puppet, raw_loc, sprite_width, sprite_height) = {
+        let (member_ref, mut sprite_rect, ink, blend, flip_h, flip_v, rotation, skew, bg_color, fg_color, has_fore_color, has_back_color, is_puppet, raw_loc, sprite_width, sprite_height) = {
             let score = &player.movie.score;
             let sprite = match score.get_sprite(channel_num) {
                 Some(s) => s,
@@ -1244,15 +1244,9 @@ impl WebGL2Renderer {
                 }
                 CastMemberType::FilmLoop(film_loop) => {
                     // Film loop: render the film loop's score to an offscreen bitmap
-                    // The film loop's rect is stored in info as:
-                    // - reg_point = (left, top) coordinates of the rect
-                    // - width = right coordinate
-                    // - height = bottom coordinate
-                    let info_rect_left = film_loop.info.reg_point.0 as i32;
-                    let info_rect_top = film_loop.info.reg_point.1 as i32;
-                    let info_rect_right = film_loop.info.width as i32;
-                    let info_rect_bottom = film_loop.info.height as i32;
-                    let initial_rect = IntRect::from(info_rect_left, info_rect_top, info_rect_right, info_rect_bottom);
+                    // Use the computed initial_rect (bounding box of all sprites) instead of
+                    // the info header rect. ScummVM also recomputes this from actual sprite data.
+                    let initial_rect = film_loop.initial_rect.clone();
 
                     // Store just the metadata - we'll render after this block ends
                     let width = initial_rect.width().max(1);
@@ -1269,6 +1263,39 @@ impl WebGL2Renderer {
                     return;
                 }
             }
+        };
+
+        // For filmloops, recompute initial_rect using actual member dimensions and registration
+        // points. The load-time compute_filmloop_initial_rect uses channel data dimensions which
+        // may not match actual bitmap sizes (especially for D5 SCVW format filmloops).
+        // Also update sprite_rect to match the recomputed dimensions so the texture isn't
+        // stretched when drawn.
+        let texture_source = match texture_source {
+            TextureSource::FilmLoop { initial_rect, .. } => {
+                let better_rect = crate::rendering::compute_filmloop_initial_rect_with_members(player, &member_ref)
+                    .unwrap_or(initial_rect);
+                let width = better_rect.width().max(1);
+                let height = better_rect.height().max(1);
+
+                // Override sprite_rect to use the correct filmloop dimensions.
+                // sprite_rect may have been computed from film_loop.info header which
+                // can have wrong dimensions for D5 SCVW format filmloops.
+                let reg_x = width / 2;
+                let reg_y = height / 2;
+                sprite_rect = IntRect::from(
+                    raw_loc.0 as i32 - reg_x,
+                    raw_loc.1 as i32 - reg_y,
+                    raw_loc.0 as i32 - reg_x + width,
+                    raw_loc.1 as i32 - reg_y + height,
+                );
+
+                TextureSource::FilmLoop {
+                    initial_rect: better_rect,
+                    width: width as u32,
+                    height: height as u32,
+                }
+            }
+            other => other,
         };
 
         // Get bitmap info for palette reference, bit depth, and use_alpha (only used for bitmap sprites)
