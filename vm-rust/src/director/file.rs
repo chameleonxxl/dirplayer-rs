@@ -219,6 +219,7 @@ fn read_casts(
                 if let Some(cast) = cast {
                     // TODO cast.populate(castEntry.name, castEntry.id, castEntry.minMember);
                     // info!("Cast {} member count: {}", cast_entry.name, cast.member_ids.len());
+                    let palette_id_offset = 0i16;
                     casts.push(
                         CastDef::from(
                             cast_entry.name.to_owned(),
@@ -229,6 +230,7 @@ fn read_casts(
                             chunk_container,
                             rifx,
                             key_table,
+                            palette_id_offset,
                         )
                         .unwrap(),
                     );
@@ -244,8 +246,6 @@ fn read_casts(
 
     let cast = get_first_chunk(reader, chunk_container, rifx, FOURCC("CAS*"));
     if let Some(Chunk::Cast(cast)) = cast {
-        // TODO
-        //cast.populate(internal ? "Internal" : "External", 1024, config!.minMember);
         casts.push(
             CastDef::from(
                 (if internal { "Internal" } else { "External" }).to_string(),
@@ -256,10 +256,10 @@ fn read_casts(
                 chunk_container,
                 rifx,
                 key_table,
+                0, // No offset needed: Config.min_member is used directly
             )
             .unwrap(),
         );
-        // TODO populate
 
         return Ok((Vec::new(), casts));
     }

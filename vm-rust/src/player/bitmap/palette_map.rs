@@ -41,4 +41,16 @@ impl PaletteMap {
     pub fn get_first(&self) -> Option<&PaletteMember> {
         self.palettes.first().map(|entry| &entry.member)
     }
+
+    /// Find a palette by cast library number and stale member reference.
+    /// Used as fallback when a bitmap's clutId is out of range (stale from old numbering)
+    /// but there's a valid palette in the same cast library.
+    /// When multiple palettes exist, picks the one with the highest member number,
+    /// since a higher stale clutId corresponds to a higher CAS* index (= higher member number).
+    pub fn find_by_cast_lib(&self, cast_lib: u32) -> Option<&PaletteMember> {
+        self.palettes.iter()
+            .filter(|entry| (entry.number >> 16) == cast_lib)
+            .max_by_key(|entry| entry.number & 0xFFFF)
+            .map(|entry| &entry.member)
+    }
 }

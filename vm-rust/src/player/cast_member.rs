@@ -1373,6 +1373,7 @@ impl CastMember {
         lctx: &Option<ScriptContext>,
         bitmap_manager: &mut BitmapManager,
         dir_version: u16,
+        palette_id_offset: i16,
     ) -> CastMember {
         let chunk = &member_def.chunk;
 
@@ -1547,7 +1548,12 @@ impl CastMember {
                 CastMemberType::Unknown
             }
             MemberType::Bitmap => {
-                let bitmap_info = chunk.specific_data.bitmap_info().unwrap();
+                let mut bitmap_info = chunk.specific_data.bitmap_info().unwrap().clone();
+
+                // Adjust palette_id if offset is non-zero (Config vs MCsL numbering mismatch).
+                if bitmap_info.palette_id > 0 && palette_id_offset != 0 {
+                    bitmap_info.palette_id -= palette_id_offset;
+                }
 
                 let script_id = chunk
                     .member_info

@@ -60,6 +60,8 @@ pub struct BitmapInfo {
     pub reg_y: i16,
     pub bit_depth: u8,
     pub palette_id: i16,
+    /// Cast library containing the palette. -1 or 0 means use the bitmap's own cast library.
+    pub clut_cast_lib: i16,
     pub pitch: u16,
     pub use_alpha: bool,
     pub trim_white_space: bool,
@@ -261,6 +263,7 @@ impl BitmapInfo {
         let mut reg_y = 0i16;
         let mut bit_depth = 1u8;
         let mut palette_id = 0i16;
+        let mut clut_cast_lib: i16 = -1;
         let mut pitch = 0u16;
         let mut use_alpha = false;
         let mut trim_white_space = false;
@@ -297,9 +300,11 @@ impl BitmapInfo {
                     bit_depth = val;
                 }
 
-                // D5 (>= 500): clutCastLib (i16) — skip
+                // D5 (>= 500): clutCastLib (i16)
                 if dir_version >= 500 {
-                    let _ = reader.read_i16();
+                    if let Ok(val) = reader.read_i16() {
+                        clut_cast_lib = val;
+                    }
                 }
 
                 // clutId (i16)
@@ -351,7 +356,9 @@ impl BitmapInfo {
                 }
 
                 // clutCastLib (D5+ always has this, D6+ qualifies)
-                let _ = reader.read_i16();
+                if let Ok(val) = reader.read_i16() {
+                    clut_cast_lib = val;
+                }
 
                 // clutId
                 if let Ok(val) = reader.read_i16() {
@@ -385,6 +392,7 @@ impl BitmapInfo {
             reg_y,
             bit_depth,
             palette_id,
+            clut_cast_lib,
             pitch,
             use_alpha,
             trim_white_space,

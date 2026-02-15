@@ -54,6 +54,8 @@ pub struct CastLib {
     pub preload_mode: u16,
     pub capital_x: bool,
     pub dir_version: u16,
+    /// Offset to adjust bitmap clutId from Config-based to MCsL-based member numbering.
+    pub palette_id_offset: i16,
 }
 
 impl CastLib {
@@ -268,11 +270,12 @@ impl CastLib {
         self.lctx = cast_def.lctx.clone();
         self.capital_x = cast_def.capital_x;
         self.dir_version = cast_def.dir_version;
+        self.palette_id_offset = cast_def.palette_id_offset;
         self.state = CastLibState::Loaded;
         for (id, member_def) in &cast_def.members {
             self.insert_member(
                 *id,
-                CastMember::from(self.number, *id, member_def, &self.lctx, bitmap_manager, self.dir_version),
+                CastMember::from(self.number, *id, member_def, &self.lctx, bitmap_manager, self.dir_version, self.palette_id_offset),
             );
             JsApi::on_cast_member_name_changed(CastMemberRefHandlers::get_cast_slot_number(
                 self.number,

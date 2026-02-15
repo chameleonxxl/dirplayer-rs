@@ -22,7 +22,7 @@ use crate::player::font::FontRef;
 
 use super::{
     allocator::DatumAllocator,
-    bitmap::{manager::BitmapManager, palette_map::PaletteMap},
+    bitmap::{bitmap::PaletteRef, manager::{BitmapManager, BitmapRef}, palette_map::PaletteMap},
     cast_lib::{CastLibState, CastMemberRef, INVALID_CAST_MEMBER_REF},
     cast_member::{CastMember, CastMemberType},
     handlers::datum_handlers::cast_member_ref::CastMemberRefHandlers,
@@ -91,6 +91,7 @@ impl CastManager {
                 preload_mode: cast_entry.preload_settings,
                 capital_x: false,
                 dir_version: 0,
+                palette_id_offset: cast_def.map_or(0, |x| x.palette_id_offset),
             };
             if let Some(cast_def) = cast_def {
                 cast.apply_cast_def(dir, cast_def, bitmap_manager);
@@ -106,7 +107,56 @@ impl CastManager {
             dir_cache,
         )
         .await;
+        self.resolve_unresolved_palette_refs(bitmap_manager);
         JsApi::dispatch_cast_list_changed();
+    }
+
+    /// After all casts (including external) are loaded, resolve bitmap palette refs
+    /// where clut_cast_lib was 0 ("not specified"). The bitmap data stores a palette member
+    /// number (e.g. 1617) but the wrong cast_lib (defaulted to the bitmap's own castLib).
+    /// Search all cast libraries for a member with that number and update the palette_ref
+    /// to point to the correct castLib.
+    fn resolve_unresolved_palette_refs(&self, bitmap_manager: &mut BitmapManager) {
+        // Collect all (bitmap_ref, target_cast_member, current_cast_lib) that need resolution
+        let mut to_resolve: Vec<(BitmapRef, i32, i32)> = Vec::new();
+
+        for cast in &self.casts {
+            for member in cast.members.values() {
+                if let CastMemberType::Bitmap(bm) = &member.member_type {
+                    if let Some(bitmap) = bitmap_manager.get_bitmap(bm.image_ref) {
+                        if let PaletteRef::Member(ref member_ref) = bitmap.palette_ref {
+                            let target_member = member_ref.cast_member;
+                            let current_cast_lib = member_ref.cast_lib;
+                            // Check if the target member exists in the specified castLib
+                            let target_cast = self.casts.iter()
+                                .find(|c| c.number == current_cast_lib as u32);
+                            let member_exists = target_cast
+                                .and_then(|c| c.find_member_by_number(target_member as u32))
+                                .is_some();
+                            if !member_exists {
+                                to_resolve.push((bm.image_ref, target_member, current_cast_lib));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Resolve each unresolved palette ref by searching all cast libraries
+        for (bitmap_ref, target_member, _current_cast_lib) in to_resolve {
+            // Search all cast libraries for a member with this number
+            for cast in &self.casts {
+                if cast.find_member_by_number(target_member as u32).is_some() {
+                    if let Some(bitmap) = bitmap_manager.get_bitmap_mut(bitmap_ref) {
+                        bitmap.palette_ref = PaletteRef::Member(CastMemberRef {
+                            cast_lib: cast.number as i32,
+                            cast_member: target_member,
+                        });
+                    }
+                    break;
+                }
+            }
+        }
     }
 
     pub async fn preload_casts(
@@ -119,24 +169,28 @@ impl CastManager {
         for cast in self.casts.iter_mut() {
             if cast.is_external && cast.state == CastLibState::None && !cast.file_name.is_empty() {
                 web_sys::console::log_1(&wasm_bindgen::JsValue::from_str(&format!("Cast {} ({}) - Preload Mode: {}", cast.number, ascii_safe(&cast.file_name), cast.preload_mode)));
-                match cast.preload_mode {
-                    0 => {
-                        // Preload: When Needed
-                    }
-                    1 => {
-                        // Preload: After frame one
-                        if reason == CastPreloadReason::AfterFrameOne {
-                            cast.preload(net_manager, bitmap_manager, dir_cache).await;
-                        }
-                    }
-                    2 => {
-                        // Preload: Before frame one
-                        if reason == CastPreloadReason::MovieLoaded {
-                            cast.preload(net_manager, bitmap_manager, dir_cache).await;
-                        }
-                    }
-                    _ => {}
-                }
+                // match cast.preload_mode {
+                //     0 => {
+                //         // Preload: When Needed
+                //     }
+                //     1 => {
+                //         // Preload: After frame one
+                //         if reason == CastPreloadReason::AfterFrameOne {
+                //             cast.preload(net_manager, bitmap_manager, dir_cache).await;
+                //         }
+                //     }
+                //     2 => {
+                //         // Preload: Before frame one
+                //         if reason == CastPreloadReason::MovieLoaded {
+                //             cast.preload(net_manager, bitmap_manager, dir_cache).await;
+                //         }
+                //     }
+                //     _ => {}
+                // }
+
+                // It seems like when the runMode is "Plugin" all casts getting directly download
+                // check with mobiles disco in shockwave player
+                cast.preload(net_manager, bitmap_manager, dir_cache).await;
             }
         }
     }
