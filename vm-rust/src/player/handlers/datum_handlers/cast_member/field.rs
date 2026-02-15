@@ -1,7 +1,7 @@
 use itertools::Itertools;
 
 use crate::{
-    director::lingo::datum::{Datum, DatumType, StringChunkType, datum_bool},
+    director::lingo::datum::{Datum, DatumType, StringChunkExpr, StringChunkSource, StringChunkType, datum_bool},
     player::{
         ColorRef, DatumRef, DirPlayer, ScriptError, bitmap::{bitmap::{Bitmap, BuiltInPalette, PaletteRef}, drawing::CopyPixelsParams}, cast_lib::CastMemberRef, cast_member::Media, font::{BitmapFont, measure_text}, handlers::datum_handlers::{
             cast_member_ref::borrow_member_mut, string::string_get_lines, string_chunk::StringChunkUtils
@@ -38,6 +38,36 @@ impl FieldMemberHandlers {
                     delimiter,
                 )?;
                 Ok(player.alloc_datum(Datum::Int(count as i32)))
+            }
+            "getPropRef" => {
+                let member_ref = player.get_datum(datum).to_member_ref()?;
+                let member = player
+                    .movie
+                    .cast_manager
+                    .find_member_by_ref(&member_ref)
+                    .unwrap();
+                let field = member.member_type.as_field().unwrap();
+                let prop_name = player.get_datum(&args[0]).string_value()?;
+                let start = player.get_datum(&args[1]).int_value()?;
+                let end = if args.len() > 2 {
+                    player.get_datum(&args[2]).int_value()?
+                } else {
+                    start
+                };
+                let chunk_type = StringChunkType::from(&prop_name);
+                let chunk_expr = StringChunkExpr {
+                    chunk_type,
+                    start,
+                    end,
+                    item_delimiter: player.movie.item_delimiter,
+                };
+                let resolved_str =
+                    StringChunkUtils::resolve_chunk_expr_string(&field.text, &chunk_expr)?;
+                Ok(player.alloc_datum(Datum::StringChunk(
+                    StringChunkSource::Member(member_ref),
+                    chunk_expr,
+                    resolved_str,
+                )))
             }
             "setContents" => {
                 if args.len() != 1 {
