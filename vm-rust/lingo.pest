@@ -111,7 +111,7 @@ ge_op = { ">=" }
 // Property name after dot - can be any identifier including reserved keywords
 prop_name  =  { ident }
 
-primitive       = _{ put_handler_call | sprite_ref | member_ref | handler_call | the_prop_of | the_prop | symbol | list | string | prop_list | number_float | number_int | rgb_color | rect | void | bool_true | bool_false | string_empty | point | return_const | parens_list | parens_expr | chunk_expr | castlib_of_expr | sprite_of_expr | prop_of_expr | lang_ident }
+primitive       = _{ put_handler_call | sprite_ref | castlib_ref | member_ref | handler_call | the_prop_of | the_prop | symbol | list | string | prop_list | number_float | number_int | rgb_color | rect | void | bool_true | bool_false | string_empty | point | return_const | parens_list | parens_expr | chunk_expr | castlib_of_expr | sprite_of_expr | prop_of_expr | lang_ident }
 eval_expr       = _{ SOI ~ expr ~ EOI }
 ident_list      = _{ !digit ~ ident ~ (" " ~ ident)+ }
 
