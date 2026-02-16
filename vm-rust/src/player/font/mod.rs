@@ -603,6 +603,70 @@ impl FontManager {
         // Just use get directly - no lifetime conflicts
         self.font_cache.get(font_name).map(|v| &**v)
     }
+
+    /// Rasterize a specific font member's PFR data at the given size.
+    /// Unlike `get_font_with_cast_and_bitmap`, this does NOT search by name —
+    /// it uses the provided PFR data directly, ensuring each member gets its own result.
+    pub fn rasterize_pfr_at_size(
+        &mut self,
+        pfr_data: &[u8],
+        pfr_parsed: &crate::director::chunks::pfr1::types::Pfr1ParsedFont,
+        font_name: &str,
+        font_style: u8,
+        size: u16,
+        bitmap_manager: &mut crate::player::bitmap::manager::BitmapManager,
+    ) -> Option<Rc<BitmapFont>> {
+        use crate::director::chunks::pfr1::{rasterizer, parse_pfr1_font_with_target};
+
+        let parsed_for_size = match parse_pfr1_font_with_target(pfr_data, size as i32) {
+            Ok(p) => p,
+            Err(_) => pfr_parsed.clone(),
+        };
+
+        let rasterized = rasterizer::rasterize_pfr1_font(&parsed_for_size, size as usize);
+
+        let bitmap_width = rasterized.bitmap_width as u16;
+        let bitmap_height = rasterized.bitmap_height as u16;
+
+        let mut bitmap = Bitmap::new(
+            bitmap_width, bitmap_height, 32, 32, 0,
+            PaletteRef::BuiltIn(get_system_default_palette()),
+        );
+
+        let data_len = rasterized.bitmap_data.len().min(bitmap.data.len());
+        bitmap.data[..data_len].copy_from_slice(&rasterized.bitmap_data[..data_len]);
+
+        for i in (0..data_len).step_by(4) {
+            let a = bitmap.data[i + 3];
+            if a == 0 {
+                bitmap.data[i] = 255;
+                bitmap.data[i + 1] = 255;
+                bitmap.data[i + 2] = 255;
+            }
+        }
+        bitmap.use_alpha = true;
+
+        let bitmap_ref = bitmap_manager.add_bitmap(bitmap);
+
+        let font = BitmapFont {
+            bitmap_ref,
+            char_width: rasterized.cell_width as u16,
+            char_height: rasterized.cell_height as u16,
+            grid_columns: rasterized.grid_columns as u8,
+            grid_rows: rasterized.grid_rows as u8,
+            grid_cell_width: rasterized.cell_width as u16,
+            grid_cell_height: rasterized.cell_height as u16,
+            char_offset_x: 0,
+            char_offset_y: 0,
+            first_char_num: rasterized.first_char,
+            font_name: font_name.to_string(),
+            font_size: size,
+            font_style,
+            char_widths: Some(rasterized.char_widths),
+        };
+
+        Some(Rc::new(font))
+    }
 }
 
 pub async fn player_load_system_font(path: &str) {

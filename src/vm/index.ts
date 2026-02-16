@@ -174,6 +174,10 @@ export interface ILingoLine {
   spans: ILingoSpan[]
 }
 
+export interface IFontMemberSnapshot {
+  type: 'font'
+}
+
 export interface IUnknownMemberSnapshot {
   type: 'unknown'
 }
@@ -229,4 +233,4 @@ export interface ScoreSnapshot {
   channelInitData?: IScoreChannelInitData[]
 }
 
-export type MemberSnapshot = IBaseMemberSnapshot & (IFieldMemberSnapshot | IScriptMemberSnapshot | IBitmapMemberSnapshot | IPaletteMemberSnapshot | IUnknownMemberSnapshot | IFilmLoopMemberSnapshot)
+export type MemberSnapshot = IBaseMemberSnapshot & (IFieldMemberSnapshot | IScriptMemberSnapshot | IBitmapMemberSnapshot | IPaletteMemberSnapshot | IFontMemberSnapshot | IUnknownMemberSnapshot | IFilmLoopMemberSnapshot)

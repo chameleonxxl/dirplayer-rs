@@ -52,6 +52,12 @@ pub trait Renderer {
 
     /// Set the preview container element
     fn set_preview_container_element(&mut self, container_element: Option<web_sys::HtmlElement>);
+
+    /// Set the preview font size override
+    fn set_preview_font_size(&mut self, size: Option<u16>);
+
+    /// Get the preview font size override
+    fn preview_font_size(&self) -> Option<u16>;
 }
 
 /// Check if WebGL2 is supported in this browser
@@ -170,6 +176,20 @@ impl Renderer for DynamicRenderer {
         match self {
             DynamicRenderer::Canvas2D(r) => r.set_preview_container_element(container_element),
             DynamicRenderer::WebGL2(r) => r.set_preview_container_element(container_element),
+        }
+    }
+
+    fn set_preview_font_size(&mut self, size: Option<u16>) {
+        match self {
+            DynamicRenderer::Canvas2D(r) => r.preview_font_size = size,
+            DynamicRenderer::WebGL2(r) => r.preview_font_size = size,
+        }
+    }
+
+    fn preview_font_size(&self) -> Option<u16> {
+        match self {
+            DynamicRenderer::Canvas2D(r) => r.preview_font_size,
+            DynamicRenderer::WebGL2(r) => r.preview_font_size,
         }
     }
 }
