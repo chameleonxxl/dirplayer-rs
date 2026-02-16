@@ -17,7 +17,7 @@ pub struct Scope {
     pub handler_name_id: u16,
     pub args: Vec<DatumRef>,
     pub bytecode_index: usize,
-    pub locals: FxHashMap<String, DatumRef>,
+    pub locals: FxHashMap<u16, DatumRef>,
     pub loop_return_indices: Vec<usize>,
     pub return_value: DatumRef,
     pub stack: Vec<DatumRef>,

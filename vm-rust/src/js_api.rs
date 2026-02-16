@@ -1436,15 +1436,20 @@ impl JsApi {
                         .names
                         .get(scope.handler_name_id as usize)
                         .unwrap();
+                    let names = &cast_lib.lctx.as_ref().unwrap().names;
                     let scope = JsBridgeScope {
                         script_member_ref: scope.script_ref.to_js(),
                         bytecode_index: scope.bytecode_index as u32,
                         handler_name: handler_name.to_owned(),
                         locals: scope
                             .locals
-                            .clone()
-                            .into_iter()
-                            .map(|(k, v)| (k.to_owned(), v))
+                            .iter()
+                            .map(|(name_id, v)| {
+                                let name = names.get(*name_id as usize)
+                                    .cloned()
+                                    .unwrap_or_else(|| format!("local_{}", name_id));
+                                (name, v.clone())
+                            })
                             .collect(),
                         stack: scope.stack.clone(),
                         args: scope.args.clone(),
@@ -1647,7 +1652,7 @@ fn concrete_datum_to_js_bridge(datum: &Datum, player: &DirPlayer, depth: u8) -> 
 
             let props_map = js_sys::Map::new();
             for (k, v) in instance.properties.iter() {
-                props_map.set(&safe_js_string(k), &v.unwrap().to_js_value());
+                props_map.set(&safe_js_string(k.as_str()), &v.unwrap().to_js_value());
             }
             map.str_set("properties", &props_map.to_js_object());
         }

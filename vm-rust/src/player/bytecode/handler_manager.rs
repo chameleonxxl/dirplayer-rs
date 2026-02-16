@@ -182,6 +182,18 @@ pub struct BytecodeHandlerContext {
     pub scope_ref: ScopeRef,
     pub handler_def_ptr: *const HandlerDef,
     pub script_ptr: *const Script,
+    pub names_ptr: *const Vec<String>,
+}
+
+impl BytecodeHandlerContext {
+    /// Get a name from the name table by ID without borrowing player.
+    #[inline(always)]
+    pub fn get_name(&self, name_id: u16) -> &str {
+        unsafe {
+            let names = &*self.names_ptr;
+            &names[name_id as usize]
+        }
+    }
 }
 pub struct StaticBytecodeHandlerManager {}
 impl StaticBytecodeHandlerManager {

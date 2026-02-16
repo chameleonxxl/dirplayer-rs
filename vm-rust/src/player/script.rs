@@ -10,6 +10,8 @@ use crate::director::{
     lingo::{datum::Datum, script::ScriptContext},
 };
 
+use super::ci_string::{CiStr, CiString};
+
 use super::{
     allocator::{DatumAllocatorTrait, ScriptInstanceAllocatorTrait},
     bytecode::handler_manager::BytecodeHandlerContext,
@@ -43,9 +45,9 @@ pub struct Script {
     pub name: String,
     pub chunk: ScriptChunk,
     pub script_type: ScriptType,
-    pub handlers: FxHashMap<String, Rc<HandlerDef>>,
+    pub handlers: FxHashMap<CiString, Rc<HandlerDef>>,
     pub handler_names: Vec<String>,
-    pub properties: RefCell<FxHashMap<String, DatumRef>>,
+    pub properties: RefCell<FxHashMap<CiString, DatumRef>>,
 }
 
 pub type ScriptInstanceId = u32;
@@ -55,7 +57,7 @@ pub struct ScriptInstance {
     pub instance_id: ScriptInstanceId,
     pub script: CastMemberRef,
     pub ancestor: Option<ScriptInstanceRef>,
-    pub properties: FxHashMap<String, DatumRef>,
+    pub properties: FxHashMap<CiString, DatumRef>,
     pub begin_sprite_called: bool,
 }
 
@@ -75,7 +77,7 @@ impl ScriptInstance {
                 .cloned()
                 .unwrap_or_else(|| format!("prop_{}", prop_name_id));
 
-            properties.insert(prop_name, DatumRef::Void);
+            properties.insert(CiString::from(prop_name), DatumRef::Void);
         }
 
         ScriptInstance {
@@ -96,8 +98,8 @@ impl Script {
             .map(|x| (self.member_ref.clone(), x.clone()));
     }
 
-    pub fn get_own_handler(&self, name: &String) -> Option<&Rc<HandlerDef>> {
-        self.handlers.get(&name.to_lowercase())
+    pub fn get_own_handler(&self, name: &str) -> Option<&Rc<HandlerDef>> {
+        self.handlers.get(CiStr::new(name))
     }
 
     pub fn get_own_handler_by_name_id(&self, name_id: u16) -> Option<&Rc<HandlerDef>> {
@@ -107,16 +109,16 @@ impl Script {
             .map(|x| x.1)
     }
 
-    pub fn get_handler(&self, name: &String) -> Option<ScriptHandlerRefDef> {
+    pub fn get_handler(&self, name: &str) -> Option<ScriptHandlerRefDef> {
         return self
             .get_own_handler(name)
             .map(|x| (self.member_ref.clone(), x));
     }
 
-    pub fn get_own_handler_ref(&self, name: &String) -> Option<ScriptHandlerRef> {
+    pub fn get_own_handler_ref(&self, name: &str) -> Option<ScriptHandlerRef> {
         return self
             .get_own_handler(name)
-            .map(|_| (self.member_ref.clone(), name.clone()));
+            .map(|_| (self.member_ref.clone(), name.to_owned()));
     }
 }
 
@@ -140,20 +142,8 @@ pub fn script_get_prop_opt(
     }
 
     // Try to find the property on the current instance first
-    let key_index = script_instance
-        .properties
-        .keys()
-        .position(|k| k.to_lowercase() == prop_name.to_lowercase());
-    let prop_value = key_index.and_then(|index| {
-        script_instance
-            .properties
-            .values()
-            .nth(index)
-            .cloned()
-    });
-    // let prop_value = script_instance.properties.get(prop_name).map(|x| x.clone());
-    if let Some(prop) = prop_value {
-        return Some(prop);
+    if let Some(prop) = script_instance.properties.get(CiStr::new(prop_name)) {
+        return Some(prop.clone());
     }
 
     // Check ancestor for the property
@@ -185,7 +175,7 @@ pub fn script_get_static_prop(
         .unwrap();
     let script = script_rc.as_ref();
     let properties = script.properties.borrow();
-    if let Some(prop) = properties.get(prop_name) {
+    if let Some(prop) = properties.get(CiStr::new(prop_name)) {
         Ok(prop.clone())
     } else {
         Err(ScriptError::new(format!(
@@ -210,13 +200,13 @@ pub fn script_set_static_prop(
     let script = script_rc.as_ref();
     let mut properties = script.properties.borrow_mut();
 
-    if required && !properties.contains_key(prop_name) {
+    if required && !properties.contains_key(CiStr::new(prop_name)) {
         return Err(ScriptError::new(format!(
             "Cannot set static property {} on script {}",
             prop_name, script.name
         )));
     } else {
-        properties.insert(prop_name.clone(), value_ref.clone());
+        properties.insert(CiString::from(prop_name.clone()), value_ref.clone());
         Ok(())
     }
 }
@@ -267,16 +257,7 @@ pub fn script_set_prop(
             let script_instance = player
                 .allocator
                 .get_script_instance_mut(&script_instance_ref);
-            let prop_index = script_instance
-                .properties
-                .keys()
-                .position(|k| k.to_lowercase() == prop_name.to_lowercase());
-            if let Some(index) = prop_index {
-                let prop = script_instance
-                    .properties
-                    .values_mut()
-                    .nth(index)
-                    .unwrap();
+            if let Some(prop) = script_instance.properties.get_mut(CiStr::new(prop_name)) {
                 *prop = value_ref.clone();
                 Ok(())
             } else {
@@ -314,7 +295,7 @@ pub fn script_set_prop(
                     .get_script_instance_mut(&script_instance_ref);
                 script_instance
                     .properties
-                    .insert(prop_name.to_owned(), value_ref.clone());
+                    .insert(CiString::from(prop_name.to_owned()), value_ref.clone());
                 Ok(())
             }
         }

@@ -440,8 +440,8 @@ pub async fn run_player_command(command: PlayerVMCommand) -> Result<DatumRef, Sc
                     handler_name, script_id
                 );
 
-                // Try to get the handler - convert to lowercase for lookup
-                let handler = script.get_own_handler_ref(&handler_name.to_lowercase());
+                // Try to get the handler
+                let handler = script.get_own_handler_ref(&handler_name);
                 
                 // ADD THIS CHECK:
                 if handler.is_none() {

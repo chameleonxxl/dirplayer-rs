@@ -3,6 +3,7 @@ pub mod bitmap;
 pub mod bytecode;
 pub mod cast_lib;
 pub mod cast_manager;
+pub mod ci_string;
 pub mod cast_member;
 pub mod commands;
 pub mod compare;
@@ -1291,7 +1292,7 @@ impl DirPlayer {
                         // Find handler name by looking through the handlers map
                         let handler_name = script.handlers.iter()
                             .find(|(_, h)| h.name_id == scope.handler_name_id)
-                            .map(|(name, _)| name.clone())
+                            .map(|(name, _)| name.as_str().to_owned())
                             .unwrap_or_else(|| format!("handler_name_id#{}", scope.handler_name_id));
                         format!("{}::{}", script.name, handler_name)
                     } else {
@@ -1802,8 +1803,8 @@ pub async fn player_call_script_handler_raw_args(
         }
     });
 
-    let (scope_ref, handler_ptr, script_ptr) = reserve_player_mut(|player| {
-        let (script_ptr, handler_ptr, handler_name_id, script_type) = {
+    let (scope_ref, handler_ptr, script_ptr, names_ptr) = reserve_player_mut(|player| {
+        let (script_ptr, handler_ptr, handler_name_id, script_type, names_ptr) = {
             let script_rc = player
                 .movie
                 .cast_manager
@@ -1811,12 +1812,21 @@ pub async fn player_call_script_handler_raw_args(
                 .unwrap();
             let script = script_rc.as_ref();
             let script_ptr = script as *const Script;
+            let names_ptr = player
+                .movie
+                .cast_manager
+                .get_cast(script.member_ref.cast_lib as u32)
+                .unwrap()
+                .lctx
+                .as_ref()
+                .map(|lctx| &lctx.names as *const Vec<String>)
+                .unwrap();
             let handler = script.get_own_handler(&handler_name);
 
             if let Some(handler_rc) = handler {
                 let handler_name_id = handler_rc.name_id;
                 let handler_ptr: *const HandlerDef = handler_rc.as_ref();
-                Ok((script_ptr, handler_ptr, handler_name_id, script.script_type))
+                Ok((script_ptr, handler_ptr, handler_name_id, script.script_type, names_ptr))
             } else {
                 Err(ScriptError::new_code(
                     ScriptErrorCode::HandlerNotFound,
@@ -1856,13 +1866,14 @@ pub async fn player_call_script_handler_raw_args(
         let scope = player.scopes.get_mut(scope_ref).unwrap();
         scope.args.extend_from_slice(arg_list);
 
-        Ok((scope_ref, handler_ptr, script_ptr))
+        Ok((scope_ref, handler_ptr, script_ptr, names_ptr))
     })?;
 
     let ctx = BytecodeHandlerContext {
         scope_ref,
         handler_def_ptr: handler_ptr,
         script_ptr,
+        names_ptr,
     };
 
     // Trace handler entry if traceScript is enabled

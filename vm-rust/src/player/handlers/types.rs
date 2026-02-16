@@ -6,6 +6,7 @@ use crate::{
     player::{
         allocator::ScriptInstanceAllocatorTrait,
         bitmap::bitmap::{get_system_default_palette, Bitmap, BuiltInPalette, PaletteRef},
+        ci_string::CiStr,
         compare::sort_datums,
         datum_formatting::format_datum,
         eval::eval_lingo_expr_runtime,
@@ -159,13 +160,13 @@ impl TypeUtils {
                 if let Ok(index) = prop_key.int_value() {
                     let instance = player.allocator.get_script_instance(instance_ref);
                     let mut property_names: Vec<String> =
-                        instance.properties.keys().cloned().collect();
+                        instance.properties.keys().map(|k| k.as_str().to_owned()).collect();
                     property_names.sort();
                     let zero_based_index = (index - 1) as usize;
 
                     if zero_based_index < property_names.len() {
                         let prop_name = &property_names[zero_based_index];
-                        if let Some(prop_ref) = instance.properties.get(prop_name) {
+                        if let Some(prop_ref) = instance.properties.get(CiStr::new(prop_name)) {
                             return Ok(prop_ref.clone());
                         }
                     }
@@ -175,7 +176,7 @@ impl TypeUtils {
                 // String key
                 if let Ok(prop_name) = prop_key.string_value() {
                     let instance = player.allocator.get_script_instance(instance_ref);
-                    if let Some(prop_ref) = instance.properties.get(&prop_name) {
+                    if let Some(prop_ref) = instance.properties.get(CiStr::new(&prop_name)) {
                         return Ok(prop_ref.clone());
                     }
                 }
@@ -183,7 +184,7 @@ impl TypeUtils {
                 // Symbol key
                 if let Datum::Symbol(prop_name) = prop_key {
                     let instance = player.allocator.get_script_instance(instance_ref);
-                    if let Some(prop_ref) = instance.properties.get(prop_name) {
+                    if let Some(prop_ref) = instance.properties.get(CiStr::new(prop_name)) {
                         return Ok(prop_ref.clone());
                     }
                 }

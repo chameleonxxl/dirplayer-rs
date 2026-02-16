@@ -11,7 +11,7 @@ use crate::{
     },
     js_api::{self, JsApi},
     utils::{get_base_url, get_basename_no_extension, log_i},
-    player::{cast_member::ScriptMember, ColorRef},
+    player::{cast_member::ScriptMember, ci_string::CiString, ColorRef},
 };
 
 use super::{
@@ -302,7 +302,7 @@ impl CastLib {
             let mut handler_name_map = FxHashMap::default();
             for handler in &script_def.handlers {
                 let handler_name = &self.lctx.as_ref().unwrap().names[handler.name_id as usize];
-                handler_name_map.insert(handler_name.to_lowercase(), Rc::new(handler.clone()));
+                handler_name_map.insert(CiString::from(handler_name.clone()), Rc::new(handler.clone()));
                 handler_names.push(handler_name.to_owned());
             }
 
@@ -312,7 +312,7 @@ impl CastLib {
                 .map(|id| self.lctx.as_ref().unwrap().names[*id as usize].to_owned());
             let mut properties = FxHashMap::default();
             for name in property_names {
-                properties.insert(name.clone(), DatumRef::Void);
+                properties.insert(CiString::from(name), DatumRef::Void);
             }
 
             let script = Script {
@@ -406,7 +406,7 @@ impl CastLib {
         let mut handler_name_map = FxHashMap::default();
         for handler in &script_chunk.handlers {
             let handler_name = &self.lctx.as_ref().unwrap().names[handler.name_id as usize];
-            handler_name_map.insert(handler_name.to_lowercase(), Rc::new(handler.clone()));
+            handler_name_map.insert(CiString::from(handler_name.clone()), Rc::new(handler.clone()));
             handler_names.push(handler_name.to_owned());
         }
 
@@ -417,7 +417,7 @@ impl CastLib {
             .map(|id| self.lctx.as_ref().unwrap().names[*id as usize].to_owned());
         let mut properties = FxHashMap::default();
         for name in property_names {
-            properties.insert(name.clone(), DatumRef::Void);
+            properties.insert(CiString::from(name), DatumRef::Void);
         }
 
         let script = Rc::new(Script {
