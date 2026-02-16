@@ -1153,7 +1153,12 @@ impl TextMemberHandlers {
                 member_ref,
                 |player| value.string_value(),
                 |cast_member, value| {
-                    cast_member.member_type.as_text_mut().unwrap().font = value?;
+                    let font_name = value?;
+                    let text_member = cast_member.member_type.as_text_mut().unwrap();
+                    text_member.font = font_name.clone();
+                    for span in &mut text_member.html_styled_spans {
+                        span.style.font_face = Some(font_name.clone());
+                    }
                     Ok(())
                 },
             ),
@@ -1161,7 +1166,12 @@ impl TextMemberHandlers {
                 member_ref,
                 |player| value.int_value(),
                 |cast_member, value| {
-                    cast_member.member_type.as_text_mut().unwrap().font_size = value? as u16;
+                    let size = value? as u16;
+                    let text_member = cast_member.member_type.as_text_mut().unwrap();
+                    text_member.font_size = size;
+                    for span in &mut text_member.html_styled_spans {
+                        span.style.font_size = Some(size as i32);
+                    }
                     Ok(())
                 },
             ),
@@ -1175,7 +1185,17 @@ impl TextMemberHandlers {
                     Ok(item_strings)
                 },
                 |cast_member, value| {
-                    cast_member.member_type.as_text_mut().unwrap().font_style = value?;
+                    let styles = value?;
+                    let text_member = cast_member.member_type.as_text_mut().unwrap();
+                    let bold = styles.iter().any(|s| s == "bold");
+                    let italic = styles.iter().any(|s| s == "italic");
+                    let underline = styles.iter().any(|s| s == "underline");
+                    text_member.font_style = styles;
+                    for span in &mut text_member.html_styled_spans {
+                        span.style.bold = bold;
+                        span.style.italic = italic;
+                        span.style.underline = underline;
+                    }
                     Ok(())
                 },
             ),
