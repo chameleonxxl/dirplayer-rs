@@ -73,7 +73,7 @@ impl Drop for DatumRef {
                 // We need to check if the player still exists and if the datum is still in the allocator
                 if let Some(player) = unsafe { PLAYER_OPT.as_mut() } {
                     // Only proceed if the datum still exists in the allocator
-                    if player.allocator.datums.contains_key(id) {
+                    if player.allocator.contains_datum(*id) {
                         let ref_count = &mut **ref_count;
                         *ref_count -= 1;
                         if *ref_count <= 0 {

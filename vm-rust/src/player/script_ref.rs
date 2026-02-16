@@ -44,7 +44,7 @@ impl Drop for ScriptInstanceRef {
             // During allocator reset, the Rc may have been freed
             if let Some(player) = unsafe { PLAYER_OPT.as_mut() } {
                 // Only proceed if the script instance still exists in the allocator
-                if player.allocator.script_instances.contains_key(&self.0) {
+                if player.allocator.script_instances.contains(self.0 as usize) {
                     let mut_ref = &mut *self.1;
                     *mut_ref -= 1;
                     if *mut_ref <= 0 {

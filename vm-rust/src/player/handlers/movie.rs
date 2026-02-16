@@ -206,7 +206,7 @@ impl MovieHandlers {
                                 .filter(|behavior_ref| {
                                     // ONLY initialize behaviors that haven't had beginSprite called
                                     // This means they're NEW this frame
-                                    if let Some(entry) = player.allocator.script_instances.get(&behavior_ref.id()) {
+                                    if let Some(entry) = player.allocator.get_script_instance_entry(behavior_ref.id()) {
                                         !entry.script_instance.begin_sprite_called
                                     } else {
                                         false
@@ -245,7 +245,7 @@ impl MovieHandlers {
                             ) {
                                 for script_ref in &sprite.script_instance_list {
                                     if let Some(entry) =
-                                        player.allocator.script_instances.get_mut(&script_ref.id())
+                                        player.allocator.get_script_instance_entry_mut(script_ref.id())
                                     {
                                         entry.script_instance.begin_sprite_called = true;
                                     }

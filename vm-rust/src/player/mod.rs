@@ -449,7 +449,7 @@ impl DirPlayer {
                             .filter(|behavior_ref| {
                                 // ONLY initialize behaviors that haven't had beginSprite called
                                 // This means they're NEW this frame
-                                if let Some(entry) = player.allocator.script_instances.get(&behavior_ref.id()) {
+                                if let Some(entry) = player.allocator.get_script_instance_entry(behavior_ref.id()) {
                                     !entry.script_instance.begin_sprite_called
                                 } else {
                                     false
@@ -493,7 +493,7 @@ impl DirPlayer {
                         ) {
                             for script_ref in &sprite.script_instance_list {
                                 if let Some(entry) =
-                                    player.allocator.script_instances.get_mut(&script_ref.id())
+                                    player.allocator.get_script_instance_entry_mut(script_ref.id())
                                 {
                                     entry.script_instance.begin_sprite_called = true;
                                 }
@@ -2334,7 +2334,7 @@ pub async fn run_frame_loop() {
                             .filter(|behavior_ref| {
                                 // ONLY initialize behaviors that haven't had beginSprite called
                                 // This means they're NEW this frame
-                                if let Some(entry) = player.allocator.script_instances.get(&behavior_ref.id()) {
+                                if let Some(entry) = player.allocator.get_script_instance_entry(behavior_ref.id()) {
                                     !entry.script_instance.begin_sprite_called
                                 } else {
                                     false
@@ -2344,7 +2344,7 @@ pub async fn run_frame_loop() {
                     })
                     .collect()
             });
-            
+
             // Initialize behavior default properties
             for (behavior_ref, sprite_num) in behaviors_to_init {
                 if let Err(err) = Score::initialize_behavior_defaults_async(behavior_ref, sprite_num).await {
@@ -2377,7 +2377,7 @@ pub async fn run_frame_loop() {
                         ) {
                             for script_ref in &sprite.script_instance_list {
                                 if let Some(entry) =
-                                    player.allocator.script_instances.get_mut(&script_ref.id())
+                                    player.allocator.get_script_instance_entry_mut(script_ref.id())
                                 {
                                     entry.script_instance.begin_sprite_called = true;
                                 }
