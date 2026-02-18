@@ -820,6 +820,7 @@ impl DirPlayer {
         }
     }
 
+    #[inline]
     pub fn get_datum(&self, id: &DatumRef) -> &Datum {
         self.allocator.get_datum(id)
     }
@@ -836,10 +837,10 @@ impl DirPlayer {
         }
     }
 
-    pub fn get_hydrated_globals(&self) -> FxHashMap<String, &Datum> {
+    pub fn get_hydrated_globals(&self) -> FxHashMap<&str, &Datum> {
         self.globals
             .iter()
-            .map(|(k, v)| (k.to_owned(), self.get_datum(v)))
+            .map(|(k, v)| (k.as_str(), self.get_datum(v)))
             .collect()
     }
 
@@ -971,6 +972,7 @@ impl DirPlayer {
         self.globals.insert("FALSE".to_string(), false_datum);
     }
 
+    #[inline]
     pub fn alloc_datum(&mut self, datum: Datum) -> DatumRef {
         return self.allocator.alloc_datum(datum).unwrap();
     }
@@ -1720,29 +1722,40 @@ pub async fn player_call_global_handler(
     }
 }
 
+#[inline(always)]
 pub fn reserve_player_ref<T, F>(callback: F) -> T
 where
     F: FnOnce(&DirPlayer) -> T,
 {
-    // let player_opt = PLAYER_LOCK.try_read().unwrap();
-    // let player = player_opt.as_ref().unwrap();
-    // callback(player)
     unsafe {
-        let player = PLAYER_OPT.as_ref().unwrap();
+        let player = PLAYER_OPT.as_ref().unwrap_unchecked();
         callback(player)
     }
 }
 
+#[inline(always)]
 pub fn reserve_player_mut<T, F>(callback: F) -> T
 where
     F: FnOnce(&mut DirPlayer) -> T,
 {
-    // let mut player_opt = PLAYER_LOCK.try_write().unwrap();
-    // let player = player_opt.as_mut().unwrap();
     unsafe {
-        let player = PLAYER_OPT.as_mut().unwrap();
+        let player = PLAYER_OPT.as_mut().unwrap_unchecked();
         callback(player)
     }
+}
+
+/// Direct reference access without closure overhead.
+/// Caller must ensure no mutable references exist.
+#[inline(always)]
+pub unsafe fn player_ref() -> &'static DirPlayer {
+    PLAYER_OPT.as_ref().unwrap_unchecked()
+}
+
+/// Direct mutable reference access without closure overhead.
+/// Caller must ensure no other references exist.
+#[inline(always)]
+pub unsafe fn player_mut() -> &'static mut DirPlayer {
+    PLAYER_OPT.as_mut().unwrap_unchecked()
 }
 
 fn reserve_player_mut_async<F, R>(callback: F) -> impl Future<Output = R>
@@ -1901,62 +1914,65 @@ pub async fn player_call_script_handler_raw_args(
     let mut should_return = false;
 
     loop {
-        let bytecode_index =
-            reserve_player_ref(|player| player.scopes.get(scope_ref).unwrap().bytecode_index);
-        // let profile_token = start_profiling(get_opcode_name(&bytecode.opcode));
-        // Check for explicit breakpoints first
-        if let Some(breakpoint) = reserve_player_ref(|player| {
-            player
-                .breakpoint_manager
-                .find_breakpoint_for_bytecode(
-                    unsafe { &(&*script_ptr).name },
-                    &handler_name,
-                    bytecode_index,
-                )
-                .cloned()
-        }) {
-            player_trigger_breakpoint(
-                breakpoint,
-                script_member_ref.to_owned(),
-                handler_ref.to_owned(),
-                bytecode_index,
-            )
-            .await;
-        }
-
-        // Check for step mode conditions (step into/over/out)
-        let should_step_break = reserve_player_ref(|player| {
-            match &player.step_mode {
-                StepMode::None => false,
-                StepMode::Into => true, // Always stop on step into
-                StepMode::IntoLine { skip_bytecode_indices } => {
-                    // Stop if bytecode index is not in skip list (follows into function calls)
-                    !skip_bytecode_indices.contains(&bytecode_index)
-                }
-                StepMode::Over => player.scope_count <= player.step_scope_depth, // Stop at same or higher scope
-                StepMode::OverLine { skip_bytecode_indices } => {
-                    // Stop if at same or higher scope AND bytecode index is not in skip list
-                    player.scope_count <= player.step_scope_depth
-                        && !skip_bytecode_indices.contains(&bytecode_index)
-                }
-                StepMode::Out => player.scope_count < player.step_scope_depth, // Stop when returned to higher scope
-            }
+        // Single player access to read bytecode_index and debugger state
+        let (bytecode_index, debugger_active) = reserve_player_ref(|player| {
+            let bi = player.scopes.get(scope_ref).unwrap().bytecode_index;
+            let debugging = !player.breakpoint_manager.breakpoints.is_empty()
+                || !matches!(player.step_mode, StepMode::None);
+            (bi, debugging)
         });
 
-        if should_step_break {
-            // Create a synthetic breakpoint for the step
-            let breakpoint = Breakpoint {
-                script_name: unsafe { (&*script_ptr).name.clone() },
-                handler_name: handler_name.clone(),
-                bytecode_index,
-            };
-            player_trigger_breakpoint(
-                breakpoint,
-                script_member_ref.to_owned(),
-                handler_ref.to_owned(),
-                bytecode_index,
-            )
-            .await;
+        // Only check breakpoints and step mode if the debugger is actually active
+        if debugger_active {
+            if let Some(breakpoint) = reserve_player_ref(|player| {
+                player
+                    .breakpoint_manager
+                    .find_breakpoint_for_bytecode(
+                        unsafe { &(&*script_ptr).name },
+                        &handler_name,
+                        bytecode_index,
+                    )
+                    .cloned()
+            }) {
+                player_trigger_breakpoint(
+                    breakpoint,
+                    script_member_ref.to_owned(),
+                    handler_ref.to_owned(),
+                    bytecode_index,
+                )
+                .await;
+            }
+
+            let should_step_break = reserve_player_ref(|player| {
+                match &player.step_mode {
+                    StepMode::None => false,
+                    StepMode::Into => true,
+                    StepMode::IntoLine { skip_bytecode_indices } => {
+                        !skip_bytecode_indices.contains(&bytecode_index)
+                    }
+                    StepMode::Over => player.scope_count <= player.step_scope_depth,
+                    StepMode::OverLine { skip_bytecode_indices } => {
+                        player.scope_count <= player.step_scope_depth
+                            && !skip_bytecode_indices.contains(&bytecode_index)
+                    }
+                    StepMode::Out => player.scope_count < player.step_scope_depth,
+                }
+            });
+
+            if should_step_break {
+                let breakpoint = Breakpoint {
+                    script_name: unsafe { (&*script_ptr).name.clone() },
+                    handler_name: handler_name.clone(),
+                    bytecode_index,
+                };
+                player_trigger_breakpoint(
+                    breakpoint,
+                    script_member_ref.to_owned(),
+                    handler_ref.to_owned(),
+                    bytecode_index,
+                )
+                .await;
+            }
         }
 
         let result = match player_execute_bytecode(&ctx).await {
@@ -2517,7 +2533,7 @@ pub fn init_player() {
 
 fn get_active_static_script_refs<'a>(
     movie: &'a Movie,
-    globals: &'a FxHashMap<String, &'a Datum>,
+    globals: &'a FxHashMap<&str, &'a Datum>,
 ) -> Vec<CastMemberRef> {
     let frame_script = movie.score.get_script_in_frame(movie.current_frame);
     let movie_scripts = movie.cast_manager.get_movie_scripts();

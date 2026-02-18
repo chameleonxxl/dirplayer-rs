@@ -1,6 +1,4 @@
-use log::warn;
-
-use super::{allocator::ScriptInstanceAllocatorTrait, script::ScriptInstanceId, PLAYER_OPT};
+use super::{allocator::{ScriptInstanceAllocatorTrait, ALLOCATOR_RESETTING}, script::ScriptInstanceId, PLAYER_OPT};
 
 #[derive(Debug)]
 pub struct ScriptInstanceRef(ScriptInstanceId, *mut u32);
@@ -38,20 +36,17 @@ impl Clone for ScriptInstanceRef {
 }
 
 impl Drop for ScriptInstanceRef {
+    #[inline]
     fn drop(&mut self) {
         unsafe {
-            // Check if we can safely dereference the ref_count pointer
-            // During allocator reset, the Rc may have been freed
-            if let Some(player) = unsafe { PLAYER_OPT.as_mut() } {
-                // Only proceed if the script instance still exists in the allocator
-                if player.allocator.script_instances.contains(self.0 as usize) {
-                    let mut_ref = &mut *self.1;
-                    *mut_ref -= 1;
-                    if *mut_ref <= 0 {
-                        player.allocator.on_script_instance_ref_dropped(self.0);
-                    }
-                } else {
-                    warn!("Attempted to drop ScriptInstanceRef for non-existing ScriptInstanceId: {}", self.0);
+            if ALLOCATOR_RESETTING {
+                return;
+            }
+            let rc = &mut *self.1;
+            *rc -= 1;
+            if *rc == 0 {
+                if let Some(player) = PLAYER_OPT.as_mut() {
+                    player.allocator.on_script_instance_ref_dropped(self.0);
                 }
             }
         }

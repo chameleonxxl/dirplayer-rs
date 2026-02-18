@@ -11,6 +11,12 @@ use super::{
     ScriptError,
 };
 
+/// Flag set during allocator reset to skip DatumRef::drop logic.
+/// During reset, arena entries are cleared one by one; inner DatumRefs
+/// may point to already-freed entries, so we must not dereference their
+/// ref_count pointers.
+pub static mut ALLOCATOR_RESETTING: bool = false;
+
 const ARENA_CHUNK_SIZE: usize = 4096;
 
 pub struct Arena<T> {
@@ -56,6 +62,7 @@ impl<T> Arena<T> {
         }
     }
 
+    #[inline]
     pub fn alloc(&mut self, value: T) -> usize {
         self.count += 1;
         if let Some(idx) = self.free_list.pop() {
@@ -86,6 +93,7 @@ impl<T> Arena<T> {
         }
     }
 
+    #[inline]
     pub fn remove(&mut self, id: usize) -> Option<T> {
         if id == 0 {
             return None;
@@ -308,6 +316,7 @@ impl DatumAllocator {
 }
 
 impl DatumAllocatorTrait for DatumAllocator {
+    #[inline]
     fn alloc_datum(&mut self, datum: Datum) -> Result<DatumRef, ScriptError> {
         if datum.is_void() {
             return Ok(DatumRef::Void);
@@ -315,36 +324,39 @@ impl DatumAllocatorTrait for DatumAllocator {
 
         let entry = DatumRefEntry {
             id: 0,
-            ref_count: UnsafeCell::new(0),
+            ref_count: UnsafeCell::new(1), // Start at 1 to avoid the extra increment in from_id
             datum,
         };
         let id = self.datums.alloc(entry);
         let entry = self.datums.get_mut(id).unwrap();
         entry.id = id;
         let ref_count_ptr = entry.ref_count.get();
-        Ok(DatumRef::from_id(id, ref_count_ptr))
+        Ok(DatumRef::Ref(id, ref_count_ptr))
     }
 
+    #[inline]
     fn get_datum(&self, id: &DatumRef) -> &Datum {
         match id {
             DatumRef::Ref(id, ..) => {
-                let entry = self.datums.get(*id).unwrap();
+                let entry = unsafe { self.datums.get(*id).unwrap_unchecked() };
                 &entry.datum
             }
             DatumRef::Void => &Datum::Void,
         }
     }
 
+    #[inline]
     fn get_datum_mut(&mut self, id: &DatumRef) -> &mut Datum {
         match id {
             DatumRef::Ref(id, ..) => {
-                let entry = self.datums.get_mut(*id).unwrap();
+                let entry = unsafe { self.datums.get_mut(*id).unwrap_unchecked() };
                 &mut entry.datum
             }
             DatumRef::Void => &mut self.void_datum,
         }
     }
 
+    #[inline]
     fn on_datum_ref_dropped(&mut self, id: DatumId) {
         self.dealloc_datum(id);
     }
@@ -409,6 +421,8 @@ impl ResetableAllocator for DatumAllocator {
         // Remove entries individually to ensure proper Drop cleanup.
         // Datum Drop impls may reference other datums, so reverse order
         // helps ensure dependents are dropped before their dependencies.
+        unsafe { ALLOCATOR_RESETTING = true; }
+
         debug!("Removing all datums");
         self.datums.clear_individually_reverse();
 
@@ -416,5 +430,7 @@ impl ResetableAllocator for DatumAllocator {
         self.script_instances.clear_individually();
 
         self.script_instance_counter = 1;
+
+        unsafe { ALLOCATOR_RESETTING = false; }
     }
 }
