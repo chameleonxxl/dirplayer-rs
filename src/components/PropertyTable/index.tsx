@@ -1,4 +1,5 @@
 import { ReactNode, useState } from "react";
+import { downloadBlob } from "../../utils/download";
 import styles from "./styles.module.css";
 
 export { styles as propertyTableStyles };
@@ -61,6 +62,24 @@ function PropertyValue({ value }: { value: unknown }) {
             ))}
           </div>
         )}
+      </span>
+    );
+  }
+  if (value instanceof Uint8Array) {
+    return (
+      <span>
+        <span className={styles.propNull}>&lt;{value.length} bytes&gt;</span>
+        {" "}
+        <a
+          href="#"
+          className={styles.propExpandToggle}
+          onClick={(e) => {
+            e.preventDefault();
+            downloadBlob(value, "data.bin");
+          }}
+        >
+          (Save)
+        </a>
       </span>
     );
   }

@@ -4,6 +4,7 @@ import { selectGlobals, selectScopes, scopeListChanged } from "../../store/vmSli
 import styles from "./styles.module.css";
 import IconButton, { ReactIconButton } from "../../components/IconButton";
 import { faWarning } from "@fortawesome/free-solid-svg-icons";
+import { downloadBlob } from "../../utils/download";
 import {
   resume_breakpoint,
   request_datum,
@@ -114,6 +115,22 @@ function DatumRow({ label, datumRef }: { label?: string; datumRef: DatumAccessRe
         </span>
       )}
       <span className={pts.propString}>{datum.debugDescription}</span>
+      {datum.type === "javascript" && (datum as any).bytes instanceof Uint8Array && (
+        <>
+          {" "}
+          <a
+            href="#"
+            className={pts.propExpandToggle}
+            onClick={(e) => {
+              e.preventDefault();
+              e.stopPropagation();
+              downloadBlob((datum as any).bytes, "js_datum.bin");
+            }}
+          >
+            (Save)
+          </a>
+        </>
+      )}
     </>
   );
 

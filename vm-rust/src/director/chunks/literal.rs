@@ -19,7 +19,7 @@ pub enum LiteralType {
     String = 1,
     Int = 4,
     Float = 9,
-    Unknown1 = 11,
+    JavaScript = 11,
 }
 
 impl LiteralStore {

@@ -641,6 +641,10 @@ impl JsApi {
                         Datum::Symbol(s) => {
                             lm.str_set("value", &JsValue::from_str(&ascii_safe(s)));
                         }
+                        Datum::JavaScript(data) => {
+                            lm.str_set("size", &JsValue::from_f64(data.len() as f64));
+                            lm.str_set("bytes", &js_sys::Uint8Array::from(&data[..]));
+                        }
                         Datum::Void => {}
                         _ => {
                             lm.str_set("value", &JsValue::from_str(&literal.type_str()));
@@ -1783,6 +1787,11 @@ fn concrete_datum_to_js_bridge(datum: &Datum, player: &DirPlayer, depth: u8) -> 
         }
         Datum::Media(_) => {
             map.str_set("type", &safe_js_string("media"));
+        }
+        Datum::JavaScript(data) => {
+            map.str_set("type", &safe_js_string("javascript"));
+            map.str_set("size", &JsValue::from(data.len() as f64));
+            map.str_set("bytes", &js_sys::Uint8Array::from(&data[..]));
         }
     }
     return map.to_js_object();

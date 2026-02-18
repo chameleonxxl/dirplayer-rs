@@ -32,7 +32,13 @@ export type TJsBridgeDatumVoid = TJsBridgeDatumBase & {
   type: 'void',
 }
 
-export type JsBridgeDatum = TJsBridgeDatumScriptInstance | TJsBridgeDatumList | TJsBridgeDatumPropList | TJsBridgeDatumVoid// | TJsBridgeDatumUnknown;
+export type TJsBridgeDatumJavaScript = TJsBridgeDatumBase & {
+  type: 'javascript',
+  size: number,
+  bytes: Uint8Array,
+}
+
+export type JsBridgeDatum = TJsBridgeDatumScriptInstance | TJsBridgeDatumList | TJsBridgeDatumPropList | TJsBridgeDatumVoid | TJsBridgeDatumJavaScript// | TJsBridgeDatumUnknown;
 
 export interface IVMScope {
   script_member_ref: ICastMemberRef,
