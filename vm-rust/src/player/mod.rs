@@ -231,9 +231,20 @@ pub struct DirPlayer {
     pub debug_datum_refs: Vec<DatumRef>,
     pub eval_scope_index: Option<u32>,
     pub delay_until: Option<chrono::DateTime<chrono::Local>>,
-    /// Pending gotoNetMovie operation: (task_id, optional_marker_label).
-    /// Overwritten by subsequent gotoNetMovie calls (cancels previous).
-    pub pending_goto_net_movie: Option<(u32, Option<String>)>,
+    /// Pending gotoNetMovie operation: (task_id, frame_destination).
+    /// Overwritten by subsequent gotoNetMovie/go-to-movie calls (cancels previous).
+    pub pending_goto_net_movie: Option<(u32, MovieFrameTarget)>,
+}
+
+/// Target frame for a movie transition (gotoNetMovie or go movie).
+#[derive(Clone)]
+pub enum MovieFrameTarget {
+    /// No specific frame — start at frame 1
+    Default,
+    /// Jump to a labeled frame (from URL #fragment or string arg)
+    Label(String),
+    /// Jump to a specific frame number
+Frame(u32),
 }
 
 impl DirPlayer {
@@ -2122,7 +2133,7 @@ async fn run_movie_init_sequence() {
 
 /// Perform the movie transition for gotoNetMovie.
 /// Called from within the frame loop when the pending fetch is complete.
-async fn transition_to_net_movie(task_id: u32, marker: Option<String>) {
+async fn transition_to_net_movie(task_id: u32, target: MovieFrameTarget) {
     // 1. Parse the fetched movie data
     let dir_file = reserve_player_mut(|player| {
         let task = player.net_manager.get_task(task_id);
@@ -2174,16 +2185,22 @@ async fn transition_to_net_movie(task_id: u32, marker: Option<String>) {
         })
     }).await;
 
-    // Apply marker if specified
+    // Apply frame target if specified
     reserve_player_mut(|player| {
-        if let Some(ref label) = marker {
-            let target_frame = player.movie.score.frame_labels
-                .iter()
-                .find(|fl| fl.label.eq_ignore_ascii_case(label))
-                .map(|fl| fl.frame_num as u32);
-            if let Some(frame) = target_frame {
-                player.movie.current_frame = frame;
+        match &target {
+            MovieFrameTarget::Label(label) => {
+                let target_frame = player.movie.score.frame_labels
+                    .iter()
+                    .find(|fl| fl.label.eq_ignore_ascii_case(label))
+                    .map(|fl| fl.frame_num as u32);
+                if let Some(frame) = target_frame {
+                    player.movie.current_frame = frame;
+                }
             }
+            MovieFrameTarget::Frame(frame) => {
+                player.movie.current_frame = *frame;
+            }
+            MovieFrameTarget::Default => {}
         }
         player.pending_goto_net_movie = None;
     });
@@ -2206,9 +2223,9 @@ pub async fn run_frame_loop() {
     while is_playing {
         // Check for pending gotoNetMovie completion
         let goto_transition = reserve_player_ref(|player| {
-            if let Some((task_id, ref marker)) = player.pending_goto_net_movie {
+            if let Some((task_id, ref target)) = player.pending_goto_net_movie {
                 if player.net_manager.is_task_done(Some(task_id)) {
-                    Some((task_id, marker.clone()))
+                    Some((task_id, target.clone()))
                 } else {
                     None
                 }
@@ -2217,8 +2234,8 @@ pub async fn run_frame_loop() {
             }
         });
 
-        if let Some((task_id, marker)) = goto_transition {
-            transition_to_net_movie(task_id, marker).await;
+        if let Some((task_id, target)) = goto_transition {
+            transition_to_net_movie(task_id, target).await;
             // After transition, refresh local state and continue the frame loop
             (is_playing, is_script_paused) = reserve_player_ref(|player| {
                 (player.is_playing, player.is_script_paused)

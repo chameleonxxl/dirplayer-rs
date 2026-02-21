@@ -7,7 +7,7 @@ use crate::{
         datum_formatting::format_datum, ScriptInstanceRef, Score,
         reserve_player_mut, reserve_player_ref, reserve_player_mut_async,
         score::get_sprite_at, handlers::datum_handlers::player_call_datum_handler,
-        DatumRef, ScriptError, get_score_sprite_mut,
+        DatumRef, ScriptError, get_score_sprite_mut, MovieFrameTarget,
         events::{
             player_invoke_event_to_instances, player_invoke_static_event,
             player_invoke_global_event, player_wait_available, player_unwrap_result,
@@ -89,6 +89,39 @@ impl MovieHandlers {
     }
 
     pub async fn go(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+        // If a second argument is provided, it's a movie path: go frame X of movie "path"
+        let go_to_movie = if args.len() >= 2 {
+            reserve_player_mut(|player| {
+                let movie_path = player.get_datum(&args[1]).string_value()?;
+                let movie_path = if movie_path.contains(".") {
+                    movie_path
+                } else {
+                    let extension = player.movie.file_name.split('.').last().unwrap_or("dcr");
+                    format!("{}.{}", movie_path, extension)
+                };
+
+                // Resolve the first arg into a MovieFrameTarget
+                let datum = player.get_datum(&args[0]);
+                let datum_type = datum.type_enum();
+                let target = match datum_type {
+                    DatumType::Int => MovieFrameTarget::Frame(datum.int_value()? as u32),
+                    DatumType::String => MovieFrameTarget::Label(datum.string_value()?),
+                    DatumType::Symbol => MovieFrameTarget::Label(datum.string_value()?),
+                    _ => MovieFrameTarget::Default,
+                };
+
+                let task_id = player.net_manager.preload_net_thing(movie_path);
+                player.pending_goto_net_movie = Some((task_id, target));
+                Ok(true)
+            })?
+        } else {
+            false
+        };
+
+        if go_to_movie {
+            return Ok(DatumRef::Void);
+        }
+
         let mut frame_advanced = false;
         let mut enter_frame = 0;
 
@@ -574,20 +607,24 @@ impl MovieHandlers {
             let raw_url = player.get_datum(&args[0]).string_value()?;
 
             // Parse URL and extract #fragment marker
-            let (fetch_url, marker) = if let Some(hash_pos) = raw_url.find('#') {
+            let (fetch_url, target) = if let Some(hash_pos) = raw_url.find('#') {
                 let url_part = raw_url[..hash_pos].to_string();
                 let fragment = raw_url[hash_pos + 1..].to_string();
-                let marker = if fragment.is_empty() { None } else { Some(fragment) };
-                (url_part, marker)
+                let target = if fragment.is_empty() {
+                    MovieFrameTarget::Default
+                } else {
+                    MovieFrameTarget::Label(fragment)
+                };
+                (url_part, target)
             } else {
-                (raw_url, None)
+                (raw_url, MovieFrameTarget::Default)
             };
 
             // Start the network fetch (non-blocking)
             let task_id = player.net_manager.preload_net_thing(fetch_url);
 
             // Store the pending operation (replaces any previous pending one, cancelling it)
-            player.pending_goto_net_movie = Some((task_id, marker));
+            player.pending_goto_net_movie = Some((task_id, target));
 
             Ok(player.alloc_datum(Datum::Int(task_id as i32)))
         })
