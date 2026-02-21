@@ -13,8 +13,7 @@ macro_rules! multiuser_log {
 use crate::{
     director::lingo::datum::{Datum, DatumType},
     player::{
-        events::player_dispatch_callback_event, reserve_player_mut, reserve_player_ref, DatumRef,
-        ScriptError,
+        self, DatumRef, ScriptError, events::player_dispatch_callback_event, reserve_player_mut, reserve_player_ref
     },
 };
 
@@ -329,6 +328,11 @@ impl MultiuserXtraManager {
                     }
                 })
             }
+            "getnetaddresscookie" => {
+                reserve_player_mut(|player| {
+                    Ok(player.alloc_datum(Datum::String("".to_string())))
+                })
+            },
             _ => Err(ScriptError::new(format!(
                 "No handler {} found for Multiuser xtra instance #{}",
                 handler_name, instance_id
