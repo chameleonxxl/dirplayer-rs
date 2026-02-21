@@ -814,6 +814,10 @@ impl BuiltInHandlerManager {
                 log::warn!("spriteBox is not implemented, returning <Void>");
                 Ok(DatumRef::Void)
             }
+            "puppettransition" => {
+                log::warn!("puppetTransition is not implemented");
+                Ok(DatumRef::Void)
+            }
             _ => {
                 // Check if first arg is an xtra instance - if so, forward to the xtra instance handler
                 if !args.is_empty() {
