@@ -1109,7 +1109,7 @@ pub fn measure_text(
     return (width, height);
 }
 
-pub fn _get_text_char_pos(text: &str, params: &DrawTextParams, char_index: usize) -> (i16, i16) {
+pub fn get_text_char_pos(text: &str, params: &DrawTextParams, char_index: usize) -> (i16, i16) {
     let mut x = 0;
     let mut y = params.top_spacing;
     let mut line_width = 0;

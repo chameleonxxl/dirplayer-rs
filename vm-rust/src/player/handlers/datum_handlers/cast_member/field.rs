@@ -4,7 +4,7 @@ use crate::{
     director::lingo::datum::{Datum, DatumType, StringChunkExpr, StringChunkSource, StringChunkType, datum_bool},
     player::{
         ColorRef, DatumRef, DirPlayer, ScriptError, bitmap::{bitmap::{Bitmap, BuiltInPalette, PaletteRef}, drawing::CopyPixelsParams}, cast_lib::CastMemberRef, cast_member::Media, font::{BitmapFont, measure_text}, handlers::datum_handlers::{
-            cast_member_ref::borrow_member_mut, string::string_get_lines, string_chunk::StringChunkUtils
+            cast_member_ref::borrow_member_mut, string::{string_get_lines, string_get_words}, string_chunk::StringChunkUtils
         }
     },
 };
@@ -137,6 +137,11 @@ impl FieldMemberHandlers {
                 let lines = string_get_lines(&field.text);
                 let line_datums = lines.into_iter().map(Datum::String).map(|d| player.alloc_datum(d)).collect_vec();
                 Ok(Datum::List(DatumType::List, line_datums, false))
+            }
+            "word" => {
+                let words = string_get_words(&field.text);
+                let word_datums = words.into_iter().map(Datum::String).map(|d| player.alloc_datum(d)).collect_vec();
+                Ok(Datum::List(DatumType::List, word_datums, false))
             }
             "pageHeight" => {
                 // pageHeight = total height of the text content

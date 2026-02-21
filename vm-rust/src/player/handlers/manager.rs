@@ -823,6 +823,53 @@ impl BuiltInHandlerManager {
                 log::warn!("preload is not implemented");
                 Ok(DatumRef::Void)
             }
+            "charpostoloc" => {
+                reserve_player_mut(|player| {
+                    if args.len() < 2 {
+                        return Err(ScriptError::new(
+                            "charPosToLoc requires 2 arguments (member, charPos)".to_string(),
+                        ));
+                    }
+                    let member_ref = player.get_datum(&args[0]).to_member_ref()?;
+                    let char_pos = player.get_datum(&args[1]).int_value()?;
+
+                    let member = player
+                        .movie
+                        .cast_manager
+                        .find_member_by_ref(&member_ref)
+                        .ok_or_else(|| ScriptError::new("Member not found".to_string()))?;
+
+                    let (text, fixed_line_space, top_spacing) = match &member.member_type {
+                        crate::player::cast_member::CastMemberType::Text(t) => {
+                            (t.text.clone(), t.fixed_line_space, t.top_spacing)
+                        }
+                        crate::player::cast_member::CastMemberType::Field(f) => {
+                            (f.text.clone(), f.fixed_line_space, f.top_spacing)
+                        }
+                        _ => {
+                            return Err(ScriptError::new(
+                                "charPosToLoc requires a text or field member".to_string(),
+                            ))
+                        }
+                    };
+
+                    let font = player.font_manager.get_system_font().unwrap();
+                    let params = crate::player::font::DrawTextParams {
+                        font: &font,
+                        line_height: None,
+                        line_spacing: fixed_line_space,
+                        top_spacing,
+                    };
+
+                    // char_pos is 1-based; convert to 0-based index
+                    let index = if char_pos > 0 { (char_pos - 1) as usize } else { 0 };
+                    let (x, y) = crate::player::font::get_text_char_pos(&text, &params, index);
+
+                    let x_ref = player.alloc_datum(Datum::Int(x as i32));
+                    let y_ref = player.alloc_datum(Datum::Int(y as i32));
+                    Ok(player.alloc_datum(Datum::Point([x_ref, y_ref])))
+                })
+            }
             _ => {
                 // Check if first arg is an xtra instance - if so, forward to the xtra instance handler
                 if !args.is_empty() {
