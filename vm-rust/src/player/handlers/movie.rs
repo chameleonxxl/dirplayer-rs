@@ -748,6 +748,19 @@ impl MovieHandlers {
         })
     }
 
+    pub fn delay(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+        reserve_player_mut(|player| {
+            let ticks = player.get_datum(&args[0]).int_value()?;
+            if ticks > 0 {
+                let delay_ms = (ticks as f64) * (1000.0 / 60.0);
+                player.delay_until = Some(
+                    chrono::Local::now() + chrono::Duration::milliseconds(delay_ms as i64),
+                );
+            }
+            Ok(DatumRef::Void)
+        })
+    }
+
     pub fn halt(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
         reserve_player_mut(|player| {
             // Stop movie playback

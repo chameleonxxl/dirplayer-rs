@@ -793,6 +793,7 @@ impl BuiltInHandlerManager {
             "alert" => Self::alert(args),
             "objectp" => Self::object_p(args),
             "soundbusy" => TypeHandlers::sound_busy(args),
+            "delay" => MovieHandlers::delay(args),
             "halt" => MovieHandlers::halt(args),
             "starttimer" => Self::start_timer(args),
             "externalevent" => Self::external_event(args),

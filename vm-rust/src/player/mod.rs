@@ -230,6 +230,7 @@ pub struct DirPlayer {
     pub current_score_context: ScoreRef,
     pub debug_datum_refs: Vec<DatumRef>,
     pub eval_scope_index: Option<u32>,
+    pub delay_until: Option<chrono::DateTime<chrono::Local>>,
 }
 
 impl DirPlayer {
@@ -340,6 +341,7 @@ impl DirPlayer {
             current_score_context: ScoreRef::Stage,
             debug_datum_refs: vec![],
             eval_scope_index: None,
+            delay_until: None,
         };
 
         result.reset();
@@ -2212,8 +2214,22 @@ pub async fn run_frame_loop() {
             }
         }
 
-        // Only advance frame if enough time has passed AND not paused
-        if should_advance_frame && !is_script_paused {
+        // Check if delay() is in effect
+        let is_delayed = reserve_player_mut(|player| {
+            if let Some(until) = player.delay_until {
+                if chrono::Local::now() < until {
+                    true
+                } else {
+                    player.delay_until = None;
+                    false
+                }
+            } else {
+                false
+            }
+        });
+
+        // Only advance frame if enough time has passed AND not paused AND not delayed
+        if should_advance_frame && !is_script_paused && !is_delayed {
             let (has_player_frame_changed, has_frame_changed_in_go, go_direction) =
                 reserve_player_ref(|player| {
                     (
