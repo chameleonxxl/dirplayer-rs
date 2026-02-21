@@ -569,6 +569,30 @@ impl MovieHandlers {
         Ok(DatumRef::Void)
     }
 
+    pub fn go_to_net_movie(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+        reserve_player_mut(|player| {
+            let raw_url = player.get_datum(&args[0]).string_value()?;
+
+            // Parse URL and extract #fragment marker
+            let (fetch_url, marker) = if let Some(hash_pos) = raw_url.find('#') {
+                let url_part = raw_url[..hash_pos].to_string();
+                let fragment = raw_url[hash_pos + 1..].to_string();
+                let marker = if fragment.is_empty() { None } else { Some(fragment) };
+                (url_part, marker)
+            } else {
+                (raw_url, None)
+            };
+
+            // Start the network fetch (non-blocking)
+            let task_id = player.net_manager.preload_net_thing(fetch_url);
+
+            // Store the pending operation (replaces any previous pending one, cancelling it)
+            player.pending_goto_net_movie = Some((task_id, marker));
+
+            Ok(player.alloc_datum(Datum::Int(task_id as i32)))
+        })
+    }
+
     pub fn pass(_: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
         reserve_player_mut(|player| {
             let scope_ref = player.current_scope_ref();

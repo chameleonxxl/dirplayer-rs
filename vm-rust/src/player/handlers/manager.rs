@@ -617,6 +617,7 @@ impl BuiltInHandlerManager {
             "getpref" => MovieHandlers::get_pref(args),
             "setpref" => MovieHandlers::set_pref(args),
             "gotonetpage" => MovieHandlers::go_to_net_page(args),
+            "gotonetmovie" => MovieHandlers::go_to_net_movie(args),
             "pass" => MovieHandlers::pass(args),
             "union" => TypeHandlers::union(args),
             "bitxor" => TypeHandlers::bit_xor(args),
