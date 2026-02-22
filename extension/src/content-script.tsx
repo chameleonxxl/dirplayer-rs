@@ -6,5 +6,6 @@ const config: PolyfillConfig = {
   systemFontUrl: chrome.runtime.getURL('charmap-system.png'),
 };
 
-// Initialize the polyfill
-initPolyfill(config);
+// Initialize the polyfill with extension version for priority negotiation
+const version = chrome.runtime.getManifest().version;
+initPolyfill(config, version, 'extension');

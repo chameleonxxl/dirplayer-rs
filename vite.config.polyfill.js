@@ -3,6 +3,9 @@ import react from "@vitejs/plugin-react";
 import svgr from "vite-plugin-svgr";
 import embedResources from "./polyfill/vite-plugin-embed-resources.js";
 import path from "path";
+import { readFileSync } from "fs";
+
+const pkg = JSON.parse(readFileSync("./package.json", "utf-8"));
 
 /**
  * Plugin to inject CSS into the JS bundle
@@ -48,6 +51,7 @@ export default defineConfig({
   // Replace Node.js globals for browser compatibility
   define: {
     "process.env.NODE_ENV": JSON.stringify("production"),
+    "DIRPLAYER_VERSION": JSON.stringify(pkg.version),
   },
   build: {
     outDir: "dist-polyfill",

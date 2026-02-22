@@ -1,6 +1,8 @@
 import { initPolyfill } from './core';
 import { getEmbeddedWasmUrl, getEmbeddedFontUrl } from './embedded-loader';
 
+declare const DIRPLAYER_VERSION: string;
+
 declare global {
   interface Window {
     DirPlayer: {
@@ -15,14 +17,8 @@ function init() {
     systemFontUrl: getEmbeddedFontUrl(),
   };
 
-  // If DOM is ready, initialize immediately
-  if (document.readyState === 'loading') {
-    document.addEventListener('DOMContentLoaded', () => {
-      initPolyfill(config);
-    });
-  } else {
-    initPolyfill(config);
-  }
+  // Register with version for priority negotiation (deferred init handled inside initPolyfill)
+  initPolyfill(config, DIRPLAYER_VERSION, 'polyfill');
 }
 
 // Expose the API globally

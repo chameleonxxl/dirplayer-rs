@@ -11,6 +11,18 @@ export interface PolyfillConfig {
   systemFontUrl: string;
 }
 
+function compareSemver(a: string, b: string): number {
+  const partsA = a.split('.').map(Number);
+  const partsB = b.split('.').map(Number);
+  for (let i = 0; i < Math.max(partsA.length, partsB.length); i++) {
+    const numA = partsA[i] || 0;
+    const numB = partsB[i] || 0;
+    if (numA > numB) return 1;
+    if (numA < numB) return -1;
+  }
+  return 0;
+}
+
 function getCaseInsensitiveValue(obj: Record<string, any>, key: string): string | undefined {
   for (const k in obj) {
     if (k.toLowerCase() === key.toLowerCase()) {
@@ -24,9 +36,9 @@ function checkDirEmbed(element: HTMLEmbedElement): boolean {
   return element.src.endsWith('.dcr');
 }
 
-function checkDirObject(object: HTMLObjectElement): { isDirObject: boolean; params: Partial<Record<string, string>> } {
+function checkDirObject(object: HTMLObjectElement): { isDirObject: boolean; params: Record<string, string | null> } {
   const paramTags = object.getElementsByTagName('param');
-  const params: Partial<Record<string, string>> = Array.from(paramTags).reduce((acc, param) => {
+  const params: Record<string, string | null> = Array.from(paramTags).reduce((acc, param) => {
     const name = param.getAttribute('name') || '';
     const value = param.getAttribute('value');
     acc[name] = value;
@@ -96,7 +108,7 @@ function replaceDirEmbed(config: PolyfillConfig, element: HTMLEmbedElement) {
   renderPlayer(config, newElement, width, height, src, externalParams);
 }
 
-function replaceDirObject(config: PolyfillConfig, element: HTMLObjectElement, params: Partial<Record<string, string>>) {
+function replaceDirObject(config: PolyfillConfig, element: HTMLObjectElement, params: Record<string, string | null>) {
   const src = getCaseInsensitiveValue(params, 'src');
   if (!src) {
     console.error('No src attribute found on object element', element);
@@ -106,7 +118,7 @@ function replaceDirObject(config: PolyfillConfig, element: HTMLObjectElement, pa
   const externalParams: Record<string, string> = {};
   for (let i = 1; i <= 30; i++) {
     const swValue = params[`sw${i}`];
-    if (swValue === undefined) {
+    if (swValue === undefined || swValue === null) {
       break;
     }
     externalParams[`sw${i}`] = swValue;
@@ -134,23 +146,26 @@ function replaceDirPlayerElements(config: PolyfillConfig) {
   }
 }
 
-declare global {
-  interface Window {
-    __DIRPLAYER_INITIALIZED__?: boolean;
-  }
-}
+// DOM attributes on <html> are used for cross-world coordination between the
+// Chrome extension (isolated world) and the page's polyfill script (main world),
+// since window globals are not shared across content script worlds.
+const ATTR_VERSION = 'data-dirplayer-version';
+const ATTR_SOURCE = 'data-dirplayer-source';
+const ATTR_INITIALIZED = 'data-dirplayer-initialized';
 
 export function isPolyfillInitialized(): boolean {
-  return !!window.__DIRPLAYER_INITIALIZED__;
+  return document.documentElement.hasAttribute(ATTR_INITIALIZED);
 }
 
-export function initPolyfill(config: PolyfillConfig) {
-  // Check if already initialized (e.g., by the Chrome extension)
-  if (window.__DIRPLAYER_INITIALIZED__) {
-    console.log('[DirPlayer] Polyfill already initialized, skipping');
-    return null;
-  }
-  window.__DIRPLAYER_INITIALIZED__ = true;
+function performInit(config: PolyfillConfig, source: string, version: string) {
+  const root = document.documentElement;
+
+  // Re-check at execution time: am I still the winner?
+  if (root.getAttribute(ATTR_SOURCE) !== source) return;
+  if (root.hasAttribute(ATTR_INITIALIZED)) return;
+
+  root.setAttribute(ATTR_INITIALIZED, 'true');
+  console.log(`[DirPlayer] Initializing with ${source} v${version}`);
 
   // Replace existing elements
   replaceDirPlayerElements(config);
@@ -174,8 +189,42 @@ export function initPolyfill(config: PolyfillConfig) {
   });
 
   observer.observe(document.documentElement || document.body, { childList: true, subtree: true });
+}
 
-  return observer;
+export function initPolyfill(config: PolyfillConfig, version: string, source: 'extension' | 'polyfill') {
+  const root = document.documentElement;
+
+  // Already fully initialized, too late to compete
+  if (root.hasAttribute(ATTR_INITIALIZED)) {
+    console.log(`[DirPlayer] Already initialized, skipping ${source} v${version}`);
+    return;
+  }
+
+  const existingVersion = root.getAttribute(ATTR_VERSION);
+  const existingSource = root.getAttribute(ATTR_SOURCE);
+
+  if (existingVersion && existingSource) {
+    const cmp = compareSemver(version, existingVersion);
+    // New candidate wins if: higher version, or same version and source is polyfill
+    const newWins = cmp > 0 || (cmp === 0 && source === 'polyfill');
+    if (!newWins) {
+      console.log(`[DirPlayer] ${source} v${version} deferred to ${existingSource} v${existingVersion}`);
+      return;
+    }
+    console.log(`[DirPlayer] ${source} v${version} takes priority over ${existingSource} v${existingVersion}`);
+  }
+
+  // Register as the current candidate via DOM attributes (visible across worlds)
+  root.setAttribute(ATTR_VERSION, version);
+  root.setAttribute(ATTR_SOURCE, source);
+
+  // Schedule deferred initialization
+  const doInit = () => performInit(config, source, version);
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', doInit, { once: true });
+  } else {
+    setTimeout(doInit, 0);
+  }
 }
 
 export { checkDirEmbed, checkDirObject };
