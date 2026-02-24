@@ -23,7 +23,7 @@ use crate::player::{
     bitmap::drawing::CopyPixelsParams,
     cast_lib::CastMemberRef,
     cast_member::CastMemberType,
-    font::{measure_text, BitmapFont},
+    font::{measure_text, measure_text_wrapped, get_glyph_preference, GlyphPreference, BitmapFont},
     geometry::IntRect,
     handlers::datum_handlers::cast_member::font::{FontMemberHandlers, StyledSpan, HtmlStyle, TextAlignment},
     score::{get_concrete_sprite_rect, get_sprite_at, ScoreRef},
@@ -86,8 +86,30 @@ impl WebGL2Renderer {
         canvas: HtmlCanvasElement,
         preview_canvas: HtmlCanvasElement,
     ) -> Result<Self, JsValue> {
+        // Force pixel-perfect rendering: prevent browser from bilinear-scaling
+        // the canvas when CSS size or devicePixelRatio differs from canvas dimensions.
+        // Also disable ClearType/subpixel rendering and compositor smoothing.
+        {
+            let style = canvas.style();
+            let _ = style.set_property("image-rendering", "pixelated");
+            let _ = style.set_property("image-rendering", "-moz-crisp-edges");
+            let _ = style.set_property("image-rendering", "crisp-edges");
+            let _ = style.set_property("-webkit-font-smoothing", "none");
+            let _ = style.set_property("-moz-osx-font-smoothing", "grayscale");
+            let _ = style.set_property("font-smooth", "never");
+            let _ = style.set_property("text-rendering", "optimizeSpeed");
+            let _ = style.set_property("backface-visibility", "hidden");
+        }
+
+        // Create WebGL2 context with pixel-perfect settings:
+        // - antialias: false - disable MSAA to prevent sub-pixel blurring
+        // - alpha: false - stage is always opaque, no HTML page bleed-through
+        let context_options = js_sys::Object::new();
+        js_sys::Reflect::set(&context_options, &"antialias".into(), &false.into())?;
+        js_sys::Reflect::set(&context_options, &"alpha".into(), &false.into())?;
+
         let gl = canvas
-            .get_context("webgl2")?
+            .get_context_with_context_options("webgl2", &context_options)?
             .ok_or_else(|| JsValue::from_str("WebGL2 not supported"))?
             .dyn_into::<WebGl2RenderingContext>()?;
 
@@ -873,6 +895,7 @@ impl WebGL2Renderer {
                         height,
                         "left",  // Font members default to left alignment
                         false,   // Font members default to no word wrap
+                        &font_member.font_info.name,
                         font_member.font_info.size,
                         Some(font_member.font_info.style),
                         font_member.fixed_line_space,
@@ -930,13 +953,25 @@ impl WebGL2Renderer {
                     } else {
                         sprite_rect.width().max(1) as u32
                     };
-                    let height = sprite_rect.height().max(text_member.height as i32).max(1) as u32;
+                    let height = sprite_rect.height().max(1) as u32;
 
                     // Extract font properties from first styled span if available
                     let (font_name, font_size, font_style) = if !text_member.html_styled_spans.is_empty() {
                         let first_style = &text_member.html_styled_spans[0].style;
-                        let name = first_style.font_face.clone().unwrap_or_else(|| text_member.font.clone());
-                        let size = first_style.font_size.map(|s| s as u16).unwrap_or(text_member.font_size);
+                        // Always prefer text_member.font (may have been changed at runtime via Lingo)
+                        // Only fall back to styled span font_face when member font is empty
+                        let name = if !text_member.font.is_empty() {
+                            text_member.font.clone()
+                        } else {
+                            first_style.font_face.clone().unwrap_or_else(|| "Arial".to_string())
+                        };
+                        // Prefer runtime font_size (set by Lingo) over original XMED span size.
+                        // The XMED span retains the authoring-time value; the runtime value takes priority.
+                        let size = if text_member.font_size > 0 {
+                            text_member.font_size
+                        } else {
+                            first_style.font_size.map(|s| s as u16).unwrap_or(12)
+                        };
                         // Convert bold/italic/underline to font_style: bit 0 = bold, bit 1 = italic, bit 2 = underline
                         let style = (if first_style.bold { 1u8 } else { 0 })
                             | (if first_style.italic { 2u8 } else { 0 })
@@ -1006,18 +1041,27 @@ impl WebGL2Renderer {
                         }
                         _ => text_fg_color,
                     };
-                    let text_bg_color = match &bg_color {
+                    // Priority: sprite bgColor (if explicitly set) > member bgColor > sprite bgColor (default)
+                    let effective_bg = if has_back_color {
+                        bg_color.clone()
+                    } else {
+                        match &member.bg_color {
+                            ColorRef::Rgb(_, _, _) => member.bg_color.clone(),
+                            _ => bg_color.clone(),
+                        }
+                    };
+                    let text_bg_color = match &effective_bg {
                         ColorRef::PaletteIndex(_) => {
                             let palettes = player.movie.cast_manager.palettes();
                             let (r, g, b) = resolve_color_ref(
                                 &palettes,
-                                &bg_color,
+                                &effective_bg,
                                 &PaletteRef::BuiltIn(get_system_default_palette()),
                                 8,
                             );
                             ColorRef::Rgb(r, g, b)
                         }
-                        _ => bg_color.clone(),
+                        _ => effective_bg,
                     };
 
                     // Log color decision for text members
@@ -1125,6 +1169,7 @@ impl WebGL2Renderer {
                         height,
                         &text_member.alignment,
                         effective_word_wrap,
+                        &font_name,
                         font_size,
                         font_style,
                         text_member.fixed_line_space,
@@ -1156,14 +1201,10 @@ impl WebGL2Renderer {
                     // Field member: editable text field
                     let text = &field_member.text;
 
-                    // Use the larger of sprite rect or field member dimensions
-                    // Sprite rect gives the display size, field member gives the content size
-                    let width = (sprite_rect.width())
-                        .max(field_member.width as i32)
-                        .max(1) as u32;
-                    let height = (sprite_rect.height())
-                        .max(field_member.height as i32)
-                        .max(1) as u32;
+                    // Use sprite_rect dimensions — get_concrete_sprite_rect already
+                    // computes the correct size from text_height/rect/borders
+                    let width = sprite_rect.width().max(1) as u32;
+                    let height = sprite_rect.height().max(1) as u32;
 
                     // Check if this field has keyboard focus (for cursor rendering)
                     let has_focus = player.keyboard_focus_sprite == channel_num;
@@ -1197,9 +1238,11 @@ impl WebGL2Renderer {
                     };
 
                     debug!(
-                        "Field sprite#{} text='{}' ink={} sprite.color={:?} sprite.bgColor={:?} member.color={:?} member.bgColor={:?} has_fore={} has_back={} -> effective_fg={:?} effective_bg={:?}",
-                        channel_num, text, ink, fg_color, bg_color, member.color, member.bg_color,
+                        "[FIELD] sprite#{} text='{}' ink={} font='{}' fontSize={} fg={:?} bg={:?} member.fg={:?} member.bg={:?} has_fore={} has_back={} -> eff_fg={:?} eff_bg={:?} box_type='{}' editable={} border={} size={}x{}",
+                        channel_num, &text[..text.len().min(30)], ink, field_member.font, field_member.font_size,
+                        fg_color, bg_color, field_member.fore_color, field_member.back_color,
                         has_fore_color, has_back_color, effective_fg, effective_bg,
+                        field_member.box_type, field_member.editable, field_member.border, width, height,
                     );
 
                     // Include focus state in cache key so cursor state changes invalidate cache
@@ -1215,6 +1258,7 @@ impl WebGL2Renderer {
                         height,
                         &field_member.alignment,
                         field_member.word_wrap,
+                        &field_member.font,
                         field_member.font_size,
                         if style == 0 { None } else { Some(style) },
                         field_member.fixed_line_space,
@@ -1454,6 +1498,14 @@ impl WebGL2Renderer {
             } => {
                 // Check cache first
                 if let Some(cached) = self.rendered_text_cache.get(cache_key) {
+                    // Update sprite_rect to match cached texture dimensions
+                    let actual_h = cached.height as i32;
+                    if actual_h != sprite_rect.height() {
+                        sprite_rect = IntRect::from(
+                            sprite_rect.left, sprite_rect.top,
+                            sprite_rect.right, sprite_rect.top + actual_h,
+                        );
+                    }
                     cached.texture.clone()
                 } else {
                     // Render text to a bitmap and upload as texture
@@ -1480,7 +1532,16 @@ impl WebGL2Renderer {
                         border,
                         box_drop_shadow,
                     ) {
-                        Some(tex) => tex,
+                        Some((tex, _actual_w, actual_h)) => {
+                            // Update sprite_rect to match actual rendered dimensions
+                            if actual_h as i32 != sprite_rect.height() {
+                                sprite_rect = IntRect::from(
+                                    sprite_rect.left, sprite_rect.top,
+                                    sprite_rect.right, sprite_rect.top + actual_h as i32,
+                                );
+                            }
+                            tex
+                        }
                         None => return,
                     }
                 }
@@ -2460,6 +2521,36 @@ impl WebGL2Renderer {
         texture
     }
 
+    /// Check if a font is actually available in the browser's Canvas2D.
+    /// Compares measureText widths against known fallbacks to detect substitution.
+    fn is_font_available_in_canvas2d(font_name: &str, font_size: u16) -> bool {
+        let check = || -> Option<bool> {
+            let document = web_sys::window()?.document()?;
+            let canvas: web_sys::HtmlCanvasElement = document
+                .create_element("canvas").ok()?
+                .dyn_into().ok()?;
+            canvas.set_width(1);
+            canvas.set_height(1);
+            let ctx: web_sys::CanvasRenderingContext2d = canvas
+                .get_context("2d").ok()??
+                .dyn_into().ok()?;
+
+            let test_str = "ABCDwxyz0189";
+
+            ctx.set_font(&format!("{}px {}", font_size, font_name));
+            let requested_width = ctx.measure_text(test_str).ok()?.width();
+
+            ctx.set_font(&format!("{}px sans-serif", font_size));
+            let sans_width = ctx.measure_text(test_str).ok()?.width();
+
+            ctx.set_font(&format!("{}px serif", font_size));
+            let serif_width = ctx.measure_text(test_str).ok()?.width();
+
+            Some(requested_width != sans_width && requested_width != serif_width)
+        };
+        check().unwrap_or(false)
+    }
+
     /// Render text to a CPU bitmap, then upload as a WebGL texture
     ///
     /// This allows us to reuse the existing text rendering code from Canvas2D
@@ -2488,24 +2579,19 @@ impl WebGL2Renderer {
         word_wrap: bool,
         border: u16,
         box_drop_shadow: u16,
-    ) -> Option<web_sys::WebGlTexture> {
+    ) -> Option<(web_sys::WebGlTexture, u32, u32)> {
         let styled_span_count = styled_spans.map_or(0, |s| s.len());
-        let base_requested_size = styled_spans
-            .and_then(|spans| spans.iter().filter_map(|s| s.style.font_size).max())
-            .map(|s| s.max(font_size as i32) as u16)
-            .unwrap_or(font_size);
-
-        // Request the exact styled size. Some PFR fonts (e.g. Tiki Magic *)
-        // render incorrectly when we oversample and scale back down.
-        let requested_font_size = base_requested_size;
+        // Use the text member's own font_size for PFR rasterization target.
+        // Taking the max of styled span sizes causes pixel fonts to be rasterized
+        // at the wrong size (e.g. 15 instead of 12), producing wrong glyph shapes.
+        let requested_font_size = font_size;
         if DEBUG_WEBGL2_TEXT {
             web_sys::console::log_1(&format!(
-                "[webgl2.text] text_len={} spans={} font='{}' in_size={} base={} req={} box={}x{} wrap={} align='{}'",
+                "[webgl2.text] text_len={} spans={} font='{}' in_size={} req={} box={}x{} wrap={} align='{}'",
                 text.len(),
                 styled_span_count,
                 font_name,
                 font_size,
-                base_requested_size,
                 requested_font_size,
                 width,
                 height,
@@ -2538,12 +2624,48 @@ impl WebGL2Renderer {
                 }
             }
 
+            // Try case-insensitive match in font cache before falling back to system font
+            if font_opt.is_none() {
+                let font_name_lower = font_name.to_lowercase();
+                for (key, font) in player.font_manager.font_cache.iter() {
+                    if key.to_lowercase() == font_name_lower
+                        || key.to_lowercase().starts_with(&format!("{}_", font_name_lower))
+                    {
+                        font_opt = Some(font.clone());
+                        lookup_method = "cache_case_insensitive";
+                        break;
+                    }
+                }
+            }
+
+            // PFR canonical fallback: if a PFR font with matching canonical name exists
+            // in the cache, prefer it over falling back to system font / Canvas2D native.
+            // Director movies embed PFR fonts to be used for all matching text — the PFR
+            // font name may differ slightly from the text member's font reference.
+            if font_opt.is_none() && !font_name.is_empty() {
+                use crate::player::font::FontManager;
+                let canon = FontManager::canonical_font_name(font_name);
+                if !canon.is_empty() {
+                    for (_key, font) in player.font_manager.font_cache.iter() {
+                        if font.char_widths.is_some() && FontManager::canonical_font_name(&font.font_name) == canon {
+                            font_opt = Some(font.clone());
+                            lookup_method = "pfr_canonical_fallback";
+                            break;
+                        }
+                    }
+                }
+            }
+
             if font_opt.is_none() {
                 lookup_method = "system_fallback";
 
                 if DEBUG_WEBGL2_TEXT {
                     web_sys::console::warn_1(
-                        &format!("WebGL2 text: font '{}' (id={:?}) not found, using system font", font_name, font_id).into()
+                        &format!(
+                            "WebGL2 text: font '{}' (id={:?}) not found, using system font. Available fonts: {:?}",
+                            font_name, font_id,
+                            player.font_manager.font_cache.keys().collect::<Vec<_>>()
+                        ).into()
                     );
                 }
             }
@@ -2607,6 +2729,21 @@ impl WebGL2Renderer {
         let mut render_height = height as u16;
         let mut render_line_spacing = line_spacing;
 
+        // For word-wrapped text, use measure_text_wrapped to compute actual height.
+        // This gives accurate height for "adjust" field members where sprite.height
+        // may not match the actual text layout with the loaded font.
+        if word_wrap && render_width > 0 {
+            let (_, measured_h) = measure_text_wrapped(
+                text, &font, render_width, true,
+                line_spacing, top_spacing, bottom_spacing,
+            );
+            let measured_h = measured_h
+                + (2 * border) + (4 * box_drop_shadow);
+            if measured_h > 0 && measured_h != render_height {
+                render_height = measured_h;
+            }
+        }
+
         // For bitmap font rendering (PFR or System font), keep rendering constrained to the sprite text box.
         // Expanding to measured width breaks wrapping because max_width tracks render width.
         // System font is a bitmap font that needs the same treatment as PFR fonts
@@ -2646,24 +2783,42 @@ impl WebGL2Renderer {
 
         let palettes = player.movie.cast_manager.palettes();
 
-        // Check if this PFR font has a system font equivalent.
-        // The original Shockwave player used the OS font engine for common fonts
-        // (Arial, Times New Roman, etc.) - PFR data was used for metrics/layout only.
-        // We replicate this by using Canvas2D native rendering for known system fonts.
-        let font_name_lower = font_name.to_ascii_lowercase();
-        let use_native_for_pfr = is_pfr_font && matches!(
-            font_name_lower.as_str(),
-            "arial" | "times new roman" | "times" | "verdana" | "courier new" | "courier"
-            | "helvetica" | "georgia" | "trebuchet ms" | "impact" | "comic sans ms"
-            | "tahoma" | "palatino" | "garamond" | "book antiqua" | "century gothic"
-        );
+        // Check glyph preference to allow runtime switching
+        let glyph_pref = get_glyph_preference();
+
+        // PFR fonts with char_widths have a valid bitmap atlas from the PFR rasterizer.
+        // Never use Canvas2D native for these — the PFR font name (e.g. "v") is not
+        // registered in the browser, so Canvas2D fillText would fall back to a system font.
+        let use_native_for_pfr = match glyph_pref {
+            GlyphPreference::Native => true,  // Force native even for PFR
+            GlyphPreference::Bitmap | GlyphPreference::Outline => false,  // Force bitmap atlas
+            GlyphPreference::Auto => {
+                if is_pfr_font {
+                    if font.char_widths.is_some() {
+                        // PFR rasterized font — use bitmap rendering
+                        false
+                    } else {
+                        Self::is_font_available_in_canvas2d(&font.font_name, font_size)
+                    }
+                } else {
+                    false
+                }
+            }
+        };
 
         // Build synthetic spans for native rendering (non-PFR fonts OR PFR with system equivalent).
         // This ensures alignment, font size, and font style are applied for field/text input.
-        // EXCEPTION: System font is a bitmap font and must use bitmap rendering, not native
-        let is_system_font = font.font_name == "System";
+        // EXCEPTION: System font is a bitmap font and must use bitmap rendering, not native.
+        // Check the REQUESTED font name, not the loaded font. When "Arial" is requested but
+        // falls back to System bitmap, we should still use Canvas2D native with "Arial".
+        let is_system_font_requested = font_name == "System" || font_name.is_empty();
+        let force_bitmap = glyph_pref == GlyphPreference::Bitmap || glyph_pref == GlyphPreference::Outline;
+        let force_native = glyph_pref == GlyphPreference::Native;
         let mut synthetic_spans: Option<Vec<StyledSpan>> = None;
-        let spans_for_native: Option<&Vec<StyledSpan>> = if (!is_pfr_font || use_native_for_pfr) && !is_system_font {
+        let spans_for_native: Option<&Vec<StyledSpan>> = if force_bitmap {
+            // Force bitmap rendering for everything
+            None
+        } else if (force_native || !is_pfr_font || use_native_for_pfr) && !is_system_font_requested {
             if let Some(spans) = styled_spans {
                 Some(spans)
             } else {
@@ -2674,8 +2829,10 @@ impl WebGL2Renderer {
                     8,
                 );
                 let mut style = HtmlStyle::default();
-                // Use the actual loaded font name, not the requested one (important for fallback)
-                style.font_face = Some(font.font_name.clone());
+                // Use the REQUESTED font name for Canvas2D rendering, not the fallback.
+                // When "Arial" is requested but the PFR lookup falls back to System,
+                // we want Canvas2D to render with "Arial" (a real browser font).
+                style.font_face = Some(font_name.to_string());
                 style.font_size = Some(font_size as i32);
                 style.color = Some(((r as u32) << 16) | ((g as u32) << 8) | (b as u32));
                 style.bold = bold;
@@ -2774,6 +2931,14 @@ impl WebGL2Renderer {
             let line_height = if font.font_size > 0 { font.font_size as i32 } else { font.char_height as i32 };
             let max_width = width as i32;
             let mut y = top_spacing as i32;
+
+            // Resolve foreground color to RGB once for PFR direct copy
+            let fg_color_rgb = resolve_color_ref(
+                &palettes,
+                fg_color,
+                &PaletteRef::BuiltIn(get_system_default_palette()),
+                8,
+            );
 
                 let mut render_line = |line: &str, y_pos: i32, bitmap: &mut Bitmap| {
                     let line_width: i32 = line
@@ -3454,23 +3619,39 @@ impl WebGL2Renderer {
             }
         }
 
-        // Resolve the bg_color to RGB to determine if we have a real background
+        // Resolve the bg_color to RGB. The caller already picks the correct source:
+        // member bgColor (from XMED Section 0x0000) with sprite bgColor as fallback.
         let bg_rgb = resolve_color_ref(
             &palettes,
             bg_color,
             &PaletteRef::BuiltIn(get_system_default_palette()),
             8,
         );
-        // For ink 36 (BackgroundTransparent), NEVER fill the background.
+        // For transparency inks, NEVER fill the background.
         // The text bitmap already has alpha=0 for background, alpha>0 for text.
-        // The sprite will be composited with alpha blending (InkMode::Copy),
-        // so the transparent background shows through correctly.
-        let has_bg_fill = ink != 36 && bg_rgb != (255, 255, 255);
+        // These inks rely on the alpha channel for transparency:
+        // - Ink 7 (Not Ghost): discards alpha=0 pixels via matte
+        // - Ink 8 (Matte): discards alpha<0.01 pixels in shader
+        // - Ink 9 (Mask): uses alpha as mask
+        // - Ink 36 (BgTransparent): composited with alpha blending
+        // Filling background with bg_color at alpha=255 would make the entire
+        // text area opaque, producing solid colored rectangles instead of text.
+        let is_transparency_ink = ink == 7 || ink == 8 || ink == 9 || ink == 36;
+        // For non-transparency inks (e.g. ink 0 Copy), always fill the background
+        // with bgColor at alpha=255. This matches Director behavior where ink 0
+        // for field/text members renders as an opaque rectangle. Only transparency
+        // inks (36, 7, 8, 9) leave the background transparent.
+        let has_bg_fill = !is_transparency_ink;
 
         // After drawing text, handle background pixels.
         // The bitmap was pre-filled with alpha=0 (transparent).
         // Both Canvas2D and PFR rendering write text pixels with alpha>0.
         // Background = alpha==0 (never written to by either renderer).
+        //
+        // For anti-aliased text, Canvas2D produces edge pixels with alpha 1-254
+        // composited against transparent black. When has_bg_fill is active, these
+        // semi-transparent pixels need to be blended against the background color
+        // and made fully opaque, otherwise the stage color bleeds through.
         for i in 0..text_bitmap.data.len() / 4 {
             let a = text_bitmap.data[i * 4 + 3];
 
@@ -3483,6 +3664,19 @@ impl WebGL2Renderer {
                     text_bitmap.data[i * 4 + 3] = 255; // Fully opaque
                 }
                 // else: already alpha=0 (transparent), nothing to do
+            } else if has_bg_fill && a < 255 {
+                // Anti-aliased edge pixel: blend text color with background color.
+                // Canvas2D composited against transparent black, so we need to
+                // re-composite against the actual background color.
+                let alpha = a as u32;
+                let inv_alpha = 255 - alpha;
+                let r = text_bitmap.data[i * 4] as u32;
+                let g = text_bitmap.data[i * 4 + 1] as u32;
+                let b = text_bitmap.data[i * 4 + 2] as u32;
+                text_bitmap.data[i * 4]     = ((r * alpha + bg_rgb.0 as u32 * inv_alpha) / 255) as u8;
+                text_bitmap.data[i * 4 + 1] = ((g * alpha + bg_rgb.1 as u32 * inv_alpha) / 255) as u8;
+                text_bitmap.data[i * 4 + 2] = ((b * alpha + bg_rgb.2 as u32 * inv_alpha) / 255) as u8;
+                text_bitmap.data[i * 4 + 3] = 255; // Fully opaque
             }
         }
 
@@ -3601,7 +3795,7 @@ impl WebGL2Renderer {
             render_height as u32,
         );
 
-        Some(texture)
+        Some((texture, render_width as u32, render_height as u32))
     }
 
     /// Set preview size

@@ -379,12 +379,6 @@ impl BitmapInfo {
         reg_x -= left;
         reg_y -= top;
 
-        // If centerRegPoint is enabled, calculate the centered registration point
-        if center_reg_point && width > 0 && height > 0 {
-            reg_x = (width / 2) as i16;
-            reg_y = (height / 2) as i16;
-        }
-
         BitmapInfo {
             width,
             height,

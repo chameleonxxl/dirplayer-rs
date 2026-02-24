@@ -222,6 +222,7 @@ impl RenderedTextCacheKey {
             height,
             "left",
             false,
+            "",
             0,
             None,
             0,
@@ -242,6 +243,7 @@ impl RenderedTextCacheKey {
         height: u32,
         alignment: &str,
         word_wrap: bool,
+        font_name: &str,
         font_size: u16,
         font_style: Option<u8>,
         line_spacing: u16,
@@ -260,6 +262,7 @@ impl RenderedTextCacheKey {
             height,
             alignment,
             word_wrap,
+            font_name,
             font_size,
             font_style,
             line_spacing,
@@ -281,6 +284,7 @@ impl RenderedTextCacheKey {
         height: u32,
         alignment: &str,
         word_wrap: bool,
+        font_name: &str,
         font_size: u16,
         font_style: Option<u8>,
         line_spacing: u16,
@@ -312,8 +316,9 @@ impl RenderedTextCacheKey {
             0
         };
 
-        // Hash alignment and word_wrap settings
+        // Hash alignment, font, and word_wrap settings
         let mut settings_hasher = DefaultHasher::new();
+        font_name.hash(&mut settings_hasher);
         let alignment_key = alignment.trim().trim_start_matches('#').to_ascii_lowercase();
         alignment_key.hash(&mut settings_hasher);
         word_wrap.hash(&mut settings_hasher);

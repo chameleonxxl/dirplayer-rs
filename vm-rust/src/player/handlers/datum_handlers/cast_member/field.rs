@@ -3,7 +3,7 @@ use itertools::Itertools;
 use crate::{
     director::lingo::datum::{Datum, DatumType, StringChunkType, datum_bool},
     player::{
-        ColorRef, DatumRef, DirPlayer, ScriptError, bitmap::{bitmap::{Bitmap, BuiltInPalette, PaletteRef}, drawing::CopyPixelsParams}, cast_lib::CastMemberRef, cast_member::Media, font::{BitmapFont, measure_text}, handlers::datum_handlers::{
+        ColorRef, DatumRef, DirPlayer, ScriptError, bitmap::{bitmap::{Bitmap, BuiltInPalette, PaletteRef}, drawing::CopyPixelsParams}, cast_lib::CastMemberRef, cast_member::Media, font::{measure_text, measure_text_wrapped}, handlers::datum_handlers::{
             cast_member_ref::borrow_member_mut, string::string_get_lines, string_chunk::StringChunkUtils
         }
     },
@@ -109,12 +109,14 @@ impl FieldMemberHandlers {
                 Ok(Datum::List(DatumType::List, line_datums, false))
             }
             "pageHeight" => {
-                // pageHeight = total height of the text content
+                // pageHeight = total height of the text content (including word wrap)
                 let text_clone = field.text.clone();
                 let font_name = field.font.clone();
                 let font_size = Some(field.font_size);
                 let fixed_line_space = field.fixed_line_space;
                 let top_spacing = field.top_spacing;
+                let word_wrap = field.word_wrap;
+                let field_width = field.width;
 
                 let font = if !font_name.is_empty() {
                     player.font_manager.get_font_with_cast_and_bitmap(
@@ -130,8 +132,11 @@ impl FieldMemberHandlers {
                 let font = font.or_else(|| player.font_manager.get_system_font())
                     .ok_or_else(|| ScriptError::new("System font not available".to_string()))?;
 
-                let (_, measured_h) =
-                    measure_text(&text_clone, &font, None, fixed_line_space, top_spacing, 0);
+                let (_, measured_h) = if word_wrap && field_width > 0 {
+                    measure_text_wrapped(&text_clone, &font, field_width, true, fixed_line_space, top_spacing, 0)
+                } else {
+                    measure_text(&text_clone, &font, None, fixed_line_space, top_spacing, 0)
+                };
                 Ok(Datum::Int(measured_h as i32))
             }
             "foreColor" => {
@@ -148,13 +153,17 @@ impl FieldMemberHandlers {
                     None => Ok(Datum::Int(0)), // default: palette index 0 = white
                 }
             }
-            "rect" | "height" | "image" | "picture" => {
+            "rect" | "height" | "picture" => {
                 // Clone data to avoid borrow issues
                 let text_clone = field.text.clone();
                 let font_name = field.font.clone();
                 let font_size = Some(field.font_size);
                 let fixed_line_space = field.fixed_line_space;
                 let top_spacing = field.top_spacing;
+                let alignment = field.alignment.clone();
+                let word_wrap = field.word_wrap;
+                let fore_color = field.fore_color.clone().unwrap_or(ColorRef::PaletteIndex(255));
+                let field_width = field.width;
 
                 // Try to get custom font, fall back to system font
                 let font = if !font_name.is_empty() {
@@ -180,13 +189,13 @@ impl FieldMemberHandlers {
 
                 let (measured_w, measured_h) =
                     measure_text(&text_clone, &font, None, fixed_line_space, top_spacing, 0);
-                let width = if field.width > 0 {
-                    field.width.max(measured_w)
+                let width = if field_width > 0 {
+                    field_width.max(measured_w)
                 } else {
                     measured_w
                 };
-                let height = if field.fixed_line_space > 0 {
-                    field.fixed_line_space.max(measured_h)
+                let height = if fixed_line_space > 0 {
+                    fixed_line_space.max(measured_h)
                 } else {
                     measured_h
                 };
@@ -199,7 +208,7 @@ impl FieldMemberHandlers {
                         player.alloc_datum(Datum::Int(height as i32))
                     ])),
                     "height" => Ok(Datum::Int(height as i32)),
-                    "image" | "picture" => {
+                    "picture" => {
                         let mut bitmap = Bitmap::new(
                             width,
                             height,
@@ -232,8 +241,8 @@ impl FieldMemberHandlers {
                         let params = CopyPixelsParams {
                             blend: 100,
                             ink: 36,
-                            color: bitmap.get_fg_color_ref(),
-                            bg_color: ColorRef::PaletteIndex(0),
+                            color: fore_color,
+                            bg_color: ColorRef::Rgb(255, 255, 255),
                             mask_image: None,
                             is_text_rendering: true,
                             rotation: 0.0,
@@ -356,10 +365,6 @@ impl FieldMemberHandlers {
                     let font_size = value? as u16;
                     let field = cast_member.member_type.as_field_mut().unwrap();
                     field.font_size = font_size;
-                    // Keep line height at least as large as font size for visibility.
-                    if field.fixed_line_space < font_size {
-                        field.fixed_line_space = font_size;
-                    }
                     Ok(())
                 },
             ),
