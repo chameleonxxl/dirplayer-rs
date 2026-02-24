@@ -150,6 +150,33 @@ fn get_or_load_font_with_id(
         return Some(loaded_font);
     }
 
+    // Try case-insensitive match in font cache before falling back to system font
+    let font_name_lower = font_name.to_lowercase();
+    for (key, font) in font_manager.font_cache.iter() {
+        if key.to_lowercase() == font_name_lower
+            || key.to_lowercase().starts_with(&format!("{}_", font_name_lower))
+        {
+            debug!(
+                "Font '{}' (id={:?}) not found by exact match, using cache entry '{}'",
+                font_name, font_id, key
+            );
+            return Some(Rc::clone(font));
+        }
+    }
+
+    // PFR canonical fallback: prefer an embedded PFR font over system font / Canvas2D native
+    if !font_name.is_empty() {
+        use crate::player::font::FontManager;
+        let canon = FontManager::canonical_font_name(font_name);
+        if !canon.is_empty() {
+            for (_key, font) in font_manager.font_cache.iter() {
+                if font.char_widths.is_some() && FontManager::canonical_font_name(&font.font_name) == canon {
+                    return Some(Rc::clone(font));
+                }
+            }
+        }
+    }
+
     // Font not found by any method, attempt fallback to system font
     let system_font = font_manager.get_system_font();
 
@@ -2090,18 +2117,19 @@ pub fn player_set_preview_parent(parent_selector: &str) -> Result<(), JsValue> {
 
 /// Helper to set pixel-perfect rendering styles on a canvas
 fn set_pixelated_canvas_style(canvas: &web_sys::HtmlCanvasElement) {
-    canvas
-        .style()
-        .set_property("image-rendering", "pixelated")
-        .unwrap_or(());
-    canvas
-        .style()
-        .set_property("image-rendering", "-moz-crisp-edges")
-        .unwrap_or(());
-    canvas
-        .style()
-        .set_property("image-rendering", "crisp-edges")
-        .unwrap_or(());
+    let style = canvas.style();
+    // Nearest-neighbor scaling when CSS size differs from canvas resolution
+    style.set_property("image-rendering", "pixelated").unwrap_or(());
+    style.set_property("image-rendering", "-moz-crisp-edges").unwrap_or(());
+    style.set_property("image-rendering", "crisp-edges").unwrap_or(());
+    // Disable ClearType / subpixel font smoothing - force grayscale AA
+    style.set_property("-webkit-font-smoothing", "none").unwrap_or(());
+    style.set_property("-moz-osx-font-smoothing", "grayscale").unwrap_or(());
+    style.set_property("font-smooth", "never").unwrap_or(());
+    // Disable text anti-aliasing optimizations
+    style.set_property("text-rendering", "optimizeSpeed").unwrap_or(());
+    // Force no backface-visibility optimization (can cause blurring on some GPUs)
+    style.set_property("backface-visibility", "hidden").unwrap_or(());
 }
 
 /// Create a Canvas2D renderer (fallback)

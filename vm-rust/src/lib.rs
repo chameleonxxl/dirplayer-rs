@@ -400,6 +400,49 @@ pub fn is_webgl2_supported() -> bool {
     rendering_gpu::is_webgl2_supported()
 }
 
+/// Set glyph rendering preference for text/field members.
+/// Values: "auto" (default), "bitmap" (PFR atlas), "native" (Canvas2D fillText),
+///         "outline" (force outline rasterization, skip PFR bitmap strikes — needs clear_font_cache)
+#[wasm_bindgen]
+pub fn set_glyph_preference(mode: &str) {
+    use player::font::{GlyphPreference, set_glyph_preference as set_pref};
+    let pref = match mode.to_lowercase().as_str() {
+        "bitmap" => GlyphPreference::Bitmap,
+        "native" => GlyphPreference::Native,
+        "outline" => GlyphPreference::Outline,
+        _ => GlyphPreference::Auto,
+    };
+    set_pref(pref);
+}
+
+/// Get the current glyph rendering preference.
+#[wasm_bindgen]
+pub fn get_glyph_preference() -> String {
+    use player::font::{GlyphPreference, get_glyph_preference as get_pref};
+    match get_pref() {
+        GlyphPreference::Auto => "auto".to_string(),
+        GlyphPreference::Bitmap => "bitmap".to_string(),
+        GlyphPreference::Native => "native".to_string(),
+        GlyphPreference::Outline => "outline".to_string(),
+    }
+}
+
+/// Clear the font cache so fonts will be re-rasterized on next use.
+/// Call this after set_glyph_preference("outline") to see the effect.
+#[wasm_bindgen]
+pub fn clear_font_cache() {
+    reserve_player_mut(|player| {
+        let count = player.font_manager.font_cache.len();
+        player.font_manager.font_cache.clear();
+        player.font_manager.fonts.clear();
+        player.font_manager.font_by_id.clear();
+        player.font_manager.font_counter = 0;
+        web_sys::console::log_1(
+            &format!("[clear_font_cache] Cleared {} cached fonts. Reload movie to re-rasterize.", count).into()
+        );
+    });
+}
+
 /// Get the current renderer backend name
 #[wasm_bindgen]
 pub fn get_renderer_backend() -> String {

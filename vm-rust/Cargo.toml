@@ -55,6 +55,7 @@ features = [
   'ImageData',
   'ImageBitmap',
   'CanvasRenderingContext2d',
+  'TextMetrics',
   'Document',
   'Element',
   'EventTarget',

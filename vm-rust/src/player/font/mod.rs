@@ -1,5 +1,6 @@
 use fxhash::FxHashMap;
 use log::warn;
+use std::cell::Cell;
 use std::rc::Rc;
 use wasm_bindgen::JsCast;
 use wasm_bindgen_futures::JsFuture;
@@ -18,6 +19,37 @@ use super::{
     bitmap::{drawing::CopyPixelsParams, manager::BitmapRef, palette_map::PaletteMap},
     geometry::IntRect,
 };
+
+/// Controls how text glyphs are rendered for PFR fonts.
+/// Can be toggled at runtime via `set_glyph_preference()` from JS.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum GlyphPreference {
+    /// Current default behavior: PFR fonts use bitmap atlas, standard fonts use Canvas2D native.
+    Auto,
+    /// Force bitmap atlas rendering for all fonts (PFR rasterized glyphs or system font bitmap).
+    Bitmap,
+    /// Force Canvas2D native text rendering (fillText) even for PFR fonts.
+    Native,
+    /// Force outline-only rasterization for PFR fonts (skip bitmap strikes).
+    /// Requires font cache clear + re-rasterization to take effect.
+    Outline,
+}
+
+thread_local! {
+    static GLYPH_PREFERENCE: Cell<GlyphPreference> = Cell::new(GlyphPreference::Auto);
+}
+
+pub fn get_glyph_preference() -> GlyphPreference {
+    GLYPH_PREFERENCE.with(|pref| pref.get())
+}
+
+pub fn set_glyph_preference(pref: GlyphPreference) {
+    GLYPH_PREFERENCE.with(|p| p.set(pref));
+    web_sys::console::log_1(
+        &format!("[GlyphPreference] Set to {:?}", pref).into(),
+    );
+}
+
 pub type FontRef = u32;
 
 pub struct FontManager {
@@ -45,6 +77,7 @@ pub struct BitmapFont {
     pub font_size: u16,
     pub font_style: u8,
     pub char_widths: Option<Vec<u16>>,
+    pub pfr_native_size: u16,
 }
 
 impl BitmapFont {
@@ -69,7 +102,7 @@ pub struct DrawTextParams<'a> {
 }
 
 impl FontManager {
-    fn canonical_font_name(name: &str) -> String {
+    pub fn canonical_font_name(name: &str) -> String {
         let normalized = name
             .trim()
             .to_ascii_lowercase()
@@ -154,7 +187,7 @@ impl FontManager {
                         use crate::director::chunks::pfr1::{rasterizer, parse_pfr1_font_with_target};
 
                         let parsed_for_size = if let Some(ref raw) = font_data.pfr_data {
-                            match parse_pfr1_font_with_target(raw, requested_size as i32) {
+                            match parse_pfr1_font_with_target(raw, 0) {
                                 Ok(p) => p,
                                 Err(_) => parsed.clone(),
                             }
@@ -162,7 +195,7 @@ impl FontManager {
                             parsed.clone()
                         };
 
-                        let rasterized = rasterizer::rasterize_pfr1_font(&parsed_for_size, requested_size as usize);
+                        let rasterized = rasterizer::rasterize_pfr1_font(&parsed_for_size, requested_size as usize, font_data.font_info.size as usize);
 
                         let bitmap_width = rasterized.bitmap_width as u16;
                         let bitmap_height = rasterized.bitmap_height as u16;
@@ -191,6 +224,8 @@ impl FontManager {
 
                         let bitmap_ref = bitmap_manager.add_bitmap(bitmap);
 
+                        let final_char_widths = rasterized.char_widths;
+
                         let font = BitmapFont {
                             bitmap_ref,
                             char_width: rasterized.cell_width as u16,
@@ -205,7 +240,8 @@ impl FontManager {
                             font_name: member.name.clone(),
                             font_size: requested_size,
                             font_style: font_data.font_info.style,
-                            char_widths: Some(rasterized.char_widths),
+                            char_widths: Some(final_char_widths),
+                            pfr_native_size: font_data.font_info.size,
                         };
 
                         let rc_font = Rc::new(font);
@@ -225,6 +261,11 @@ impl FontManager {
             }
         }
 
+        web_sys::console::warn_1(&format!(
+            "[font] No PFR re-rasterization match for '{}' at size {}",
+            font_name, requested_size,
+        ).into());
+
         // Fallback: try default embedded PFR fonts
         if requested_size > 0 {
             let font_name_canon = Self::canonical_font_name(font_name);
@@ -238,9 +279,9 @@ impl FontManager {
                 if let Some(pfr_bytes) = self.default_pfr_data.get(&key) {
                     use crate::director::chunks::pfr1::{rasterizer, parse_pfr1_font_with_target};
 
-                    match parse_pfr1_font_with_target(pfr_bytes, requested_size as i32) {
+                    match parse_pfr1_font_with_target(pfr_bytes, 0) {
                         Ok(parsed) => {
-                            let rasterized = rasterizer::rasterize_pfr1_font(&parsed, requested_size as usize);
+                            let rasterized = rasterizer::rasterize_pfr1_font(&parsed, requested_size as usize, 0);
 
                             let bitmap_width = rasterized.bitmap_width as u16;
                             let bitmap_height = rasterized.bitmap_height as u16;
@@ -269,6 +310,8 @@ impl FontManager {
 
                             let bitmap_ref = bitmap_manager.add_bitmap(bitmap);
 
+                            let final_char_widths = rasterized.char_widths;
+
                             let font = BitmapFont {
                                 bitmap_ref,
                                 char_width: rasterized.cell_width as u16,
@@ -283,7 +326,8 @@ impl FontManager {
                                 font_name: key.clone(),
                                 font_size: requested_size,
                                 font_style: style.unwrap_or(0),
-                                char_widths: Some(rasterized.char_widths),
+                                char_widths: Some(final_char_widths),
+                                pfr_native_size: 0,
                             };
 
                             let rc_font = Rc::new(font);
@@ -436,6 +480,7 @@ impl FontManager {
                                 font_size: font_data.font_info.size,
                                 font_style: font_data.font_info.style,
                                 char_widths: font_data.char_widths.clone(),
+                                pfr_native_size: font_data.font_info.size,
                             };
 
                             let rc_font = Rc::new(font);
@@ -478,6 +523,7 @@ impl FontManager {
                             new_font.font_name = font_data.font_info.name.clone();
                             new_font.font_size = font_data.font_info.size;
                             new_font.font_style = font_data.font_info.style;
+                            new_font.pfr_native_size = font_data.font_info.size;
 
                             let scale_factor = font_data.font_info.size as f32 / 12.0;
                             new_font.char_width =
@@ -683,6 +729,7 @@ pub async fn player_load_system_font(path: &str) {
                     font_size: 12,
                     font_style: 0,
                     char_widths: None,
+                    pfr_native_size: 0,
                 };
 
                 let rc_font = Rc::new(font.clone());
@@ -995,6 +1042,7 @@ pub fn bitmap_font_copy_char_tight(
         draw_params,
     )
 }
+
 pub fn measure_text(
     text: &str,
     font: &BitmapFont,
@@ -1015,9 +1063,12 @@ pub fn measure_text(
         font.char_height
     };
     let line_height = line_height.unwrap_or(effective_line_h);
-    let mut height = (top_spacing + line_height as i16) as u16;
-    // fixedLineSpace overrides glyph height; topSpacing + bottomSpacing added on top.
+    // fixedLineSpace overrides line step between lines; topSpacing + bottomSpacing added on top.
     let effective_lh = if line_spacing > 0 { line_spacing as i16 } else { line_height as i16 };
+    // First line uses the max of font height and line spacing so glyphs aren't clipped,
+    // but the field's STXT line height is also respected when it's larger than the font.
+    let first_line_h = (line_height as i16).max(effective_lh);
+    let mut height = (top_spacing + first_line_h) as u16;
     let line_step = (effective_lh + bottom_spacing + top_spacing) as u16;
     let mut index = 0;
     for c in text.chars() {
@@ -1043,6 +1094,73 @@ pub fn measure_text(
         width = line_width;
     }
     return (width, height);
+}
+
+/// Measure text height with word wrapping support.
+/// Returns (max_line_width, total_height) considering word wrapping at max_width.
+pub fn measure_text_wrapped(
+    text: &str,
+    font: &BitmapFont,
+    max_width: u16,
+    word_wrap: bool,
+    line_spacing: u16,
+    top_spacing: i16,
+    bottom_spacing: i16,
+) -> (u16, u16) {
+    let effective_line_h = if font.char_widths.is_some() {
+        font.char_height.saturating_sub(1)
+    } else if font.font_size > 0 {
+        font.font_size
+    } else {
+        font.char_height
+    };
+    let effective_lh = if line_spacing > 0 { line_spacing as i16 } else { effective_line_h as i16 };
+    let line_step = (effective_lh + bottom_spacing + top_spacing) as u16;
+
+    // Split into explicit lines first
+    let raw_lines: Vec<&str> = text.split(|c: char| c == '\r' || c == '\n').collect();
+    let mut visual_lines: Vec<u16> = Vec::new(); // width of each visual line
+
+    for raw in &raw_lines {
+        if raw.is_empty() {
+            visual_lines.push(0);
+            continue;
+        }
+        if word_wrap && max_width > 0 {
+            let mut current_width: u16 = 0;
+            for word in raw.split_whitespace() {
+                let word_width: u16 = word.chars()
+                    .map(|c| font.get_char_advance(c as u8))
+                    .sum();
+                let space_width = font.get_char_advance(b' ');
+                let candidate = if current_width == 0 {
+                    word_width
+                } else {
+                    current_width + space_width + word_width
+                };
+                if candidate <= max_width || current_width == 0 {
+                    current_width = candidate;
+                } else {
+                    visual_lines.push(current_width);
+                    current_width = word_width;
+                }
+            }
+            visual_lines.push(current_width);
+        } else {
+            let line_width: u16 = raw.chars()
+                .map(|c| font.get_char_advance(c as u8))
+                .sum();
+            visual_lines.push(line_width);
+        }
+    }
+
+    let num_lines = visual_lines.len().max(1);
+    let max_width_found = visual_lines.iter().copied().max().unwrap_or(0);
+    let first_line_h = (effective_line_h as i16).max(effective_lh);
+    let height = (top_spacing + first_line_h) as u16
+        + (num_lines as u16 - 1) * line_step;
+
+    (max_width_found, height)
 }
 
 pub fn _get_text_char_pos(text: &str, params: &DrawTextParams, char_index: usize) -> (i16, i16) {
