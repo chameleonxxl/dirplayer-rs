@@ -52,6 +52,8 @@ pub struct XmedStyledText {
     pub line_spacing: i32,
     pub top_spacing: i32,
     pub bottom_spacing: i32,
+    // Background color (from Section 0x0000 document header, indices 30-32)
+    pub bg_color: Option<(u8, u8, u8)>,
 }
 
 /// Section 1 data - document header with page/field properties
@@ -60,6 +62,7 @@ struct Section1Data {
     width: i32,
     height: i32,
     page_height: i32,
+    bg_color: Option<(u8, u8, u8)>,
 }
 
 impl Default for Section1Data {
@@ -69,6 +72,7 @@ impl Default for Section1Data {
             width: 0,
             height: 0,
             page_height: 0,
+            bg_color: None,
         }
     }
 }
@@ -408,6 +412,7 @@ pub fn parse_xmed(data: &[u8]) -> Result<XmedStyledText, String> {
         line_spacing: paragraph_info.line_spacing,
         top_spacing: paragraph_info.top_spacing,
         bottom_spacing: paragraph_info.bottom_spacing,
+        bg_color: section1_data.bg_color,
     })
 }
 
@@ -518,8 +523,33 @@ fn parse_section_1(data: &[u8]) -> Result<Section1Data, String> {
         debug!("    Section1: pageHeight (dword90)={}", section1.page_height);
     }
 
-    debug!("Section 1: version={}, width={}, height={}, pageHeight={}",
-                                     section1.doc_version, section1.width, section1.height, section1.page_height);
+    // Values [11..29] - skip 19 intermediate values to reach bg_color at [30-32]
+    for _ in 11..30 {
+        if packer.remaining() >= 2 {
+            packer.unpack_num();
+        }
+    }
+
+    // Values [30-32] - background color as 16-bit Director color components
+    // High byte of each value is the actual 8-bit color (e.g. 0xCC00 -> 0xCC)
+    if packer.remaining() >= 2 {
+        let bg_r = packer.unpack_num();
+        if packer.remaining() >= 2 {
+            let bg_g = packer.unpack_num();
+            if packer.remaining() >= 2 {
+                let bg_b = packer.unpack_num();
+                let r = ((bg_r >> 8) & 0xFF) as u8;
+                let g = ((bg_g >> 8) & 0xFF) as u8;
+                let b = ((bg_b >> 8) & 0xFF) as u8;
+                section1.bg_color = Some((r, g, b));
+                debug!("    Section1: bg_color=({}, {}, {}) from raw ({:#06X}, {:#06X}, {:#06X})",
+                    r, g, b, bg_r, bg_g, bg_b);
+            }
+        }
+    }
+
+    debug!("Section 1: version={}, width={}, height={}, pageHeight={}, bg_color={:?}",
+        section1.doc_version, section1.width, section1.height, section1.page_height, section1.bg_color);
 
     Ok(section1)
 }
@@ -812,43 +842,40 @@ fn parse_section_7(data: &[u8], font_names: &[String], doc_version: i32) -> Resu
         // Color format: c1=R, c2=G, c3=B, c4=unused
         // Each 16-bit value has the actual 8-bit color in the high byte (e.g., 0x9900 for R=0x99)
         let mut color_values = Vec::new();
-        for _ in 0..4 {
+        for _ in 0..4u8 {
             if !parse_failed && packer.remaining() >= 2 {
                 color_values.push(packer.unpack_num());
             } else { parse_failed = true; break; }
         }
         if color_values.len() >= 4 {
-            let c1 = color_values[0] as u32;  // R component
-            let c2 = color_values[1] as u32;  // G component
-            let c3 = color_values[2] as u32;  // B component
-            let _c4 = color_values[3] as u32; // unused
-            // Extract high byte from each 16-bit component and build ARGB color
-            style.fore_color = (0xFF << 24) |           // A = 0xFF (fully opaque)
-                               ((c1 >> 8) << 16) |      // R from c1 high byte
-                               ((c2 >> 8) << 8) |       // G from c2 high byte
-                               (c3 >> 8);               // B from c3 high byte
-            // Keep legacy color field synchronized so downstream conversion can use it.
+            let c1 = color_values[0] as u32;
+            let c2 = color_values[1] as u32;
+            let c3 = color_values[2] as u32;
+            let _c4 = color_values[3] as u32;
+            style.fore_color = (0xFF << 24) |
+                               ((c1 >> 8) << 16) |
+                               ((c2 >> 8) << 8) |
+                               (c3 >> 8);
             style.color = Some(style.fore_color);
         }
 
         // 12-13. pgUnpackColor (backColor) - line 1296 (4 values)
         // Color format: c1=R, c2=G, c3=B, c4=unused
         let mut back_color_values = Vec::new();
-        for _ in 0..4 {
+        for _ in 0..4u8 {
             if !parse_failed && packer.remaining() >= 2 {
                 back_color_values.push(packer.unpack_num());
             } else { parse_failed = true; break; }
         }
         if back_color_values.len() >= 4 {
-            let c1 = back_color_values[0] as u32;  // R component
-            let c2 = back_color_values[1] as u32;  // G component
-            let c3 = back_color_values[2] as u32;  // B component
-            let _c4 = back_color_values[3] as u32; // unused
-            // Extract high byte from each 16-bit component and build ARGB color
-            style.back_color = (0xFF << 24) |           // A = 0xFF (fully opaque)
-                               ((c1 >> 8) << 16) |      // R from c1 high byte
-                               ((c2 >> 8) << 8) |       // G from c2 high byte
-                               (c3 >> 8);               // B from c3 high byte
+            let c1 = back_color_values[0] as u32;
+            let c2 = back_color_values[1] as u32;
+            let c3 = back_color_values[2] as u32;
+            let _c4 = back_color_values[3] as u32;
+            style.back_color = (0xFF << 24) |
+                               ((c1 >> 8) << 16) |
+                               ((c2 >> 8) << 8) |
+                               (c3 >> 8);
         }
 
         debug!("    Style {}: foreColor=0x{:08X}, backColor=0x{:08X}",
@@ -1146,8 +1173,10 @@ fn parse_section_9(data: &[u8], doc_version: i32) -> Result<Vec<String>, String>
     //   - Second font name (64 bytes, usually empty)
     //   - Properties (Packer-encoded, ~38 bytes)
     // Total per entry: ~174 bytes
-    for entry_idx in 0..2 {
-        if offset >= data.len() {
+    // Keep reading entries until data runs out (some members have 3+ font entries).
+    let mut entry_idx = 0;
+    loop {
+        if offset >= data.len() || data[offset] != 0x00 {
             break;
         }
 
@@ -1213,7 +1242,10 @@ fn parse_section_9(data: &[u8], doc_version: i32) -> Result<Vec<String>, String>
                 anti_alias,
             });
         }
+        entry_idx += 1;
     }
+
+    debug!("[Section9] Parsed {} entries, font_names={:?}", entry_idx, font_names);
 
     if font_names.is_empty() {
         debug!("    Section 9: No fonts parsed, using default 'Arial'");
@@ -1471,11 +1503,7 @@ fn xmed_style_to_html_style(xmed_style: &XmedStyle) -> HtmlStyle {
 }
 
 /// Convert XMED style size units to runtime text size.
-/// Use a mild scale-up to better match Director without overblowing some fonts.
-/// Examples: 13 -> 14, 16 -> 18, 19 -> 21.
+/// Pass through directly — the raw XMED size is the Director point size.
 fn map_xmed_font_size(raw_size: i32) -> i32 {
-    if raw_size <= 0 {
-        return 0;
-    }
-    return ((raw_size * 9) / 8).max(1);
+    raw_size.max(0)
 }
