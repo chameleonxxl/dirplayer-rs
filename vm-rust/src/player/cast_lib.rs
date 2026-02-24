@@ -246,7 +246,7 @@ impl CastLib {
                 .to_string()
                 .as_str(),
             );
-            self.apply_cast_def(file, cast_def, bitmap_manager);
+            self.apply_cast_def(file, cast_def, bitmap_manager, &file.font_table);
         } else {
             log_i(
                 format_args!(
@@ -266,6 +266,7 @@ impl CastLib {
         _: &DirectorFile,
         cast_def: &CastDef,
         bitmap_manager: &mut BitmapManager,
+        font_table: &HashMap<u16, String>,
     ) {
         self.lctx = cast_def.lctx.clone();
         self.capital_x = cast_def.capital_x;
@@ -275,7 +276,7 @@ impl CastLib {
         for (id, member_def) in &cast_def.members {
             self.insert_member(
                 *id,
-                CastMember::from(self.number, *id, member_def, &self.lctx, bitmap_manager, self.dir_version, self.palette_id_offset),
+                CastMember::from(self.number, *id, member_def, &self.lctx, bitmap_manager, self.dir_version, self.palette_id_offset, font_table),
             );
             JsApi::on_cast_member_name_changed(CastMemberRefHandlers::get_cast_slot_number(
                 self.number,

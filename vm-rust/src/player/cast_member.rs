@@ -1,4 +1,5 @@
 use core::fmt;
+use std::collections::HashMap;
 use std::fmt::Formatter;
 
 use log::{debug, warn};
@@ -860,15 +861,15 @@ impl CastMember {
     ) -> PfrBitmap {
         use crate::director::chunks::pfr1::{rasterizer, parse_pfr1_font_with_target};
 
-        // Parse at the actual target height so zone tables produce correct
-        // piecewise-linear interpolation for this specific size.
-        let parsed_for_size = match parse_pfr1_font_with_target(&pfr.raw_data, target_height as i32) {
+        // Parse at target=0 to keep coordinates in ORU space. The rasterizer
+        // handles ORU→pixel scaling using target_height / outline_res.
+        let parsed_for_size = match parse_pfr1_font_with_target(&pfr.raw_data, 0) {
             Ok(p) => p,
             Err(_) => pfr.parsed.clone(),
         };
 
         // Use the PFR1 rasterizer to render the parsed font
-        let rasterized = rasterizer::rasterize_pfr1_font(&parsed_for_size, target_height);
+        let rasterized = rasterizer::rasterize_pfr1_font(&parsed_for_size, target_height, 0);
 
         let bitmap_width = rasterized.bitmap_width as u16;
         let bitmap_height = rasterized.bitmap_height as u16;
@@ -1193,6 +1194,7 @@ impl CastMember {
         text_info.height = box_h as u32;
 
         let box_type = text_info.box_type_str().trim_start_matches('#').to_string();
+        let xmed_bg_color = styled_text.bg_color;
         let text_member = TextMember {
             text: styled_text.text.clone(),
             html_source: String::new(),
@@ -1254,12 +1256,17 @@ impl CastMember {
             ))
             .unwrap_or(ColorRef::PaletteIndex(255));
 
+        // Extract XMED backColor from Section 0x0000 document header (indices 30-32).
+        let member_bg_color = xmed_bg_color
+            .map(|(r, g, b)| ColorRef::Rgb(r, g, b))
+            .unwrap_or(ColorRef::PaletteIndex(0));
+
         CastMember {
             number,
             name: member_name,
             member_type: CastMemberType::Text(text_member),
             color: member_color,
-            bg_color: ColorRef::PaletteIndex(0),
+            bg_color: member_bg_color,
         }
     }
 
@@ -1294,6 +1301,12 @@ impl CastMember {
                 16usize
             };
 
+            debug!(
+                "[font.load] font='{}' FontInfo.size={} target_height={}",
+                if pfr.font_name.is_empty() { default_name } else { &pfr.font_name },
+                requested_size, target_height
+            );
+
             let bmp = Self::render_pfr_to_bitmap(&pfr, bitmap_manager, target_height);
 
             let info = FontInfo {
@@ -1307,7 +1320,7 @@ impl CastMember {
                 }
             };
 
-            web_sys::console::log_1(&format!("Rendered PFR: {:?}", info).into());
+            debug!("Rendered PFR: {:?}", info);
 
             return (
                 info,
@@ -1374,6 +1387,7 @@ impl CastMember {
         bitmap_manager: &mut BitmapManager,
         dir_version: u16,
         palette_id_offset: i16,
+        font_table: &HashMap<u16, String>,
     ) -> CastMember {
         let chunk = &member_def.chunk;
 
@@ -1384,19 +1398,24 @@ impl CastMember {
                     .expect("No text chunk found for text member");
                 let raw = chunk.specific_data_raw.as_slice();
                 let field_info = FieldInfo::from(raw);
+                debug!(
+                    "[FIELD_INFO] rect=({},{},{},{}) text_height={} max_height={} border={} margin={} box_shadow={} box_type={} scroll={} flags=0x{:02X} raw_len={}",
+                    field_info.rect_left, field_info.rect_top, field_info.rect_right, field_info.rect_bottom,
+                    field_info.text_height,
+                    field_info.max_height,
+                    field_info.border,
+                    field_info.margin,
+                    field_info.box_drop_shadow,
+                    field_info.box_type,
+                    field_info.scroll,
+                    field_info.flags,
+                    raw.len(),
+                );
                 let mut field_member = FieldMember::from_field_info(&field_info);
                 field_member.text = text_chunk.text.clone();
 
                 // Parse STXT formatting data to extract actual fontId, fontSize, and style
                 let formatting_runs = text_chunk.parse_formatting_runs();
-                for (i, run) in formatting_runs.iter().enumerate() {
-                    debug!(
-                        "  formatting_run[{}]: start_position={} height={} ascent={} font_id={} style=0x{:02X} font_size={} color=({},{},{}) -> rgb({},{},{})",
-                        i, run.start_position, run.height, run.ascent, run.font_id, run.style, run.font_size,
-                        run.color_r, run.color_g, run.color_b,
-                        (run.color_r >> 8) as u8, (run.color_g >> 8) as u8, (run.color_b >> 8) as u8,
-                    );
-                }
                 if let Some(first_run) = formatting_runs.first() {
                     // Extract foreground color from STXT formatting run
                     let fg_r = (first_run.color_r >> 8) as u8;
@@ -1405,12 +1424,23 @@ impl CastMember {
                     field_member.fore_color = Some(ColorRef::Rgb(fg_r, fg_g, fg_b));
 
                     field_member.font_id = Some(first_run.font_id);
+                    // Resolve STXT font_id to font name via Fmap font table
+                    if let Some(font_name) = font_table.get(&first_run.font_id) {
+                        field_member.font = font_name.clone();
+                    }
+                    debug!(
+                        "[field.font] STXT font_id={} -> Fmap='{}' (table has {} entries)",
+                        first_run.font_id,
+                        if field_member.font.is_empty() { "<NOT FOUND>" } else { &field_member.font },
+                        font_table.len(),
+                    );
                     if first_run.font_size > 0 {
                         field_member.font_size = first_run.font_size;
-                        // Ensure field line height can fit the parsed font size.
-                        if field_member.fixed_line_space < first_run.font_size {
-                            field_member.fixed_line_space = first_run.font_size;
-                        }
+                    }
+                    // Use STXT run's height as line spacing — this is Director's
+                    // computed line height (ascent + descent + leading) for the run.
+                    if first_run.height > 0 {
+                        field_member.fixed_line_space = first_run.height;
                     }
                     if first_run.style != 0 {
                         let mut styles = Vec::new();

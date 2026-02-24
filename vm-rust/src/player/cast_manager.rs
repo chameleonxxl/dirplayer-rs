@@ -94,7 +94,7 @@ impl CastManager {
                 palette_id_offset: cast_def.map_or(0, |x| x.palette_id_offset),
             };
             if let Some(cast_def) = cast_def {
-                cast.apply_cast_def(dir, cast_def, bitmap_manager);
+                cast.apply_cast_def(dir, cast_def, bitmap_manager, &dir.font_table);
                 self.clear_movie_script_cache();
             }
             casts.push(cast);
@@ -586,6 +586,7 @@ impl CastManager {
                             font_size,
                             font_style,
                             char_widths: font_data.char_widths.clone(),
+                            pfr_native_size: font_size,
                         };
 
                         let rc_font = Rc::new(font);
@@ -619,10 +620,18 @@ impl CastManager {
                             }
 
                             // Add prefix-only alias (before first underscore/asterisk/space)
-                            if let Some(prefix_end) = pfr_name.find(|c: char| c == '_' || c == '*' || c == ' ') {
-                                let prefix = &pfr_name[..prefix_end];
-                                if prefix.len() > 1 && prefix != *font_name {
-                                    aliases.push(prefix.to_string());
+                            // BUT only if the member name doesn't indicate a styled variant
+                            // (e.g., don't alias "Verdana Bold *" as just "Verdana")
+                            let member_name_upper = font_name.to_ascii_uppercase();
+                            let is_styled_variant = member_name_upper.contains("BOLD")
+                                || member_name_upper.contains("ITALIC")
+                                || member_name_upper.contains("OBLIQUE");
+                            if !is_styled_variant {
+                                if let Some(prefix_end) = pfr_name.find(|c: char| c == '_' || c == '*' || c == ' ') {
+                                    let prefix = &pfr_name[..prefix_end];
+                                    if prefix.len() > 1 && prefix != *font_name {
+                                        aliases.push(prefix.to_string());
+                                    }
                                 }
                             }
                         }

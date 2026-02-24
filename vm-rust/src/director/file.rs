@@ -58,6 +58,7 @@ pub struct DirectorFile {
     pub thum: Option<ThumChunk>,
     pub key_table: Option<KeyTableChunk>,
     pub chunk_container: ChunkContainer,
+    pub font_table: HashMap<u16, String>,
 }
 
 // macro_rules! console_log {
@@ -127,12 +128,7 @@ impl DirectorFile {
         let (cast_entries, casts) =
             read_casts(reader, &mut chunk_container, &mut rifx, &key_table, &config).unwrap();
 
-        // for cast in &casts {
-        //   info!("Cast {} members ({})", cast.name, cast.members.len());
-        //   for (id, member) in &cast.members {
-        //     info!("- id: {} {}", id, member.chunk.member_info.name)
-        //   }
-        // }
+        let font_table = parse_font_table(reader, &mut chunk_container, &mut rifx);
 
         let score = get_score_chunk(reader, &mut chunk_container, &mut rifx);
 
@@ -169,6 +165,7 @@ impl DirectorFile {
             thum,
             key_table: Some(key_table),
             chunk_container,
+            font_table,
         });
     }
 }
@@ -183,6 +180,137 @@ pub fn get_variable_multiplier(capital_x: bool, dir_version: u16) -> u32 {
         return 8;
     }
     return 6;
+}
+
+fn parse_fmap_v4(data: &[u8]) -> HashMap<u16, String> {
+    let mut result = HashMap::new();
+    if data.len() < 36 {
+        return result;
+    }
+
+    let map_length = u32::from_be_bytes([data[0], data[1], data[2], data[3]]) as usize;
+    let _names_length = u32::from_be_bytes([data[4], data[5], data[6], data[7]]) as usize;
+    let body_start = 8;
+    let names_start = body_start + map_length;
+
+    // Header: 7 x u32 (unk1, unk2, entriesUsed, entriesTotal, unk3, unk4, unk5)
+    if data.len() < body_start + 28 {
+        return result;
+    }
+    let entries_used = u32::from_be_bytes([data[16], data[17], data[18], data[19]]) as usize;
+
+    // Each entry: u32 nameOffset + u16 platform + u16 fontId = 8 bytes
+    let entries_start = body_start + 28;
+    for i in 0..entries_used {
+        let entry_offset = entries_start + i * 8;
+        if entry_offset + 8 > data.len() {
+            break;
+        }
+        let name_offset = u32::from_be_bytes([
+            data[entry_offset], data[entry_offset + 1],
+            data[entry_offset + 2], data[entry_offset + 3],
+        ]) as usize;
+        let _platform = u16::from_be_bytes([data[entry_offset + 4], data[entry_offset + 5]]);
+        let font_id = u16::from_be_bytes([data[entry_offset + 6], data[entry_offset + 7]]);
+
+        // Read font name from names section
+        let name_pos = names_start + name_offset;
+        if name_pos + 4 > data.len() {
+            continue;
+        }
+        let name_length = u32::from_be_bytes([
+            data[name_pos], data[name_pos + 1], data[name_pos + 2], data[name_pos + 3],
+        ]) as usize;
+        let name_data_start = name_pos + 4;
+        if name_data_start + name_length > data.len() {
+            continue;
+        }
+        let font_name = String::from_utf8_lossy(&data[name_data_start..name_data_start + name_length])
+            .trim_end_matches('\0')
+            .to_string();
+
+        result.insert(font_id, font_name);
+    }
+    result
+}
+
+fn parse_vwfm(data: &[u8]) -> HashMap<u16, String> {
+    let mut result = HashMap::new();
+    if data.len() < 2 {
+        return result;
+    }
+
+    let count = u16::from_be_bytes([data[0], data[1]]) as usize;
+    let offset = count * 2 + 2;
+
+    // Read font IDs
+    let mut font_ids = Vec::with_capacity(count);
+    for i in 0..count {
+        let pos = 2 + i * 2;
+        if pos + 2 > data.len() {
+            return result;
+        }
+        font_ids.push(u16::from_be_bytes([data[pos], data[pos + 1]]));
+    }
+
+    // Read Pascal strings for font names
+    let mut current_pos = offset;
+    for (i, &font_id) in font_ids.iter().enumerate() {
+        if current_pos >= data.len() {
+            break;
+        }
+        let name_len = data[current_pos] as usize;
+        current_pos += 1;
+        if current_pos + name_len > data.len() {
+            break;
+        }
+        let font_name = String::from_utf8_lossy(&data[current_pos..current_pos + name_len]).to_string();
+        current_pos += name_len;
+        result.insert(font_id, font_name);
+        let _ = i; // suppress unused warning
+    }
+    result
+}
+
+fn parse_font_table(
+    reader: &mut BinaryReader,
+    chunk_container: &mut ChunkContainer,
+    rifx: &mut RIFXReaderContext,
+) -> HashMap<u16, String> {
+    // Try Fmap first (Director 4+), then VWFM (Director 3)
+    let fmap_fourcc = FOURCC("Fmap");
+    let vwfm_fourcc = FOURCC("VWFM");
+
+    let (fourcc, chunk_id) = if let Some(info) = get_first_chunk_info(&chunk_container.chunk_info, fmap_fourcc) {
+        (info.fourcc, info.id)
+    } else if let Some(info) = get_first_chunk_info(&chunk_container.chunk_info, vwfm_fourcc) {
+        (info.fourcc, info.id)
+    } else {
+        debug!("No Fmap or VWFM font table chunk found");
+        return HashMap::new();
+    };
+
+    let raw = match get_chunk_data(reader, chunk_container, rifx, fourcc, chunk_id) {
+        Ok(data) => data,
+        Err(e) => {
+            warn!("Failed to read font table chunk: {}", e);
+            return HashMap::new();
+        }
+    };
+
+    let table = if fourcc == fmap_fourcc {
+        parse_fmap_v4(&raw)
+    } else {
+        parse_vwfm(&raw)
+    };
+
+    web_sys::console::log_1(&format!(
+        "[Fmap] {} entries: {:?}",
+        table.len(),
+        table.iter().map(|(id, name)| format!("{}='{}'", id, name)).collect::<Vec<_>>()
+    ).into());
+
+    table
 }
 
 fn read_casts(
