@@ -194,13 +194,14 @@ impl StringBytecodeHandler {
                     new_string.push_str(value.string_value()?.as_str());
                     new_string.push_str(curr_string.as_str());
                     let new_string = player.alloc_datum(Datum::String(new_string));
+                    // Already built the complete string, use Into to replace.
                     player_set_context_var(
                         player,
                         &id_ref,
                         cast_id_ref.as_ref(),
                         var_type,
                         &new_string,
-                        put_type,
+                        PutType::Into,
                         &ctx,
                     )?;
                 }
@@ -220,13 +221,14 @@ impl StringBytecodeHandler {
                     new_string.push_str(curr_string.as_str());
                     new_string.push_str(value.string_value()?.as_str());
                     let new_string = player.alloc_datum(Datum::String(new_string));
+                    // Already built the complete string, use Into to replace.
                     player_set_context_var(
                         player,
                         &id_ref,
                         cast_id_ref.as_ref(),
                         var_type,
                         &new_string,
-                        put_type,
+                        PutType::Into,
                         &ctx,
                     )?;
                 }
@@ -474,13 +476,15 @@ impl StringBytecodeHandler {
             };
             
             let new_string_ref = player.alloc_datum(Datum::String(new_string));
+            // The chunk operation already built the complete result string,
+            // so always use Into to replace rather than append/prepend again.
             player_set_context_var(
                 player,
                 &id_ref,
                 cast_id_ref.as_ref(),
                 var_type,
                 &new_string_ref,
-                put_type,
+                PutType::Into,
                 ctx,
             )?;
             
