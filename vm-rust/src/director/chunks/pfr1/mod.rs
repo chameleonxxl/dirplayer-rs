@@ -368,6 +368,19 @@ pub fn parse_pfr1_font_with_target(data: &[u8], target_em_px: i32) -> Result<Pfr
             "  Glyphs: {}/{} outline ({} with contours, {} empty), {} bitmap",
             parsed_count, total_chars, with_contours, parsed_count - with_contours, bitmap_count
         ));
+
+        log(&format!(
+            "[PFR1] '{}': outlineRes={} target_em={}px chars={} outline={} (contours={}) bitmap={} asc={} desc={}",
+            font.font_name,
+            font.physical_font.outline_resolution,
+            target_em_px,
+            total_chars,
+            parsed_count,
+            with_contours,
+            bitmap_count,
+            font.physical_font.metrics.ascender,
+            font.physical_font.metrics.descender,
+        ));
     } else {
         log(&format!("  GPS section out of range (offset=0x{:X}, size={}, data_len={})",
             gps_offset, gps_size, data.len()));
