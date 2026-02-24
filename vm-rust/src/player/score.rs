@@ -2822,16 +2822,16 @@ pub fn sprite_set_prop(sprite_id: i16, prop_name: &str, value: Datum) -> Result<
                     if sprite.puppet {
                         sprite.reset_for_member_change();
                     }
-                    if !sprite.has_size_changed {
-                        if let Some((w, h)) = intrinsic_size {
-                            if w > 0 && h > 0 {
-                                sprite.width = w;
-                                sprite.height = h;
-                                sprite.base_width = w;
-                                sprite.base_height = h;
-                            }
+                    if let Some((w, h)) = intrinsic_size {
+                        if w > 0 && h > 0 {
+                            sprite.width = w;
+                            sprite.height = h;
+                            sprite.base_width = w;
+                            sprite.base_height = h;
                         }
                     }
+
+                    sprite.has_size_changed = false;
                 }
 
                 // If the new member is a film loop, reset its frame and sound triggers
@@ -3208,8 +3208,8 @@ pub fn get_concrete_sprite_rect(player: &DirPlayer, sprite: &Sprite) -> IntRect 
     match &member.member_type {
         CastMemberType::Bitmap(bitmap_member) => {
             // Get registration point from bitmap member
-            let reg_x = bitmap_member.reg_point.0;
-            let reg_y = bitmap_member.reg_point.1;
+            let mut reg_x = bitmap_member.reg_point.0;
+            let mut reg_y = bitmap_member.reg_point.1;
 
             // Get bitmap dimensions from info
             let bitmap_width = bitmap_member.info.width as i32;
@@ -3234,31 +3234,94 @@ pub fn get_concrete_sprite_rect(player: &DirPlayer, sprite: &Sprite) -> IntRect 
                 true // can't check, assume match
             };
 
-            let (sprite_width, sprite_height) = if sprite.bitmap_size_owned_by_sprite
+            // Check if the sprite is intentionally stretched significantly larger
+            // than the bitmap in both dimensions. In that case, trust sprite dimensions
+            // regardless of aspect ratio differences.
+            // Also require that the scale factors aren't wildly uneven (ratio < 2.5),
+            // otherwise the sprite dims are likely a bounding box, not a real stretch.
+            let intentionally_stretched = sprite.width > 0 && sprite.height > 0
+                && bitmap_width > 0 && bitmap_height > 0
+                && sprite.width > bitmap_width * 3 / 2
+                && sprite.height > bitmap_height * 3 / 2
+                && {
+                    // Check max(scale_x/scale_y, scale_y/scale_x) < 2.5
+                    // Using integer math: 2*a < 5*b AND 2*b < 5*a
+                    let a = sprite.width as i64 * bitmap_height as i64;
+                    let b = sprite.height as i64 * bitmap_width as i64;
+                    2 * a < 5 * b && 2 * b < 5 * a
+                };
+
+            let is_debug_sprite = false;
+
+            let (sprite_width, sprite_height) = if sprite.has_size_tweened {
+                // Size tween is active — use the tweened dimensions directly,
+                // bypassing all bitmap-vs-sprite heuristics.
+                (sprite.width, sprite.height)
+            } else if sprite.bitmap_size_owned_by_sprite
                 && bitmap_width >= 10 && bitmap_height >= 10 {
+                if is_debug_sprite {
+                    web_sys::console::log_1(&format!("Sprite {}: chose BITMAP_SIZE_OWNED_BY_SPRITE (sprite {}x{}, bitmap {}x{})",
+                        sprite.number, sprite.width, sprite.height, bitmap_width, bitmap_height).into());
+                }
                 // Sprite size is owned by bitmap, and bitmap is not tiny
                 (bitmap_width, bitmap_height)
             } else if !aspect_ratio_matches
                 && bitmap_width >= 10 && bitmap_height >= 10 {
-                // Score dimensions have a different aspect ratio than the bitmap,
-                // meaning they're a bounding box, not an intentional stretch.
-                // Use bitmap's natural dimensions.
-                (bitmap_width, bitmap_height)
+                if is_debug_sprite {
+                    web_sys::console::log_1(&format!("Sprite {}: chose ASPECT_RATIO_MISMATCH (sprite {}x{}, bitmap {}x{}, aspect_ratio_matches={}, has_size_changed={}, bitmap_size_owned_by_sprite={}, intentionally_stretched={})",
+                        sprite.number, sprite.width, sprite.height, bitmap_width, bitmap_height, aspect_ratio_matches, sprite.has_size_changed,  sprite.bitmap_size_owned_by_sprite, intentionally_stretched).into());
+                }
+                if intentionally_stretched {
+                    (sprite.width, sprite.height)
+                } else {
+                    // Score dimensions have a different aspect ratio than the bitmap,
+                    // meaning they're a bounding box, not an intentional stretch.
+                    // Use bitmap's natural dimensions.
+                    (bitmap_width, bitmap_height)
+                }
             } else if !sprite.has_size_changed
                 && (bitmap_width + bitmap_height) > (sprite.width + sprite.height)
                 && bitmap_width >= 10 && bitmap_height >= 10 {
+                if is_debug_sprite {
+                    web_sys::console::log_1(&format!("Sprite {}: chose NO_SIZE_CHANGE_BITMAP_LARGER (sprite {}x{}, bitmap {}x{}, has_size_changed={})",
+                        sprite.number, sprite.width, sprite.height, bitmap_width, bitmap_height, sprite.has_size_changed).into());
+                }
                 // Sprite hasn't been explicitly resized and bitmap is larger (by sum).
                 (bitmap_width, bitmap_height)
             } else if (sprite.width != bitmap_width || sprite.height != bitmap_height)
                 && (sprite.width as i64 * bitmap_height as i64 != sprite.height as i64 * bitmap_width as i64)
                 && bitmap_width >= 10 && bitmap_height >= 10 {
+                if is_debug_sprite {
+                    web_sys::console::log_1(&format!("Sprite {}: chose NON_PROPORTIONAL_SCALE (sprite {}x{}, bitmap {}x{})",
+                        sprite.number, sprite.width, sprite.height, bitmap_width, bitmap_height).into());
+                }
                 // Score dimensions differ from bitmap AND are not a clean proportional
                 // scale - they are an approximate bounding box. Use bitmap's natural size.
                 (bitmap_width, bitmap_height)
+            } else if sprite.has_size_changed && sprite.width != bitmap_width ||  sprite.has_size_changed && sprite.height != bitmap_height {
+                if is_debug_sprite {
+                    web_sys::console::log_1(&format!("Sprite {}: chose SIZE_CHANGED_BY_LINGO (sprite {}x{}, bitmap {}x{}, aspect_ratio_matches={}, has_size_changed={}, bitmap_size_owned_by_sprite={}, intentionally_stretched={})",
+                        sprite.number, sprite.width, sprite.height, bitmap_width, bitmap_height, aspect_ratio_matches, sprite.has_size_changed,  sprite.bitmap_size_owned_by_sprite, intentionally_stretched).into());
+                }
+                // Sprite dimensions differ from base — something (Lingo script,
+                // member change) has explicitly modified the size at runtime.
+                // Use the current dimensions directly.
+                (sprite.width, sprite.height)
             } else {
+                if is_debug_sprite {
+                    web_sys::console::log_1(&format!("Sprite {}: chose DEFAULT (sprite {}x{}, bitmap {}x{}, aspect_ratio_matches={}, has_size_changed={}, bitmap_size_owned={})",
+                        sprite.number, sprite.width, sprite.height, bitmap_width, bitmap_height,
+                        aspect_ratio_matches, sprite.has_size_changed, sprite.bitmap_size_owned_by_sprite).into());
+                }
                 // Use sprite's explicit dimensions (default case)
                 (sprite.width, sprite.height)
             };
+
+            // If centerRegPoint is enabled, calculate the centered registration point
+            if bitmap_member.info.center_reg_point && sprite_width > 0 && sprite_height > 0 {
+                reg_x = (sprite_width / 2) as i16;
+                reg_y = (sprite_height / 2) as i16;
+            }
 
             // Step 1: Calculate scaled registration offset
             // The registration point needs to be scaled proportionally when sprite is stretched.
@@ -3338,41 +3401,60 @@ pub fn get_concrete_sprite_rect(player: &DirPlayer, sprite: &Sprite) -> IntRect 
             )
         }
         CastMemberType::Field(field_member) => {
-            // For fields, use sprite width but calculate height from field properties
-            // Member height = text_height + 2*border + 2*margin
-            // Sprite height = member height + 4*box_drop_shadow (for shadow rendering space)
             let field_width = sprite.width;
-
-            // Calculate sprite height: text_height + 2*border + 2*margin + 4*box_drop_shadow
-            let calculated_height = field_member.text_height as i32
-                + (2 * field_member.border as i32)
-                + (2 * field_member.margin as i32)
-                + (4 * field_member.box_drop_shadow as i32);
-
-            let field_height = calculated_height.max(sprite.height).max(1);
-
+            let rect_height = (field_member.rect_bottom - field_member.rect_top).max(0) as i32;
+            // For "adjust" fields, use sprite.height as initial estimate.
+            // The WebGL2 renderer will override with measure_text for accurate height.
+            let field_height = if field_member.text_height > 0 {
+                field_member.text_height as i32
+                    + (2 * field_member.border as i32)
+                    + (2 * field_member.margin as i32)
+                    + (4 * field_member.box_drop_shadow as i32)
+            } else if rect_height > 0 && field_member.box_type != "adjust" {
+                rect_height
+                    + (2 * field_member.border as i32)
+                    + (2 * field_member.margin as i32)
+                    + (4 * field_member.box_drop_shadow as i32)
+            } else {
+                sprite.height
+            };
+            let field_height = field_height.max(1);
             IntRect::from_size(sprite.loc_h, sprite.loc_v, field_width, field_height)
         }
         CastMemberType::Text(text_member) => {
             // Calculate draw position based on registration point from TextInfo
-            let (draw_x, draw_y) = if let Some(info) = &text_member.info {
+            let (draw_x, draw_y, info_height) = if let Some(info) = &text_member.info {
+                let ih = if info.height > 0 { info.height as i32 } else { 0 };
                 if info.center_reg_point {
-                    // When center_reg_point is enabled, loc is the center of the sprite
                     let half_width = sprite.width / 2;
                     let half_height = sprite.height / 2;
-                    (sprite.loc_h - half_width, sprite.loc_v - half_height)
+                    (sprite.loc_h - half_width, sprite.loc_v - half_height, ih)
                 } else if info.reg_x != 0 || info.reg_y != 0 {
-                    // Use custom registration point offset
-                    (sprite.loc_h - info.reg_x, sprite.loc_v - info.reg_y)
+                    (sprite.loc_h - info.reg_x, sprite.loc_v - info.reg_y, ih)
                 } else {
-                    // Default: loc is top-left corner
-                    (sprite.loc_h, sprite.loc_v)
+                    (sprite.loc_h, sprite.loc_v, ih)
                 }
             } else {
-                // No TextInfo available, use default positioning
-                (sprite.loc_h, sprite.loc_v)
+                (sprite.loc_h, sprite.loc_v, 0)
             };
-            IntRect::from_size(draw_x, draw_y, sprite.width, sprite.height)
+            let text_height = if info_height > 0 {
+                info_height
+            } else if text_member.height > 0 {
+                text_member.height as i32
+            } else {
+                sprite.height
+            };
+            debug!(
+                "[TEXT_RECT] sprite#{} text='{}' info_h={} member_h={} sprite_h={} -> h={} w={}",
+                sprite.number,
+                &text_member.text[..text_member.text.len().min(30)],
+                info_height,
+                text_member.height,
+                sprite.height,
+                text_height,
+                sprite.width,
+            );
+            IntRect::from_size(draw_x, draw_y, sprite.width, text_height)
         }
         CastMemberType::FilmLoop(film_loop) => {
             // The filmloop's rect is stored in info as:
