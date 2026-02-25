@@ -3407,18 +3407,22 @@ pub fn get_concrete_sprite_rect(player: &DirPlayer, sprite: &Sprite) -> IntRect 
         CastMemberType::Field(field_member) => {
             let field_width = sprite.width;
             let rect_height = (field_member.rect_bottom - field_member.rect_top).max(0) as i32;
+            let extras = (2 * field_member.border as i32)
+                + (2 * field_member.margin as i32)
+                + (4 * field_member.box_drop_shadow as i32);
             // For "adjust" fields, use sprite.height as initial estimate.
             // The WebGL2 renderer will override with measure_text for accurate height.
-            let field_height = if field_member.text_height > 0 {
-                field_member.text_height as i32
-                    + (2 * field_member.border as i32)
-                    + (2 * field_member.margin as i32)
-                    + (4 * field_member.box_drop_shadow as i32)
+            let is_adjust = field_member.box_type == "adjust";
+            let field_height = if field_member.word_wrap && is_adjust && field_member.text_height > 0 {
+                // Word wrap + adjust box type: expand to fit all wrapped text content.
+                (field_member.text_height as i32 + extras).max(sprite.height)
+            } else if sprite.height > 0 {
+                // Fixed/scroll fields and non-wrapping fields: use sprite.height.
+                sprite.height
+            } else if field_member.text_height > 0 {
+                field_member.text_height as i32 + extras
             } else if rect_height > 0 && field_member.box_type != "adjust" {
-                rect_height
-                    + (2 * field_member.border as i32)
-                    + (2 * field_member.margin as i32)
-                    + (4 * field_member.box_drop_shadow as i32)
+                rect_height + extras
             } else {
                 sprite.height
             };

@@ -2732,9 +2732,9 @@ impl WebGL2Renderer {
         let mut render_height = height as u16;
         let mut render_line_spacing = line_spacing;
 
-        // For word-wrapped text, use measure_text_wrapped to compute actual height.
-        // This gives accurate height for "adjust" field members where sprite.height
-        // may not match the actual text layout with the loaded font.
+        // Measure actual text height and shrink render_height if the measured
+        // content is smaller. Never grow beyond the member's rect — the rect
+        // defines the visual boundary and the background fill must not exceed it.
         if word_wrap && render_width > 0 {
             let (_, measured_h) = measure_text_wrapped(
                 text, &font, render_width, true,
@@ -2742,7 +2742,16 @@ impl WebGL2Renderer {
             );
             let measured_h = measured_h
                 + (2 * border) + (4 * box_drop_shadow);
-            if measured_h > 0 && measured_h != render_height {
+            if measured_h > 0 && measured_h < render_height {
+                render_height = measured_h;
+            }
+        } else if !word_wrap {
+            let (_, measured_h) = measure_text(
+                text, &font, None, line_spacing, top_spacing, bottom_spacing,
+            );
+            let measured_h = measured_h
+                + (2 * border) + (4 * box_drop_shadow);
+            if measured_h > 0 && measured_h < render_height {
                 render_height = measured_h;
             }
         }
