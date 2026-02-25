@@ -13,8 +13,7 @@ macro_rules! multiuser_log {
 use crate::{
     director::lingo::datum::{Datum, DatumType},
     player::{
-        events::player_dispatch_callback_event, reserve_player_mut, reserve_player_ref, DatumRef,
-        ScriptError,
+        self, DatumRef, ScriptError, events::player_dispatch_callback_event, reserve_player_mut, reserve_player_ref
     },
 };
 
@@ -94,9 +93,9 @@ impl MultiuserXtraManager {
         instance_id: u32,
         args: &Vec<DatumRef>,
     ) -> Result<DatumRef, ScriptError> {
-        match handler_name.as_str() {
-            "setNetBufferLimits" => Ok(DatumRef::Void),
-            "setNetMessageHandler" => {
+        match handler_name.to_lowercase().as_str() {
+            "setnetbufferlimits" => Ok(DatumRef::Void),
+            "setnetmessagehandler" => {
                 let mut multiusr_manager = unsafe { MULTIUSER_XTRA_MANAGER_OPT.as_mut().unwrap() };
                 let instance = multiusr_manager.instances.get_mut(&instance_id).unwrap();
                 reserve_player_mut(|player| {
@@ -114,7 +113,7 @@ impl MultiuserXtraManager {
                     Ok(player.alloc_datum(Datum::Int(0)))
                 })
             }
-            "connectToNetServer" => {
+            "connecttonetserver" => {
                 let mut multiusr_manager = unsafe { MULTIUSER_XTRA_MANAGER_OPT.as_mut().unwrap() };
                 let instance = multiusr_manager.instances.get_mut(&instance_id).unwrap();
                 if let Some((handler_obj_ref, handler_symbol)) = &instance.net_message_handler {
@@ -269,7 +268,7 @@ impl MultiuserXtraManager {
 
                 Ok(DatumRef::Void)
             }
-            "getNetMessage" => {
+            "getnetmessage" => {
                 let mut multiusr_manager = unsafe { MULTIUSER_XTRA_MANAGER_OPT.as_mut().unwrap() };
                 let instance = multiusr_manager.instances.get_mut(&instance_id).unwrap();
                 if let Some(message) = instance.next_message() {
@@ -315,7 +314,7 @@ impl MultiuserXtraManager {
                     Ok(DatumRef::Void)
                 }
             }
-            "sendNetMessage" => {
+            "sendnetmessage" => {
                 let mut multiusr_manager = unsafe { MULTIUSER_XTRA_MANAGER_OPT.as_mut().unwrap() };
                 let instance = multiusr_manager.instances.get_mut(&instance_id).unwrap();
                 reserve_player_ref(|player| {
@@ -329,6 +328,11 @@ impl MultiuserXtraManager {
                     }
                 })
             }
+            "getnetaddresscookie" => {
+                reserve_player_mut(|player| {
+                    Ok(player.alloc_datum(Datum::String("".to_string())))
+                })
+            },
             _ => Err(ScriptError::new(format!(
                 "No handler {} found for Multiuser xtra instance #{}",
                 handler_name, instance_id

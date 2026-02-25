@@ -34,7 +34,7 @@ impl BitmapMemberHandlers {
         match prop.as_str() {
             "width" => Ok(Datum::Int(bitmap.map(|x| x.width as i32).unwrap_or(0))),
             "height" => Ok(Datum::Int(bitmap.map(|x| x.height as i32).unwrap_or(0))),
-            "image" => Ok(Datum::BitmapRef(bitmap_ref)),
+            "image" | "picture" => Ok(Datum::BitmapRef(bitmap_ref)),
             "media" => Ok(Datum::Media(Media::Bitmap(bitmap.unwrap().clone()))),
             "paletteRef" => {
                 let palette = bitmap
@@ -85,7 +85,7 @@ impl BitmapMemberHandlers {
         value: Datum,
     ) -> Result<(), ScriptError> {
         match prop.as_str() {
-            "image" => {
+            "image" | "picture" => {
                 let bitmap_ref = value.to_bitmap_ref()?;
                 reserve_player_mut(|player| {
                     let bitmap = player.bitmap_manager.get_bitmap(*bitmap_ref).unwrap();

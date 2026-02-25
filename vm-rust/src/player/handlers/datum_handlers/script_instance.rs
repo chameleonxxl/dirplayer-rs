@@ -3,6 +3,7 @@ use crate::{
     player::{
         allocator::ScriptInstanceAllocatorTrait,
         cast_lib::CastMemberRef,
+        ci_string::{CiStr, CiString},
         handlers::types::TypeUtils,
         player_call_script_handler, player_handle_scope_return, reserve_player_mut,
         reserve_player_ref,
@@ -189,7 +190,7 @@ impl ScriptInstanceUtils {
                     _ => {
                         let script_instance =
                             player.allocator.get_script_instance_mut(&self_instance_id);
-                        script_instance.properties.insert("ancestor".to_string(), value.clone());
+                        script_instance.properties.insert(CiString::from("ancestor"), value.clone());
                         Ok(())
                     }
                 }
@@ -219,7 +220,7 @@ impl ScriptInstanceDatumHandlers {
             let instance = player.allocator.get_script_instance(inst_ref);
 
             // Check if this instance has a non-ScriptInstance ancestor in properties
-            if let Some(ancestor_prop_ref) = instance.properties.get("ancestor") {
+            if let Some(ancestor_prop_ref) = instance.properties.get(CiStr::new("ancestor")) {
                 let ancestor_datum = player.get_datum(ancestor_prop_ref);
                 match ancestor_datum {
                     // If ancestor is not a ScriptInstanceRef, return it for delegation

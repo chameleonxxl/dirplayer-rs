@@ -471,16 +471,15 @@ pub async fn player_dispatch_event_beginsprite(
                     channel.sprite.script_instance_list.iter().all(|script_ref| {
                         player
                             .allocator
-                            .script_instances
-                            .get(&script_ref.id())
+                            .get_script_instance_entry(script_ref.id())
                             .map_or(false, |entry| !entry.script_instance.begin_sprite_called)
                     })
                 })
                 .collect();
-                
+
             for channel in filtered_channels {
                 let instances = channel.sprite.script_instance_list.clone();
-                
+
                 if channel.number == 0 {
                     // Frame behavior (channel 0)
                     frame_instances.extend(
@@ -525,8 +524,7 @@ pub async fn player_dispatch_event_beginsprite(
                         channel.sprite.script_instance_list.iter().all(|script_ref| {
                             player
                                 .allocator
-                                .script_instances
-                                .get(&script_ref.id())
+                                .get_script_instance_entry(script_ref.id())
                                 .map_or(false, |entry| !entry.script_instance.begin_sprite_called)
                         })
                     })

@@ -1,6 +1,8 @@
 use crate::director::lingo::datum::Datum;
 
 use crate::player::{
+    cast_member::CastMemberType,
+    font::{get_text_index_at_pos, DrawTextParams},
     player_call_script_handler, player_call_global_handler, player_handle_scope_return,
     reserve_player_mut, reserve_player_ref,
     script_ref::ScriptInstanceRef, DatumRef, DirPlayer, ScriptError, ScriptErrorCode,
@@ -27,6 +29,55 @@ impl SpriteDatumUtils {
         let instances = &sprite.script_instance_list;
         Ok(instances.clone())
     }
+
+    /// Resolves the text content and character index at a stage point for a text/field sprite.
+    /// Returns (text, char_index) or None if the sprite has no text member.
+    fn get_text_char_index_at_point(
+        player: &DirPlayer,
+        datum: &DatumRef,
+        point_arg: &DatumRef,
+    ) -> Result<Option<(String, usize)>, ScriptError> {
+        let sprite_num = player.get_datum(datum).to_sprite_ref()?;
+        let point = player.get_datum(point_arg).to_point()?;
+        let stage_x = player.get_datum(&point[0]).int_value()?;
+        let stage_y = player.get_datum(&point[1]).int_value()?;
+
+        let sprite = match player.movie.score.get_sprite(sprite_num) {
+            Some(s) => s,
+            None => return Ok(None),
+        };
+
+        let member_ref = match &sprite.member {
+            Some(r) => r.clone(),
+            None => return Ok(None),
+        };
+
+        let sprite_rect = get_concrete_sprite_rect(player, sprite);
+        let local_x = stage_x - sprite_rect.left;
+        let local_y = stage_y - sprite_rect.top;
+
+        let member = match player.movie.cast_manager.find_member_by_ref(&member_ref) {
+            Some(m) => m,
+            None => return Ok(None),
+        };
+
+        let (text, fixed_line_space, top_spacing) = match &member.member_type {
+            CastMemberType::Text(t) => (t.text.clone(), t.fixed_line_space, t.top_spacing),
+            CastMemberType::Field(f) => (f.text.clone(), f.fixed_line_space, f.top_spacing),
+            _ => return Ok(None),
+        };
+
+        let font = player.font_manager.get_system_font().unwrap();
+        let params = DrawTextParams {
+            font: &font,
+            line_height: None,
+            line_spacing: fixed_line_space,
+            top_spacing,
+        };
+
+        let char_index = get_text_index_at_pos(&text, &params, local_x, local_y);
+        Ok(Some((text, char_index)))
+    }
 }
 
 impl SpriteDatumHandlers {
@@ -36,7 +87,7 @@ impl SpriteDatumHandlers {
     /// 2. Any handler that isn't a built-in sync handler (to allow fallback to global handlers)
     pub fn has_async_handler(datum: &DatumRef, handler_name: &String) -> Result<bool, ScriptError> {
         // First check if it's a built-in sync handler
-        let is_sync_handler = matches!(handler_name.as_str(), "intersects" | "getProp");
+        let is_sync_handler = matches!(handler_name.as_str(), "intersects" | "getProp" | "pointToWord" | "pointToLine");
         if is_sync_handler {
             return Ok(false);
         }
@@ -154,6 +205,70 @@ impl SpriteDatumHandlers {
 
                     // If not found anywhere, return void
                     Ok(DatumRef::Void)
+                })
+            }
+            "pointToWord" => {
+                reserve_player_mut(|player| {
+                    if args.is_empty() {
+                        return Err(ScriptError::new(
+                            "pointToWord requires 1 argument (point)".to_string(),
+                        ));
+                    }
+
+                    let (text, char_index) = match SpriteDatumUtils::get_text_char_index_at_point(player, datum, &args[0])? {
+                        Some(r) => r,
+                        None => return Ok(player.alloc_datum(Datum::Int(-1))),
+                    };
+
+                    // Find which word (1-based) the character at char_index belongs to
+                    let mut word_num = 0;
+                    let mut char_count = 0;
+                    let mut in_word = false;
+                    for c in text.chars() {
+                        if c.is_whitespace() {
+                            in_word = false;
+                        } else if !in_word {
+                            word_num += 1;
+                            in_word = true;
+                        }
+                        if char_count == char_index {
+                            return Ok(player.alloc_datum(Datum::Int(word_num)));
+                        }
+                        char_count += 1;
+                    }
+
+                    // Past end of text: return the last word number
+                    Ok(player.alloc_datum(Datum::Int(word_num)))
+                })
+            }
+            "pointToLine" => {
+                reserve_player_mut(|player| {
+                    if args.is_empty() {
+                        return Err(ScriptError::new(
+                            "pointToLine requires 1 argument (point)".to_string(),
+                        ));
+                    }
+
+                    let (text, char_index) = match SpriteDatumUtils::get_text_char_index_at_point(player, datum, &args[0])? {
+                        Some(r) => r,
+                        None => return Ok(player.alloc_datum(Datum::Int(-1))),
+                    };
+
+                    // Find which line (1-based) the character at char_index belongs to
+                    let mut line_num = 1;
+                    let mut char_count = 0;
+                    for c in text.chars() {
+                        if char_count == char_index {
+                            return Ok(player.alloc_datum(Datum::Int(line_num)));
+                        }
+                        if c == '\r' || c == '\n' {
+                            line_num += 1;
+                        }
+                        char_count += 1;
+                    }
+
+                    // Past end of text: return the last line number
+                    Ok(player.alloc_datum(Datum::Int(line_num)))
                 })
             }
             _ => Err(ScriptError::new_code(

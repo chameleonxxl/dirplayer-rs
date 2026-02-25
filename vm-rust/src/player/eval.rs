@@ -359,9 +359,18 @@ fn get_eval_top_level_prop(
             .unwrap_or(player.scope_count - 1) as usize;
         let scope = &player.scopes[scope_idx];
 
-        // Check locals
-        if let Some(local_ref) = scope.locals.get(prop_name) {
-            return Ok(local_ref.clone());
+        // Check locals by reverse-looking up the name_id from the name table
+        {
+            let script_ref_for_locals = scope.script_ref.clone();
+            if let Some(script_rc) = player.movie.cast_manager.get_script_by_ref(&script_ref_for_locals) {
+                if let Some(lctx) = get_lctx_for_script(player, &script_rc) {
+                    if let Some(name_id) = lctx.names.iter().position(|n| n.eq_ignore_ascii_case(prop_name)) {
+                        if let Some(local_ref) = player.scopes[scope_idx].locals.get(&(name_id as u16)) {
+                            return Ok(local_ref.clone());
+                        }
+                    }
+                }
+            }
         }
 
         // Check "me" (the receiver)
@@ -379,7 +388,7 @@ fn get_eval_top_level_prop(
             // Find the handler whose name_id matches this scope's handler_name_id
             let handler_name = script.handlers.iter()
                 .find(|(_, h)| h.name_id == handler_name_id)
-                .map(|(name, _)| name.clone());
+                .map(|(name, _)| name.as_str().to_owned());
             if let Some(handler_name) = handler_name {
                 if let Some(handler_def) = script.get_own_handler(&handler_name) {
                     let handler_def = handler_def.clone();

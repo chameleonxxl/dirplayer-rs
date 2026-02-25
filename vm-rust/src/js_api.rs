@@ -624,6 +624,35 @@ impl JsApi {
                     handlers.push(&hm.to_js_object());
                 }
                 map.str_set("handlers", &handlers);
+                let literals = js_sys::Array::new();
+                for literal in &sc.literals {
+                    let lm = js_sys::Map::new();
+                    lm.str_set("type", &JsValue::from_str(&literal.type_str()));
+                    match literal {
+                        Datum::Int(v) => {
+                            lm.str_set("value", &JsValue::from_f64(*v as f64));
+                        }
+                        Datum::Float(v) => {
+                            lm.str_set("value", &JsValue::from_f64(*v));
+                        }
+                        Datum::String(s) => {
+                            lm.str_set("value", &JsValue::from_str(&ascii_safe(s)));
+                        }
+                        Datum::Symbol(s) => {
+                            lm.str_set("value", &JsValue::from_str(&ascii_safe(s)));
+                        }
+                        Datum::JavaScript(data) => {
+                            lm.str_set("size", &JsValue::from_f64(data.len() as f64));
+                            lm.str_set("bytes", &js_sys::Uint8Array::from(&data[..]));
+                        }
+                        Datum::Void => {}
+                        _ => {
+                            lm.str_set("value", &JsValue::from_str(&literal.type_str()));
+                        }
+                    }
+                    literals.push(&lm.to_js_object());
+                }
+                map.str_set("literals", &literals);
             }
             Chunk::Config(c) => {
                 map.str_set("type", &JsValue::from_str("VWCF"));
@@ -985,6 +1014,38 @@ impl JsApi {
             }
             CastMemberType::Text(text_data) => {
                 member_map.str_set("text", &ascii_safe(&text_data.text).to_js_value());
+                member_map.str_set("htmlSource", &ascii_safe(&text_data.html_source).to_js_value());
+                member_map.str_set("alignment", &ascii_safe(&text_data.alignment).to_js_value());
+                member_map.str_set("boxType", &ascii_safe(&text_data.box_type).to_js_value());
+                member_map.str_set("wordWrap", &JsValue::from_bool(text_data.word_wrap));
+                member_map.str_set("antiAlias", &JsValue::from_bool(text_data.anti_alias));
+                member_map.str_set("font", &ascii_safe(&text_data.font).to_js_value());
+                // set fontStyle array of strings
+                let font_style_array = js_sys::Array::new();
+                for style in &text_data.font_style {
+                    font_style_array.push(&ascii_safe(style).to_js_value());
+                }
+                member_map.str_set("fontStyle", &font_style_array);
+                member_map.str_set("fixedLineSpace", &JsValue::from_f64(text_data.fixed_line_space as f64));
+                member_map.str_set("topSpacing", &JsValue::from_f64(text_data.top_spacing as f64));
+                member_map.str_set("bottomSpacing", &JsValue::from_f64(text_data.bottom_spacing as f64));
+                member_map.str_set("width", &JsValue::from_f64(text_data.width as f64));
+                member_map.str_set("height", &JsValue::from_f64(text_data.height as f64));
+                // set spans array
+                let spans_array = js_sys::Array::new();
+                for span in &text_data.html_styled_spans {
+                    let span_map = js_sys::Map::new();
+                    span_map.str_set("text", &ascii_safe(&span.text).to_js_value());
+                    span_map.str_set("fontFace", &ascii_safe(&span.style.font_face.clone().unwrap_or_default()).to_js_value());
+                    span_map.str_set("fontSize", &JsValue::from_f64(span.style.font_size.unwrap_or_default() as f64));
+                    span_map.str_set("bold", &JsValue::from_bool(span.style.bold));
+                    span_map.str_set("italic", &JsValue::from_bool(span.style.italic));
+                    span_map.str_set("underline", &JsValue::from_bool(span.style.underline));
+                    span_map.str_set("color", &JsValue::from_f64(span.style.color.unwrap_or_default() as f64));
+                    spans_array.push(&span_map.to_js_object());
+                }
+                member_map.str_set("htmlStyledSpans", &spans_array);
+
             }
             CastMemberType::Script(script_data) => {
                 let lctx = lctx.unwrap();
@@ -1375,15 +1436,20 @@ impl JsApi {
                         .names
                         .get(scope.handler_name_id as usize)
                         .unwrap();
+                    let names = &cast_lib.lctx.as_ref().unwrap().names;
                     let scope = JsBridgeScope {
                         script_member_ref: scope.script_ref.to_js(),
                         bytecode_index: scope.bytecode_index as u32,
                         handler_name: handler_name.to_owned(),
                         locals: scope
                             .locals
-                            .clone()
-                            .into_iter()
-                            .map(|(k, v)| (k.to_owned(), v))
+                            .iter()
+                            .map(|(name_id, v)| {
+                                let name = names.get(*name_id as usize)
+                                    .cloned()
+                                    .unwrap_or_else(|| format!("local_{}", name_id));
+                                (name, v.clone())
+                            })
                             .collect(),
                         stack: scope.stack.clone(),
                         args: scope.args.clone(),
@@ -1586,7 +1652,7 @@ fn concrete_datum_to_js_bridge(datum: &Datum, player: &DirPlayer, depth: u8) -> 
 
             let props_map = js_sys::Map::new();
             for (k, v) in instance.properties.iter() {
-                props_map.set(&safe_js_string(k), &v.unwrap().to_js_value());
+                props_map.set(&safe_js_string(k.as_str()), &v.unwrap().to_js_value());
             }
             map.str_set("properties", &props_map.to_js_object());
         }
@@ -1726,6 +1792,11 @@ fn concrete_datum_to_js_bridge(datum: &Datum, player: &DirPlayer, depth: u8) -> 
         }
         Datum::Media(_) => {
             map.str_set("type", &safe_js_string("media"));
+        }
+        Datum::JavaScript(data) => {
+            map.str_set("type", &safe_js_string("javascript"));
+            map.str_set("size", &JsValue::from(data.len() as f64));
+            map.str_set("bytes", &js_sys::Uint8Array::from(&data[..]));
         }
     }
     return map.to_js_object();

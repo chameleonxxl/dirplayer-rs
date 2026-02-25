@@ -53,12 +53,10 @@ pub fn player_get_context_var(
             // local
             let local_name_ids = &handler.local_name_ids;
             let local_index = (id.int_value()? / variable_multiplier as i32) as usize;
-            let local_name = get_name(player, &ctx, local_name_ids[local_index])
-                .unwrap()
-                .to_owned();
+            let name_id = local_name_ids[local_index];
             let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
             let void = DatumRef::Void;
-            let local = scope.locals.get(&local_name).unwrap_or(&void);
+            let local = scope.locals.get(&name_id).unwrap_or(&void);
             Ok(local.clone())
         }
         0x6 => {
@@ -115,11 +113,9 @@ pub fn player_set_context_var(
             // local
             let local_name_ids = &handler.local_name_ids;
             let local_index = (id_datum.int_value()? / variable_multiplier as i32) as usize;
-            let local_name = get_name(player, ctx, local_name_ids[local_index])
-                .unwrap()
-                .to_owned();
+            let name_id = local_name_ids[local_index];
             let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
-            scope.locals.insert(local_name, value_ref.clone());
+            scope.locals.insert(name_id, value_ref.clone());
             Ok(())
         }
         0x6 => {

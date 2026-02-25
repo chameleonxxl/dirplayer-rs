@@ -960,6 +960,30 @@ pub fn resolve_color_ref(
     }
 }
 
+/// Pre-resolve a full palette into an RGB lookup table.
+/// For 4-bit bitmaps returns 16 entries, for 8-bit returns 256 entries.
+/// This avoids calling `resolve_color_ref` per-pixel in hot loops.
+#[inline]
+pub fn resolve_palette_table(
+    palettes: &PaletteMap,
+    palette_ref: &PaletteRef,
+    original_bit_depth: u8,
+) -> Vec<(u8, u8, u8)> {
+    // Always resolve all 256 entries. The internal bit_depth may be wider
+    // than original_bit_depth (e.g. 1-bit stored as 8-bit), so
+    // get_pixel_color_ref can return any PaletteIndex in 0..255.
+    let mut table = Vec::with_capacity(256);
+    for i in 0..256u16 {
+        table.push(resolve_color_ref(
+            palettes,
+            &ColorRef::PaletteIndex(i as u8),
+            palette_ref,
+            original_bit_depth,
+        ));
+    }
+    table
+}
+
 pub fn decode_jpeg_bitmap(data: &[u8], info: &BitmapInfo) -> Result<Bitmap, String> {
     use image::ImageDecoder;
     use std::io::Cursor;

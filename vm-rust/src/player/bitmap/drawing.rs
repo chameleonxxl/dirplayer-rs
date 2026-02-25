@@ -16,7 +16,7 @@ use crate::{
 };
 
 use super::{
-    bitmap::{resolve_color_ref, Bitmap},
+    bitmap::{resolve_color_ref, resolve_palette_table, Bitmap},
     mask::BitmapMask,
     palette_map::PaletteMap,
 };
@@ -252,6 +252,32 @@ impl Bitmap {
         (r, g, b, 0xFF)
     }
 
+    /// Like `get_pixel_color_with_alpha`, but uses a pre-resolved palette table.
+    #[inline]
+    pub fn get_pixel_color_with_alpha_fast(
+        &self,
+        palette_cache: &[(u8, u8, u8)],
+        x: u16,
+        y: u16,
+    ) -> (u8, u8, u8, u8) {
+        let color_ref = self.get_pixel_color_ref(x, y);
+        let (r, g, b) = match &color_ref {
+            ColorRef::PaletteIndex(i) => palette_cache[*i as usize],
+            ColorRef::Rgb(r, g, b) => (*r, *g, *b),
+        };
+
+        if self.bit_depth == 32 {
+            let x_usize = x as usize;
+            let y_usize = y as usize;
+            if x_usize < self.width as usize && y_usize < self.height as usize {
+                let index = (y_usize * self.width as usize + x_usize) * 4;
+                let a = self.data[index + 3];
+                return (r, g, b, a);
+            }
+        }
+        (r, g, b, 0xFF)
+    }
+
     pub fn set_pixel(&mut self, x: i32, y: i32, color: (u8, u8, u8), palettes: &PaletteMap) {
         if x < 0 || y < 0 || x >= self.width as i32 || y >= self.height as i32 {
             return;
@@ -344,6 +370,85 @@ impl Bitmap {
         }
     }
 
+    /// Like `set_pixel`, but uses a pre-resolved palette table for indexed formats.
+    /// For 4-bit/8-bit bitmaps, this avoids calling `resolve_color_ref` 16/256 times per pixel.
+    pub fn set_pixel_fast(&mut self, x: i32, y: i32, color: (u8, u8, u8), palette_cache: &[(u8, u8, u8)]) {
+        if x < 0 || y < 0 || x >= self.width as i32 || y >= self.height as i32 {
+            return;
+        }
+        self.matte = None;
+        let (r, g, b) = color;
+        let x = x as usize;
+        let y = y as usize;
+        match self.bit_depth {
+            1 => {
+                let bit_index = y * self.width as usize + x;
+                let byte_index = bit_index / 8;
+                let bit_offset = bit_index % 8;
+                let value = self.data[byte_index];
+                let mask = 1 << (7 - bit_offset);
+                let value = if r > 127 || g > 127 || b > 127 {
+                    value | mask
+                } else {
+                    value & !mask
+                };
+                self.data[byte_index] = value;
+            }
+            4 => {
+                let mut result_index: u8 = 0;
+                let mut result_distance = i32::MAX;
+                for (palette_idx, &(pr, pg, pb)) in palette_cache.iter().enumerate().take(16) {
+                    let distance = (r as i32 - pr as i32).abs()
+                        + (g as i32 - pg as i32).abs()
+                        + (b as i32 - pb as i32).abs();
+                    if distance < result_distance {
+                        result_index = palette_idx as u8;
+                        result_distance = distance;
+                    }
+                }
+                let index = (y * self.width as usize + x) / 2;
+                if x % 2 == 0 {
+                    self.data[index] = (self.data[index] & 0x0F) | (result_index << 4);
+                } else {
+                    self.data[index] = (self.data[index] & 0xF0) | (result_index & 0x0F);
+                }
+            }
+            8 => {
+                let mut result_index: u8 = 0;
+                let mut result_distance = i32::MAX;
+                for (idx, &(pr, pg, pb)) in palette_cache.iter().enumerate() {
+                    let distance = (r as i32 - pr as i32).abs()
+                        + (g as i32 - pg as i32).abs()
+                        + (b as i32 - pb as i32).abs();
+                    if distance < result_distance {
+                        result_index = idx as u8;
+                        result_distance = distance;
+                    }
+                }
+                let index = y * self.width as usize + x;
+                self.data[index] = result_index;
+            }
+            16 => {
+                let r = r as f32 * 31.0 / 255.0;
+                let g = g as f32 * 63.0 / 255.0;
+                let b = b as f32 * 31.0 / 255.0;
+                let value = Rgb565::pack_565((r as u8, g as u8, b as u8));
+                let bytes = value.to_le_bytes();
+                let index = (y * self.width as usize + x) * 2;
+                self.data[index] = bytes[0];
+                self.data[index + 1] = bytes[1];
+            }
+            32 => {
+                let index = (y * self.width as usize + x) * 4;
+                self.data[index] = r;
+                self.data[index + 1] = g;
+                self.data[index + 2] = b;
+                self.data[index + 3] = 0xFF;
+            }
+            _ => {}
+        }
+    }
+
     pub fn get_pixel_color_ref(&self, x: u16, y: u16) -> ColorRef {
         let x = x as usize;
         let y = y as usize;
@@ -399,6 +504,16 @@ impl Bitmap {
             &self.palette_ref,
             self.original_bit_depth,
         )
+    }
+
+    /// Like `get_pixel_color`, but uses a pre-resolved palette table for indexed formats.
+    #[inline]
+    pub fn get_pixel_color_fast(&self, palette_cache: &[(u8, u8, u8)], x: u16, y: u16) -> (u8, u8, u8) {
+        let color_ref = self.get_pixel_color_ref(x, y);
+        match color_ref {
+            ColorRef::PaletteIndex(i) => palette_cache[i as usize],
+            ColorRef::Rgb(r, g, b) => (r, g, b),
+        }
     }
 
     pub const fn has_palette(&self) -> bool {
@@ -814,6 +929,20 @@ impl Bitmap {
 
         let is_indexed = src.original_bit_depth <= 8;
 
+        // Pre-resolve palettes into lookup tables to avoid per-pixel resolve_color_ref calls.
+        // Source table: used for reading indexed source pixels without calling resolve_color_ref.
+        let src_palette_cache: Option<Vec<(u8, u8, u8)>> = if is_indexed {
+            Some(resolve_palette_table(palettes, &src.palette_ref, src.original_bit_depth))
+        } else {
+            None
+        };
+        // Destination table: used by set_pixel_fast to avoid O(256) nearest-color search per pixel.
+        let dst_palette_cache: Vec<(u8, u8, u8)> = if self.bit_depth <= 8 {
+            resolve_palette_table(palettes, &self.palette_ref, self.original_bit_depth)
+        } else {
+            Vec::new()
+        };
+
         let bg_index = match &params.bg_color {
             ColorRef::PaletteIndex(i) => *i,
             _ => 0, // Director default
@@ -947,59 +1076,33 @@ impl Bitmap {
             let mut mask = vec![vec![false; width]; height];
             let mut stack = Vec::<(usize, usize)>::new();
 
+            // Fast pixel color getter using cached palette table
+            let get_src_rgb = |x: u16, y: u16| -> (u8, u8, u8) {
+                let color_ref = src.get_pixel_color_ref(x, y);
+                if let (ColorRef::PaletteIndex(i), Some(cache)) = (&color_ref, &src_palette_cache) {
+                    cache[*i as usize]
+                } else {
+                    resolve_color_ref(palettes, &color_ref, &src.palette_ref, src.original_bit_depth)
+                }
+            };
+
+            let matte_bg = edge_matte_color.unwrap_or(bg_color_resolved);
+
             // ---- seed flood fill from edges ----
             for x in 0..width {
-                let (r1, g1, b1, _) =
-                    src.get_pixel_color_with_alpha(palettes, x as u16, 0);
-
-                let is_bg = if let Some(edge) = edge_matte_color {
-                    (r1, g1, b1) == edge
-                } else {
-                    (r1, g1, b1) == bg_color_resolved
-                };
-
-                if is_bg {
+                if get_src_rgb(x as u16, 0) == matte_bg {
                     stack.push((x, 0));
                 }
-
-                let (r2, g2, b2, _) =
-                    src.get_pixel_color_with_alpha(palettes, x as u16, (height - 1) as u16);
-
-                let is_bg = if let Some(edge) = edge_matte_color {
-                    (r2, g2, b2) == edge
-                } else {
-                    (r2, g2, b2) == bg_color_resolved
-                };
-
-                if is_bg {
+                if get_src_rgb(x as u16, (height - 1) as u16) == matte_bg {
                     stack.push((x, height - 1));
                 }
             }
 
             for y in 0..height {
-                let (r1, g1, b1, _) =
-                    src.get_pixel_color_with_alpha(palettes, 0, y as u16);
-
-                let is_bg = if let Some(edge) = edge_matte_color {
-                    (r1, g1, b1) == edge
-                } else {
-                    (r1, g1, b1) == bg_color_resolved
-                };
-
-                if is_bg {
+                if get_src_rgb(0, y as u16) == matte_bg {
                     stack.push((0, y));
                 }
-
-                let (r2, g2, b2, _) =
-                    src.get_pixel_color_with_alpha(palettes, (width - 1) as u16, y as u16);
-
-                let is_bg = if let Some(edge) = edge_matte_color {
-                    (r2, g2, b2) == edge
-                } else {
-                    (r2, g2, b2) == bg_color_resolved
-                };
-
-                if is_bg {
+                if get_src_rgb((width - 1) as u16, y as u16) == matte_bg {
                     stack.push((width - 1, y));
                 }
             }
@@ -1010,16 +1113,7 @@ impl Bitmap {
                     continue;
                 }
 
-                let (r, g, b, _) =
-                    src.get_pixel_color_with_alpha(palettes, x as u16, y as u16);
-
-                let is_bg = if let Some(edge) = edge_matte_color {
-                    (r, g, b) == edge
-                } else {
-                    (r, g, b) == bg_color_resolved
-                };
-
-                if !is_bg {
+                if get_src_rgb(x as u16, y as u16) != matte_bg {
                     continue;
                 }
 
@@ -1130,15 +1224,13 @@ impl Bitmap {
                     }
 
                     let color_ref = src.get_pixel_color_ref(sx, sy);
+                    let (sr, sg, sb) = if let (ColorRef::PaletteIndex(i), Some(cache)) = (&color_ref, &src_palette_cache) {
+                        cache[*i as usize]
+                    } else {
+                        resolve_color_ref(palettes, &color_ref, &src.palette_ref, src.original_bit_depth)
+                    };
 
-                    let (sr, sg, sb) = resolve_color_ref(
-                        palettes,
-                        &color_ref,
-                        &src.palette_ref,
-                        src.original_bit_depth,
-                    );
-
-                    self.set_pixel(dst_x, dst_y, (sr, sg, sb), palettes);
+                    self.set_pixel_fast(dst_x, dst_y, (sr, sg, sb), &dst_palette_cache);
                     continue;
                 }
 
@@ -1159,7 +1251,7 @@ impl Bitmap {
                         }
                         // Foreground bit → render with foreColor
                         let src_color = fg_color_resolved;
-                        let dst_color = self.get_pixel_color(palettes, dst_x as u16, dst_y as u16);
+                        let dst_color = if !dst_palette_cache.is_empty() { self.get_pixel_color_fast(&dst_palette_cache, dst_x as u16, dst_y as u16) } else { self.get_pixel_color(palettes, dst_x as u16, dst_y as u16) };
 
                         let blended = if alpha >= 0.999 {
                             src_color
@@ -1167,7 +1259,7 @@ impl Bitmap {
                             blend_color_alpha(dst_color, src_color, alpha)
                         };
 
-                        self.set_pixel(dst_x, dst_y, blended, palettes);
+                        self.set_pixel_fast(dst_x, dst_y, blended, &dst_palette_cache);
                         continue;
                     }
 
@@ -1177,28 +1269,17 @@ impl Bitmap {
                         bg_index // 8-bit
                     };
 
+                    // Resolve color via cached palette table
+                    let (r, g, b) = if let Some(cache) = &src_palette_cache {
+                        cache[i as usize]
+                    } else {
+                        resolve_color_ref(palettes, &ColorRef::PaletteIndex(i), &src.palette_ref, src.original_bit_depth)
+                    };
+
                     // Fast path: check index match first
-                    if i == transparent_index {
-                        let (r, g, b) = resolve_color_ref(
-                            palettes,
-                            &ColorRef::PaletteIndex(i),
-                            &src.palette_ref,
-                            src.original_bit_depth,
-                        );
-
-                        if (r, g, b) == bg_color_resolved {
-                            continue;
-                        }
+                    if i == transparent_index && (r, g, b) == bg_color_resolved {
+                        continue;
                     }
-
-                    // Resolve both colors and compare RGB values
-                    // (handles case where background color exists at multiple palette indices)
-                    let (r, g, b) = resolve_color_ref(
-                        palettes,
-                        &ColorRef::PaletteIndex(i),
-                        &src.palette_ref,
-                        src.original_bit_depth,
-                    );
 
                     if (r, g, b) == bg_color_resolved {
                         continue; // transparent - RGB matches background color
@@ -1217,7 +1298,7 @@ impl Bitmap {
                         (r, g, b) // Keep original color for other pixels
                     };
 
-                    let dst_color = self.get_pixel_color(palettes, dst_x as u16, dst_y as u16);
+                    let dst_color = if !dst_palette_cache.is_empty() { self.get_pixel_color_fast(&dst_palette_cache, dst_x as u16, dst_y as u16) } else { self.get_pixel_color(palettes, dst_x as u16, dst_y as u16) };
 
                     let blended = if src_alpha >= 0.999 && alpha >= 0.999 {
                         src_color
@@ -1225,7 +1306,7 @@ impl Bitmap {
                         blend_color_alpha(dst_color, src_color, src_alpha * alpha)
                     };
 
-                    self.set_pixel(dst_x, dst_y, blended, palettes);
+                    self.set_pixel_fast(dst_x, dst_y, blended, &dst_palette_cache);
                     continue;
                 }
 
@@ -1240,7 +1321,7 @@ impl Bitmap {
                     }
 
                     let src_color = (r, g, b);
-                    let dst_color = self.get_pixel_color(palettes, dst_x as u16, dst_y as u16);
+                    let dst_color = if !dst_palette_cache.is_empty() { self.get_pixel_color_fast(&dst_palette_cache, dst_x as u16, dst_y as u16) } else { self.get_pixel_color(palettes, dst_x as u16, dst_y as u16) };
 
                     let blended = if alpha >= 0.999 {
                         src_color
@@ -1248,7 +1329,7 @@ impl Bitmap {
                         blend_color_alpha(dst_color, src_color, alpha)
                     };
 
-                    self.set_pixel(dst_x, dst_y, blended, palettes);
+                    self.set_pixel_fast(dst_x, dst_y, blended, &dst_palette_cache);
                     continue;
                 }
 
@@ -1308,7 +1389,7 @@ impl Bitmap {
                         continue;
                     }
 
-                    let dst_color = self.get_pixel_color(palettes, dst_x as u16, dst_y as u16);
+                    let dst_color = if !dst_palette_cache.is_empty() { self.get_pixel_color_fast(&dst_palette_cache, dst_x as u16, dst_y as u16) } else { self.get_pixel_color(palettes, dst_x as u16, dst_y as u16) };
 
                     let blended = if alpha >= 0.999 {
                         src_color
@@ -1316,7 +1397,7 @@ impl Bitmap {
                         blend_color_alpha(dst_color, src_color, alpha)
                     };
 
-                    self.set_pixel(dst_x, dst_y, blended, palettes);
+                    self.set_pixel_fast(dst_x, dst_y, blended, &dst_palette_cache);
                     continue;
                 }
 
@@ -1336,7 +1417,7 @@ impl Bitmap {
                     let (r, g, b, _) = src.get_pixel_color_with_alpha(palettes, sx, sy);
 
                     let src_color = (r, g, b);
-                    let dst_color = self.get_pixel_color(palettes, dst_x as u16, dst_y as u16);
+                    let dst_color = if !dst_palette_cache.is_empty() { self.get_pixel_color_fast(&dst_palette_cache, dst_x as u16, dst_y as u16) } else { self.get_pixel_color(palettes, dst_x as u16, dst_y as u16) };
 
                     let blended = if alpha >= 0.999 {
                         src_color
@@ -1344,20 +1425,18 @@ impl Bitmap {
                         blend_color_alpha(dst_color, src_color, alpha)
                     };
 
-                    self.set_pixel(dst_x, dst_y, blended, palettes);
+                    self.set_pixel_fast(dst_x, dst_y, blended, &dst_palette_cache);
                     continue;
                 }
 
                 // Indexed bitmap (1-8 bit) ink 8
                 if ink == 8 && is_indexed {
                     let color_ref = src.get_pixel_color_ref(sx, sy);
-
-                    let (sr, sg, sb) = resolve_color_ref(
-                        palettes,
-                        &color_ref,
-                        &src.palette_ref,
-                        src.original_bit_depth,
-                    );
+                    let (sr, sg, sb) = if let (ColorRef::PaletteIndex(i), Some(cache)) = (&color_ref, &src_palette_cache) {
+                        cache[*i as usize]
+                    } else {
+                        resolve_color_ref(palettes, &color_ref, &src.palette_ref, src.original_bit_depth)
+                    };
 
                     // Check matte mask - only edge-connected bg pixels are transparent
                     if let Some(mask) = &matte_mask {
@@ -1370,7 +1449,7 @@ impl Bitmap {
                     let src_alpha = 1.0;
 
                     let src_color = (sr, sg, sb);
-                    let dst_color = self.get_pixel_color(palettes, dst_x as u16, dst_y as u16);
+                    let dst_color = if !dst_palette_cache.is_empty() { self.get_pixel_color_fast(&dst_palette_cache, dst_x as u16, dst_y as u16) } else { self.get_pixel_color(palettes, dst_x as u16, dst_y as u16) };
 
                     let blended = if src_alpha >= 0.999 && alpha >= 0.999 {
                         src_color
@@ -1378,13 +1457,16 @@ impl Bitmap {
                         blend_color_alpha(dst_color, src_color, src_alpha * alpha)
                     };
 
-                    self.set_pixel(dst_x, dst_y, blended, palettes);
+                    self.set_pixel_fast(dst_x, dst_y, blended, &dst_palette_cache);
                     continue;
                 }
 
                 // Sample source pixel
-                let (sr, sg, sb, mut sa) =
-                    src.get_pixel_color_with_alpha(palettes, sx, sy);
+                let (sr, sg, sb, mut sa) = if let Some(cache) = &src_palette_cache {
+                    src.get_pixel_color_with_alpha_fast(cache, sx, sy)
+                } else {
+                    src.get_pixel_color_with_alpha(palettes, sx, sy)
+                };
 
                 // Skip fully transparent pixels from RGBA bitmaps (e.g., filmloop compositing)
                 // This ensures transparent areas don't overwrite destination with black
@@ -1493,7 +1575,7 @@ impl Bitmap {
                     }
 
                     let dst_color =
-                        self.get_pixel_color(palettes, dst_x as u16, dst_y as u16);
+                        if !dst_palette_cache.is_empty() { self.get_pixel_color_fast(&dst_palette_cache, dst_x as u16, dst_y as u16) } else { self.get_pixel_color(palettes, dst_x as u16, dst_y as u16) };
 
                     let blended = if src_alpha >= 0.999 && alpha >= 0.999 {
                         src_color
@@ -1501,7 +1583,7 @@ impl Bitmap {
                         blend_color_alpha(dst_color, src_color, src_alpha * alpha)
                     };
 
-                    self.set_pixel(dst_x, dst_y, blended, palettes);
+                    self.set_pixel_fast(dst_x, dst_y, blended, &dst_palette_cache);
                     continue;
                 }
 
@@ -1546,7 +1628,7 @@ impl Bitmap {
                     // Black pixel → foreground color
                     if (sr, sg, sb) == (0, 0, 0) {
                         let dst_color =
-                            self.get_pixel_color(palettes, dst_x as u16, dst_y as u16);
+                            if !dst_palette_cache.is_empty() { self.get_pixel_color_fast(&dst_palette_cache, dst_x as u16, dst_y as u16) } else { self.get_pixel_color(palettes, dst_x as u16, dst_y as u16) };
                         let blended = blend_pixel(
                             dst_color,
                             fg_color_resolved,
@@ -1555,7 +1637,7 @@ impl Bitmap {
                             alpha,
                             sa as f32 / 255.0,
                         );
-                        self.set_pixel(dst_x, dst_y, blended, palettes);
+                        self.set_pixel_fast(dst_x, dst_y, blended, &dst_palette_cache);
                     }
 
                     // White pixel → FULLY TRANSPARENT → skip
@@ -1568,7 +1650,7 @@ impl Bitmap {
                 // 4. NON-TEXT normal rendering
                 // ----------------------------------------------------------
                 let src_alpha = sa as f32 / 255.0;
-                let dst_color = self.get_pixel_color(palettes, dst_x as u16, dst_y as u16);
+                let dst_color = if !dst_palette_cache.is_empty() { self.get_pixel_color_fast(&dst_palette_cache, dst_x as u16, dst_y as u16) } else { self.get_pixel_color(palettes, dst_x as u16, dst_y as u16) };
 
                 let blended = blend_pixel(
                     dst_color,
@@ -1579,7 +1661,7 @@ impl Bitmap {
                     src_alpha,
                 );
 
-                self.set_pixel(dst_x, dst_y, blended, palettes);
+                self.set_pixel_fast(dst_x, dst_y, blended, &dst_palette_cache);
             }
         }
         // Uncomment below to debug copyPixel calls

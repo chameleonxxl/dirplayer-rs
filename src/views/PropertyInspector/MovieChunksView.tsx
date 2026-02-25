@@ -4,6 +4,7 @@ import { useAppSelector } from "../../store/hooks";
 import { get_cast_chunk_list, get_movie_top_level_chunks, get_chunk_bytes, get_parsed_chunk } from "vm-rust";
 import { Layout, Model, TabNode } from "flexlayout-react";
 import PropertyTable from "../../components/PropertyTable";
+import { downloadBlob } from "../../utils/download";
 import styles from "./styles.module.css";
 
 const MOVIE_FILE_VALUE = "movie";
@@ -12,18 +13,6 @@ function formatSize(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
-}
-
-function downloadBlob(data: Uint8Array, filename: string) {
-  const blob = new Blob([data], { type: "application/octet-stream" });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement("a");
-  a.href = url;
-  a.download = filename;
-  document.body.appendChild(a);
-  a.click();
-  document.body.removeChild(a);
-  URL.revokeObjectURL(url);
 }
 
 // --- Chunk Detail Panel ---

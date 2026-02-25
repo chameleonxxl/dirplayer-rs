@@ -2373,13 +2373,14 @@ impl Score {
     }
 
     pub fn get_active_script_instance_list(&self) -> Vec<ScriptInstanceRef> {
-        let mut instance_list = vec![];
+        let total: usize = self.channels.iter().map(|c| c.sprite.script_instance_list.len()).sum();
+        let mut instance_list = Vec::with_capacity(total);
         for channel in &self.channels {
             for instance_ref in &channel.sprite.script_instance_list {
                 instance_list.push(instance_ref.clone());
             }
         }
-        return instance_list;
+        instance_list
     }
 
     pub fn get_frame_tempo(&self, frame: u32) -> Option<u32> {
@@ -2545,6 +2546,9 @@ pub fn sprite_get_prop(
                 .unwrap_or(0);
             Ok(Datum::Int(end_frame as i32))
         }
+        "castLibNum" => Ok(Datum::Int(sprite.map_or(0, |x| {
+            x.member.as_ref().map_or(0, |y| y.cast_lib)
+        }))),
         prop_name => {
             let datum_ref = sprite.and_then(|sprite| {
                 reserve_player_mut(|player| {

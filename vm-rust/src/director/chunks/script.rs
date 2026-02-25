@@ -1,7 +1,7 @@
 use binary_reader::BinaryReader;
 use itertools::Itertools;
 
-use crate::director::{chunks::literal::LiteralStore, lingo::datum::Datum};
+use crate::director::{chunks::literal::{LiteralStore, LiteralType}, lingo::datum::Datum};
 
 use super::handler::{HandlerDef, HandlerRecord};
 use crate::director::static_datum::StaticDatum;
@@ -76,10 +76,18 @@ impl ScriptChunk {
             .map(|_| LiteralStore::read_record(reader, dir_version).unwrap())
             .collect_vec();
 
-        let literals = literal_records
+        let has_javascript = literal_records
             .iter()
-            .map(|record| LiteralStore::read_data(reader, record, literals_data_offset).unwrap())
-            .collect_vec();
+            .any(|r| matches!(r.literal_type, LiteralType::JavaScript));
+
+        let literals = if has_javascript {
+            parse_javascript_literals(reader, literals_data_offset, literals_count as usize)
+        } else {
+            literal_records
+                .iter()
+                .map(|record| LiteralStore::read_data(reader, record, literals_data_offset).unwrap())
+                .collect_vec()
+        };
 
         // === Map property IDs to real parameter names ===
         let mut property_defaults = HashMap::new();
@@ -100,6 +108,59 @@ impl ScriptChunk {
             property_defaults,
         })
     }
+}
+
+/// JavaScript Lscr chunks store compiled JS data in the literal data area
+/// using a different format from standard Lingo literals. The data area contains
+/// a big-endian u32 total size followed by one or more data blocks, each
+/// beginning with the little-endian magic marker 0xDEAD0003.
+///
+/// The literal records for JS scripts are placeholders (type 0 with offset 0)
+/// except for the first one (type 11 / JavaScript). The actual constant data
+/// is extracted by splitting the data area at each magic marker.
+fn parse_javascript_literals(
+    reader: &mut BinaryReader,
+    literals_data_offset: usize,
+    literals_count: usize,
+) -> Vec<Datum> {
+    const JS_BLOCK_MAGIC: [u8; 4] = [0x03, 0x00, 0xAD, 0xDE]; // 0xDEAD0003 LE
+
+    reader.jmp(literals_data_offset);
+    let total_size = reader.read_u32().unwrap() as usize;
+    let data = reader.read_bytes(total_size).unwrap();
+
+    // Find block boundaries by scanning for the magic marker
+    let mut block_offsets: Vec<usize> = Vec::new();
+    for i in 0..data.len().saturating_sub(3) {
+        if data[i..i + 4] == JS_BLOCK_MAGIC {
+            block_offsets.push(i);
+        }
+    }
+
+    // Split data into blocks at each marker
+    let mut blocks: Vec<Vec<u8>> = Vec::new();
+    for (idx, &start) in block_offsets.iter().enumerate() {
+        let end = if idx + 1 < block_offsets.len() {
+            block_offsets[idx + 1]
+        } else {
+            data.len()
+        };
+        blocks.push(data[start..end].to_vec());
+    }
+
+    // Build the literals array to match the expected count.
+    // Index 0 is Void (the type-11 header record), indices 1..N hold the JS blocks.
+    let mut literals = Vec::with_capacity(literals_count);
+    literals.push(Datum::Void);
+    for block in blocks {
+        literals.push(Datum::JavaScript(block));
+    }
+    // Pad with Void if needed to match literals_count
+    while literals.len() < literals_count {
+        literals.push(Datum::Void);
+    }
+
+    literals
 }
 
 fn read_varnames_table(reader: &mut BinaryReader, count: usize, offset: usize) -> Vec<u16> {

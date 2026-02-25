@@ -1,3 +1,4 @@
+import { useState } from "react";
 import { ICastMemberRef } from "dirplayer-js-api";
 import PreviewCanvas from "../../components/PreviewCanvas";
 import ScriptMemberPreview from "../../components/ScriptMemberPreview";
@@ -20,6 +21,26 @@ const normalizeLineEndings = (str: string, normalized = "\r\n") =>
 
 function TextMemberPreview({ text }: ITextMemberPreviewProps) {
   return <p className={styles.textPreview}>{normalizeLineEndings(text)}</p>;
+}
+
+function FontPreview() {
+  const [fontSize, setFontSize] = useState(12);
+  return (
+    <div>
+      <label>
+        Font size:{" "}
+        <input
+          type="number"
+          min={4}
+          max={72}
+          value={fontSize}
+          onChange={(e) => setFontSize(Number(e.target.value))}
+          style={{ width: 50 }}
+        />
+      </label>
+      <PreviewCanvas fontSize={fontSize} />
+    </div>
+  );
 }
 
 export default function MemberInspector({ memberId }: IMemberInspectorProps) {
@@ -66,6 +87,9 @@ export default function MemberInspector({ memberId }: IMemberInspectorProps) {
           </div>)}
         {memberSnapshot?.type === "filmLoop" && (
           <FilmLoopInspector memberId={memberId} />
+        )}
+        {memberSnapshot?.type === "font" && (
+          <FontPreview />
         )}
         {memberSnapshot?.type === "palette" && <div>
           Ref id: {memberSnapshot.paletteRef}

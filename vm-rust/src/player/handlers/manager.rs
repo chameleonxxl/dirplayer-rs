@@ -18,17 +18,10 @@ use super::{
 use std::collections::HashMap;
 
 use crate::{
-    director::lingo::datum::{datum_bool, Datum, DatumType},
+    director::lingo::datum::{Datum, DatumType, datum_bool},
     js_api::JsApi,
     player::{
-        bitmap::bitmap::{get_system_default_palette, Bitmap, PaletteRef},
-        datum_formatting::{format_concrete_datum, format_datum},
-        geometry::IntRect,
-        handlers::datum_handlers::xml::XmlHelper,
-        keyboard_map, player_alloc_datum, player_call_script_handler, reserve_player_mut,
-        reserve_player_ref, player_call_global_handler,
-        script_ref::ScriptInstanceRef,
-        DatumRef, DirPlayer, ScriptError,
+        DatumRef, DirPlayer, ScriptError, bitmap::bitmap::{Bitmap, PaletteRef, get_system_default_palette}, datum_formatting::{format_concrete_datum, format_datum}, geometry::IntRect, handlers::datum_handlers::xml::XmlHelper, keyboard_map, player_alloc_datum, player_call_global_handler, player_call_script_handler, reserve_player_mut, reserve_player_ref, script_ref::ScriptInstanceRef, xtra::manager::call_xtra_instance_handler
     },
 };
 
@@ -624,6 +617,7 @@ impl BuiltInHandlerManager {
             "getpref" => MovieHandlers::get_pref(args),
             "setpref" => MovieHandlers::set_pref(args),
             "gotonetpage" => MovieHandlers::go_to_net_page(args),
+            "gotonetmovie" => MovieHandlers::go_to_net_movie(args),
             "pass" => MovieHandlers::pass(args),
             "union" => TypeHandlers::union(args),
             "bitxor" => TypeHandlers::bit_xor(args),
@@ -800,6 +794,7 @@ impl BuiltInHandlerManager {
             "alert" => Self::alert(args),
             "objectp" => Self::object_p(args),
             "soundbusy" => TypeHandlers::sound_busy(args),
+            "delay" => MovieHandlers::delay(args),
             "halt" => MovieHandlers::halt(args),
             "starttimer" => Self::start_timer(args),
             "externalevent" => Self::external_event(args),
@@ -816,7 +811,76 @@ impl BuiltInHandlerManager {
                     SoundChannelDatumHandlers::call(player, &channel_datum, &"play".to_string(), args)
                 })
             }
+            "spritebox" => {
+                log::warn!("spriteBox is not implemented, returning <Void>");
+                Ok(DatumRef::Void)
+            }
+            "puppettransition" => {
+                log::warn!("puppetTransition is not implemented");
+                Ok(DatumRef::Void)
+            }
+            "preload" => {
+                log::warn!("preload is not implemented");
+                Ok(DatumRef::Void)
+            }
+            "charpostoloc" => {
+                reserve_player_mut(|player| {
+                    if args.len() < 2 {
+                        return Err(ScriptError::new(
+                            "charPosToLoc requires 2 arguments (member, charPos)".to_string(),
+                        ));
+                    }
+                    let member_ref = player.get_datum(&args[0]).to_member_ref()?;
+                    let char_pos = player.get_datum(&args[1]).int_value()?;
+
+                    let member = player
+                        .movie
+                        .cast_manager
+                        .find_member_by_ref(&member_ref)
+                        .ok_or_else(|| ScriptError::new("Member not found".to_string()))?;
+
+                    let (text, fixed_line_space, top_spacing) = match &member.member_type {
+                        crate::player::cast_member::CastMemberType::Text(t) => {
+                            (t.text.clone(), t.fixed_line_space, t.top_spacing)
+                        }
+                        crate::player::cast_member::CastMemberType::Field(f) => {
+                            (f.text.clone(), f.fixed_line_space, f.top_spacing)
+                        }
+                        _ => {
+                            return Err(ScriptError::new(
+                                "charPosToLoc requires a text or field member".to_string(),
+                            ))
+                        }
+                    };
+
+                    let font = player.font_manager.get_system_font().unwrap();
+                    let params = crate::player::font::DrawTextParams {
+                        font: &font,
+                        line_height: None,
+                        line_spacing: fixed_line_space,
+                        top_spacing,
+                    };
+
+                    // char_pos is 1-based; convert to 0-based index
+                    let index = if char_pos > 0 { (char_pos - 1) as usize } else { 0 };
+                    let (x, y) = crate::player::font::get_text_char_pos(&text, &params, index);
+
+                    let x_ref = player.alloc_datum(Datum::Int(x as i32));
+                    let y_ref = player.alloc_datum(Datum::Int(y as i32));
+                    Ok(player.alloc_datum(Datum::Point([x_ref, y_ref])))
+                })
+            }
             _ => {
+                // Check if first arg is an xtra instance - if so, forward to the xtra instance handler
+                if !args.is_empty() {
+                    let xtra_info = reserve_player_ref(|player| {
+                        player.get_datum(&args[0]).to_xtra_instance().map(|(n, id)| (n.clone(), *id)).ok()
+                    });
+                    if let Some((xtra_name, instance_id)) = xtra_info {
+                        let remaining_args = args[1..].to_vec();
+                        return call_xtra_instance_handler(&xtra_name, instance_id, &name.to_string(), &remaining_args);
+                    }
+                }
                 let formatted_args = reserve_player_ref(|player| {
                     let mut s = String::new();
                     for arg in args {
@@ -1172,20 +1236,28 @@ impl BuiltInHandlerManager {
             let arg = player.get_datum(&args[0]);
             
             match arg {
-                // If argument is an integer, return the marker name at that frame
-                Datum::Int(frame_num) => {
-                    let frame_num = *frame_num as i32;
-                    let marker = player
-                        .movie
-                        .score
-                        .frame_labels
-                        .iter()
-                        .find(|label| label.frame_num == frame_num);
-                    
-                    if let Some(label) = marker {
-                        Ok(player.alloc_datum(Datum::String(label.label.clone())))
+                // marker(n) returns the frame number of the nth marker relative to current frame.
+                // marker(0) = current marker (nearest at or before current frame)
+                // marker(1) = next marker, marker(-1) = previous marker, etc.
+                Datum::Int(offset) => {
+                    let offset = *offset;
+                    let current_frame = player.movie.current_frame as i32;
+                    let labels = &player.movie.score.frame_labels;
+
+                    // Find the index of the current marker (last marker at or before current frame)
+                    let current_idx = labels.iter().rposition(|l| l.frame_num <= current_frame);
+
+                    let target_idx = if offset >= 0 {
+                        current_idx.map(|i| i as i32 + offset).unwrap_or(offset - 1)
                     } else {
-                        Ok(player.alloc_datum(Datum::String(String::new())))
+                        current_idx.map(|i| i as i32 + offset).unwrap_or(-1)
+                    };
+
+                    if target_idx >= 0 && (target_idx as usize) < labels.len() {
+                        Ok(player.alloc_datum(Datum::Int(labels[target_idx as usize].frame_num)))
+                    } else {
+                        // Out of range - return 0
+                        Ok(player.alloc_datum(Datum::Int(0)))
                     }
                 }
                 // If argument is a string, return the frame number of that marker

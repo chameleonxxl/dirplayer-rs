@@ -50,6 +50,7 @@ pub enum DatumType {
     MathRef,
     Vector,
     Media,
+    JavaScript,
 }
 
 #[derive(Clone, PartialEq, FromPrimitive)]
@@ -162,6 +163,7 @@ pub enum Datum {
     Vector([f64; 3]),
     Media(Media),
     Null,
+    JavaScript(Vec<u8>),
 }
 
 impl DatumType {
@@ -208,6 +210,7 @@ impl DatumType {
             DatumType::MathRef => "math".to_string(),
             DatumType::Vector => "vector".to_string(),
             DatumType::Media => "media".to_string(),
+            DatumType::JavaScript => "javascript".to_string(),
         }
     }
 }
@@ -252,6 +255,7 @@ impl Datum {
             Datum::Vector(_) => DatumType::Vector,
             Datum::Media(_) => DatumType::Media,
             Datum::Null => DatumType::Null,
+            Datum::JavaScript(_) => DatumType::JavaScript,
         }
     }
 

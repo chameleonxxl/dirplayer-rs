@@ -1,12 +1,6 @@
-use std::{
-    cell::{Cell, UnsafeCell},
-    fmt::Display,
-    rc::Rc,
-};
+use std::fmt::Display;
 
-use log::warn;
-
-use super::{allocator::DatumAllocatorTrait, PLAYER_OPT};
+use super::{allocator::{DatumAllocatorTrait, ALLOCATOR_RESETTING}, PLAYER_OPT};
 
 pub type DatumId = usize;
 
@@ -16,6 +10,7 @@ pub enum DatumRef {
 }
 
 impl DatumRef {
+    #[inline]
     pub fn from_id(id: DatumId, ref_count: *mut u32) -> DatumRef {
         if id != 0 {
             let mut_ref = unsafe { &mut *ref_count };
@@ -26,6 +21,7 @@ impl DatumRef {
         }
     }
 
+    #[inline]
     pub fn unwrap(&self) -> DatumId {
         match self {
             DatumRef::Void => 0,
@@ -65,22 +61,22 @@ impl Clone for DatumRef {
 }
 
 impl Drop for DatumRef {
+    #[inline]
     fn drop(&mut self) {
         if let DatumRef::Ref(id, ref_count) = self {
             unsafe {
-                // Check if we can safely dereference the ref_count pointer
-                // During allocator reset, the Rc may have been freed
-                // We need to check if the player still exists and if the datum is still in the allocator
-                if let Some(player) = unsafe { PLAYER_OPT.as_mut() } {
-                    // Only proceed if the datum still exists in the allocator
-                    if player.allocator.datums.contains_key(id) {
-                        let ref_count = &mut **ref_count;
-                        *ref_count -= 1;
-                        if *ref_count <= 0 {
-                            player.allocator.on_datum_ref_dropped(*id);
-                        }
-                    } else {
-                        warn!("Attempted to drop DatumRef for non-existing DatumId: {}", id);
+                // During allocator reset, arena entries are being cleared one-by-one.
+                // Inner DatumRefs may point to already-freed entries, so bail out.
+                if ALLOCATOR_RESETTING {
+                    return;
+                }
+                // Normal operation: the ref_count pointer is always valid because
+                // a DatumRef can only exist while its datum is alive in the arena.
+                let rc = &mut **ref_count;
+                *rc -= 1;
+                if *rc == 0 {
+                    if let Some(player) = PLAYER_OPT.as_mut() {
+                        player.allocator.on_datum_ref_dropped(*id);
                     }
                 }
             }

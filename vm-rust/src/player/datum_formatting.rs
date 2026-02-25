@@ -168,6 +168,9 @@ pub fn format_concrete_datum(datum: &Datum, player: &DirPlayer) -> String {
         Datum::Media(_) => {
             format!("<media>")
         }
+        Datum::JavaScript(data) => {
+            format!("<javascript {} bytes>", data.len())
+        }
     }
 }
 

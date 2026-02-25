@@ -316,7 +316,7 @@ impl RenderedTextCacheKey {
             0
         };
 
-        // Hash alignment, font, and word_wrap settings
+        // Hash alignment, word_wrap, and font settings
         let mut settings_hasher = DefaultHasher::new();
         font_name.hash(&mut settings_hasher);
         let alignment_key = alignment.trim().trim_start_matches('#').to_ascii_lowercase();

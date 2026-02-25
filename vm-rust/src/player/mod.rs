@@ -3,6 +3,7 @@ pub mod bitmap;
 pub mod bytecode;
 pub mod cast_lib;
 pub mod cast_manager;
+pub mod ci_string;
 pub mod cast_member;
 pub mod commands;
 pub mod compare;
@@ -229,6 +230,21 @@ pub struct DirPlayer {
     pub current_score_context: ScoreRef,
     pub debug_datum_refs: Vec<DatumRef>,
     pub eval_scope_index: Option<u32>,
+    pub delay_until: Option<chrono::DateTime<chrono::Local>>,
+    /// Pending gotoNetMovie operation: (task_id, frame_destination).
+    /// Overwritten by subsequent gotoNetMovie/go-to-movie calls (cancels previous).
+    pub pending_goto_net_movie: Option<(u32, MovieFrameTarget)>,
+}
+
+/// Target frame for a movie transition (gotoNetMovie or go movie).
+#[derive(Clone)]
+pub enum MovieFrameTarget {
+    /// No specific frame — start at frame 1
+    Default,
+    /// Jump to a labeled frame (from URL #fragment or string arg)
+    Label(String),
+    /// Jump to a specific frame number
+Frame(u32),
 }
 
 impl DirPlayer {
@@ -339,6 +355,8 @@ impl DirPlayer {
             current_score_context: ScoreRef::Stage,
             debug_datum_refs: vec![],
             eval_scope_index: None,
+            delay_until: None,
+            pending_goto_net_movie: None,
         };
 
         result.reset();
@@ -414,186 +432,7 @@ impl DirPlayer {
         web_sys::console::log_1(&format!("Loading Movie: {} (version: {})", safe_string(&self.movie.file_name), self.movie.dir_version).into());
 
         async_std::task::spawn_local(async move {
-            // Relay prepareMovie to timeout targets
-            dispatch_system_event_to_timeouts(&"prepareMovie".to_string(), &vec![]).await;
-            
-            // 1. prepareMovie - sent to movie scripts
-            if let Err(err) = player_invoke_global_event(&"prepareMovie".to_string(), &vec![]).await {
-                reserve_player_mut(|player| player.on_script_error(&err));
-                return;
-            }
-            
-            player_wait_available().await;
-            
-            // Initialize sprites for the current frame
-            // begin_all_sprites handles both main score and film loops (with duplicate prevention)
-            reserve_player_mut(|player| {
-                player.movie.frame_script_instance = None;
-                player.begin_all_sprites();
-                player.movie.score.apply_tween_modifiers(player.movie.current_frame);
-            });
-
-            player_wait_available().await;
-
-            // Collect behaviors that need initialization
-            let behaviors_to_init: Vec<(ScriptInstanceRef, u32)> = reserve_player_mut(|player| {
-                player
-                    .movie
-                    .score
-                    .channels
-                    .iter()
-                    .flat_map(|ch| {
-                        let sprite_num = ch.sprite.number as u32;
-                        ch.sprite.script_instance_list
-                            .iter()
-                            .filter(|behavior_ref| {
-                                // ONLY initialize behaviors that haven't had beginSprite called
-                                // This means they're NEW this frame
-                                if let Some(entry) = player.allocator.script_instances.get(&behavior_ref.id()) {
-                                    !entry.script_instance.begin_sprite_called
-                                } else {
-                                    false
-                                }
-                            })
-                            .map(move |behavior_ref| (behavior_ref.clone(), sprite_num))
-                    })
-                    .collect()
-            });
-
-            // Initialize behavior default properties
-            for (behavior_ref, sprite_num) in behaviors_to_init {
-                if let Err(err) = Score::initialize_behavior_defaults_async(behavior_ref, sprite_num).await {
-                    web_sys::console::warn_1(
-                        &format!("Failed to initialize behavior defaults: {}", err.message).into()
-                    );
-                }
-            }
-
-            player_wait_available().await;
-
-            reserve_player_mut(|player| {
-                player.is_in_frame_update = true;
-            });
-
-            let begin_sprite_nums = player_dispatch_event_beginsprite(
-                &"beginSprite".to_string(),
-                &vec![]
-            ).await;
-
-            player_wait_available().await;
-
-            // Mark beginSprite as called for these behaviors
-            reserve_player_mut(|player| {
-                for sprite_list in begin_sprite_nums.iter() {
-                    for (score_source, sprite_num) in sprite_list.iter() {
-                        if let Some(sprite) = get_score_sprite_mut(
-                            &mut player.movie,
-                            score_source,
-                            *sprite_num as i16,
-                        ) {
-                            for script_ref in &sprite.script_instance_list {
-                                if let Some(entry) =
-                                    player.allocator.script_instances.get_mut(&script_ref.id())
-                                {
-                                    entry.script_instance.begin_sprite_called = true;
-                                }
-                            }
-                        }
-                    }
-                }
-            });
-            
-            player_wait_available().await;
-
-            // 3. Send stepFrame to actorList
-            let actor_list_snapshot = reserve_player_ref(|player| {
-                let actor_list_ref = player.globals.get("actorList").unwrap_or(&DatumRef::Void).clone();
-                let actor_list_datum = player.get_datum(&actor_list_ref);
-                match actor_list_datum {
-                    Datum::List(_, items, _) => items.clone(),
-                    _ => vec![],
-                }
-            });
-
-            for (idx, actor_ref) in actor_list_snapshot.iter().enumerate() {
-                let still_active = reserve_player_ref(|player| {
-                    let actor_list_ref = player.globals.get("actorList").unwrap_or(&DatumRef::Void).clone();
-                    let actor_list_datum = player.get_datum(&actor_list_ref);
-                    match actor_list_datum {
-                        Datum::List(_, items, _) => items.contains(&actor_ref),
-                        _ => false,
-                    }
-                });
-
-                if still_active {
-                    let result =
-                        player_call_datum_handler(&actor_ref, &"stepFrame".to_string(), &vec![]).await;
-
-                    if let Err(err) = result {
-                        web_sys::console::log_1(
-                            &format!("⚠ stepFrame[{}] error: {}", idx, err.message).into(),
-                        );
-                        reserve_player_mut(|player| {
-                            player.on_script_error(&err);
-                            player.is_in_frame_update = false;
-                        });
-                        return;
-                    }
-                }
-            }
-            
-            reserve_player_mut(|player| {
-                player.in_prepare_frame = true;
-            });
-            
-            // Relay prepareFrame to timeout targets
-            dispatch_system_event_to_timeouts(&"prepareFrame".to_string(), &vec![]).await;
-
-            // 4. prepareFrame - sent to sprite behaviors and then to frame behavior
-            let _ = dispatch_event_to_all_behaviors(&"prepareFrame".to_string(), &vec![]).await;
-            
-            reserve_player_mut(|player| {
-                player.in_prepare_frame = false;
-            });
-            
-            // Relay startMovie to timeout targets
-            dispatch_system_event_to_timeouts(&"startMovie".to_string(), &vec![]).await;
-
-            // 5. startMovie - sent to movie scripts in first frame
-            if let Err(err) = player_invoke_global_event(&"startMovie".to_string(), &vec![]).await {
-                reserve_player_mut(|player| player.on_script_error(&err));
-                return;
-            }
-            
-            player_wait_available().await;
-            
-            reserve_player_mut(|player| {
-                player.in_enter_frame = true;
-            });
-            
-            // 6. enterFrame - sent to sprite behaviors and then to frame behavior
-            let _ = dispatch_event_to_all_behaviors(&"enterFrame".to_string(), &vec![]).await;
-                       
-            reserve_player_mut(|player| {
-                player.in_enter_frame = false;
-            });
-            
-            player_wait_available().await;
-            
-            // Relay exitFrame to timeout targets
-            dispatch_system_event_to_timeouts(&"exitFrame".to_string(), &vec![]).await;
-
-            // 7. exitFrame - sent to sprite behaviors and then to frame behavior
-            let _ = dispatch_event_to_all_behaviors(&"exitFrame".to_string(), &vec![]).await;
-                      
-            player_wait_available().await;
-
-            reserve_player_mut(|player| {
-                player.is_in_frame_update = false;
-            });
-            
-            // Now start the frame loop which calls frame_update (stepFrame/prepareFrame/enterFrame)
-            // and after that exitFrame/endSprite/beginSprite
+            run_movie_init_sequence().await;
             run_frame_loop().await;
         });
     }
@@ -819,6 +658,7 @@ impl DirPlayer {
         }
     }
 
+    #[inline]
     pub fn get_datum(&self, id: &DatumRef) -> &Datum {
         self.allocator.get_datum(id)
     }
@@ -835,10 +675,10 @@ impl DirPlayer {
         }
     }
 
-    pub fn get_hydrated_globals(&self) -> FxHashMap<String, &Datum> {
+    pub fn get_hydrated_globals(&self) -> FxHashMap<&str, &Datum> {
         self.globals
             .iter()
-            .map(|(k, v)| (k.to_owned(), self.get_datum(v)))
+            .map(|(k, v)| (k.as_str(), self.get_datum(v)))
             .collect()
     }
 
@@ -923,6 +763,7 @@ impl DirPlayer {
         // TODO cancel breakpoints
         self.current_breakpoint = None;
         self.scope_count = 0;
+        self.pending_goto_net_movie = None;
 
         debug!("Resetting allocator");
         // Now it's safe to reset the allocator
@@ -979,6 +820,7 @@ impl DirPlayer {
         self.globals.insert("FALSE".to_string(), false_datum);
     }
 
+    #[inline]
     pub fn alloc_datum(&mut self, datum: Datum) -> DatumRef {
         return self.allocator.alloc_datum(datum).unwrap();
     }
@@ -1300,7 +1142,7 @@ impl DirPlayer {
                         // Find handler name by looking through the handlers map
                         let handler_name = script.handlers.iter()
                             .find(|(_, h)| h.name_id == scope.handler_name_id)
-                            .map(|(name, _)| name.clone())
+                            .map(|(name, _)| name.as_str().to_owned())
                             .unwrap_or_else(|| format!("handler_name_id#{}", scope.handler_name_id));
                         format!("{}::{}", script.name, handler_name)
                     } else {
@@ -1731,29 +1573,40 @@ pub async fn player_call_global_handler(
     }
 }
 
+#[inline(always)]
 pub fn reserve_player_ref<T, F>(callback: F) -> T
 where
     F: FnOnce(&DirPlayer) -> T,
 {
-    // let player_opt = PLAYER_LOCK.try_read().unwrap();
-    // let player = player_opt.as_ref().unwrap();
-    // callback(player)
     unsafe {
-        let player = PLAYER_OPT.as_ref().unwrap();
+        let player = PLAYER_OPT.as_ref().unwrap_unchecked();
         callback(player)
     }
 }
 
+#[inline(always)]
 pub fn reserve_player_mut<T, F>(callback: F) -> T
 where
     F: FnOnce(&mut DirPlayer) -> T,
 {
-    // let mut player_opt = PLAYER_LOCK.try_write().unwrap();
-    // let player = player_opt.as_mut().unwrap();
     unsafe {
-        let player = PLAYER_OPT.as_mut().unwrap();
+        let player = PLAYER_OPT.as_mut().unwrap_unchecked();
         callback(player)
     }
+}
+
+/// Direct reference access without closure overhead.
+/// Caller must ensure no mutable references exist.
+#[inline(always)]
+pub unsafe fn player_ref() -> &'static DirPlayer {
+    PLAYER_OPT.as_ref().unwrap_unchecked()
+}
+
+/// Direct mutable reference access without closure overhead.
+/// Caller must ensure no other references exist.
+#[inline(always)]
+pub unsafe fn player_mut() -> &'static mut DirPlayer {
+    PLAYER_OPT.as_mut().unwrap_unchecked()
 }
 
 fn reserve_player_mut_async<F, R>(callback: F) -> impl Future<Output = R>
@@ -1814,8 +1667,8 @@ pub async fn player_call_script_handler_raw_args(
         }
     });
 
-    let (scope_ref, handler_ptr, script_ptr) = reserve_player_mut(|player| {
-        let (script_ptr, handler_ptr, handler_name_id, script_type) = {
+    let (scope_ref, handler_ptr, script_ptr, names_ptr) = reserve_player_mut(|player| {
+        let (script_ptr, handler_ptr, handler_name_id, script_type, names_ptr) = {
             let script_rc = player
                 .movie
                 .cast_manager
@@ -1823,12 +1676,21 @@ pub async fn player_call_script_handler_raw_args(
                 .unwrap();
             let script = script_rc.as_ref();
             let script_ptr = script as *const Script;
+            let names_ptr = player
+                .movie
+                .cast_manager
+                .get_cast(script.member_ref.cast_lib as u32)
+                .unwrap()
+                .lctx
+                .as_ref()
+                .map(|lctx| &lctx.names as *const Vec<String>)
+                .unwrap();
             let handler = script.get_own_handler(&handler_name);
 
             if let Some(handler_rc) = handler {
                 let handler_name_id = handler_rc.name_id;
                 let handler_ptr: *const HandlerDef = handler_rc.as_ref();
-                Ok((script_ptr, handler_ptr, handler_name_id, script.script_type))
+                Ok((script_ptr, handler_ptr, handler_name_id, script.script_type, names_ptr))
             } else {
                 Err(ScriptError::new_code(
                     ScriptErrorCode::HandlerNotFound,
@@ -1868,13 +1730,14 @@ pub async fn player_call_script_handler_raw_args(
         let scope = player.scopes.get_mut(scope_ref).unwrap();
         scope.args.extend_from_slice(arg_list);
 
-        Ok((scope_ref, handler_ptr, script_ptr))
+        Ok((scope_ref, handler_ptr, script_ptr, names_ptr))
     })?;
 
     let ctx = BytecodeHandlerContext {
         scope_ref,
         handler_def_ptr: handler_ptr,
         script_ptr,
+        names_ptr,
     };
 
     // Trace handler entry if traceScript is enabled
@@ -1902,62 +1765,65 @@ pub async fn player_call_script_handler_raw_args(
     let mut should_return = false;
 
     loop {
-        let bytecode_index =
-            reserve_player_ref(|player| player.scopes.get(scope_ref).unwrap().bytecode_index);
-        // let profile_token = start_profiling(get_opcode_name(&bytecode.opcode));
-        // Check for explicit breakpoints first
-        if let Some(breakpoint) = reserve_player_ref(|player| {
-            player
-                .breakpoint_manager
-                .find_breakpoint_for_bytecode(
-                    unsafe { &(&*script_ptr).name },
-                    &handler_name,
-                    bytecode_index,
-                )
-                .cloned()
-        }) {
-            player_trigger_breakpoint(
-                breakpoint,
-                script_member_ref.to_owned(),
-                handler_ref.to_owned(),
-                bytecode_index,
-            )
-            .await;
-        }
-
-        // Check for step mode conditions (step into/over/out)
-        let should_step_break = reserve_player_ref(|player| {
-            match &player.step_mode {
-                StepMode::None => false,
-                StepMode::Into => true, // Always stop on step into
-                StepMode::IntoLine { skip_bytecode_indices } => {
-                    // Stop if bytecode index is not in skip list (follows into function calls)
-                    !skip_bytecode_indices.contains(&bytecode_index)
-                }
-                StepMode::Over => player.scope_count <= player.step_scope_depth, // Stop at same or higher scope
-                StepMode::OverLine { skip_bytecode_indices } => {
-                    // Stop if at same or higher scope AND bytecode index is not in skip list
-                    player.scope_count <= player.step_scope_depth
-                        && !skip_bytecode_indices.contains(&bytecode_index)
-                }
-                StepMode::Out => player.scope_count < player.step_scope_depth, // Stop when returned to higher scope
-            }
+        // Single player access to read bytecode_index and debugger state
+        let (bytecode_index, debugger_active) = reserve_player_ref(|player| {
+            let bi = player.scopes.get(scope_ref).unwrap().bytecode_index;
+            let debugging = !player.breakpoint_manager.breakpoints.is_empty()
+                || !matches!(player.step_mode, StepMode::None);
+            (bi, debugging)
         });
 
-        if should_step_break {
-            // Create a synthetic breakpoint for the step
-            let breakpoint = Breakpoint {
-                script_name: unsafe { (&*script_ptr).name.clone() },
-                handler_name: handler_name.clone(),
-                bytecode_index,
-            };
-            player_trigger_breakpoint(
-                breakpoint,
-                script_member_ref.to_owned(),
-                handler_ref.to_owned(),
-                bytecode_index,
-            )
-            .await;
+        // Only check breakpoints and step mode if the debugger is actually active
+        if debugger_active {
+            if let Some(breakpoint) = reserve_player_ref(|player| {
+                player
+                    .breakpoint_manager
+                    .find_breakpoint_for_bytecode(
+                        unsafe { &(&*script_ptr).name },
+                        &handler_name,
+                        bytecode_index,
+                    )
+                    .cloned()
+            }) {
+                player_trigger_breakpoint(
+                    breakpoint,
+                    script_member_ref.to_owned(),
+                    handler_ref.to_owned(),
+                    bytecode_index,
+                )
+                .await;
+            }
+
+            let should_step_break = reserve_player_ref(|player| {
+                match &player.step_mode {
+                    StepMode::None => false,
+                    StepMode::Into => true,
+                    StepMode::IntoLine { skip_bytecode_indices } => {
+                        !skip_bytecode_indices.contains(&bytecode_index)
+                    }
+                    StepMode::Over => player.scope_count <= player.step_scope_depth,
+                    StepMode::OverLine { skip_bytecode_indices } => {
+                        player.scope_count <= player.step_scope_depth
+                            && !skip_bytecode_indices.contains(&bytecode_index)
+                    }
+                    StepMode::Out => player.scope_count < player.step_scope_depth,
+                }
+            });
+
+            if should_step_break {
+                let breakpoint = Breakpoint {
+                    script_name: unsafe { (&*script_ptr).name.clone() },
+                    handler_name: handler_name.clone(),
+                    bytecode_index,
+                };
+                player_trigger_breakpoint(
+                    breakpoint,
+                    script_member_ref.to_owned(),
+                    handler_ref.to_owned(),
+                    bytecode_index,
+                )
+                .await;
+            }
         }
 
         let result = match player_execute_bytecode(&ctx).await {
@@ -2070,6 +1936,291 @@ pub async fn player_call_script_handler_raw_args(
     return Ok(scope);
 }
 
+/// Dispatch stopMovie events and end all sprites. Used by both `run_frame_loop`
+/// (when `is_playing` becomes false) and `transition_to_net_movie`.
+async fn stop_movie_sequence() {
+    dispatch_system_event_to_timeouts(&"stopMovie".to_string(), &vec![]).await;
+
+    reserve_player_mut(|player| {
+        player.timeout_manager.clear();
+    });
+
+    player_wait_available().await;
+
+    if let Err(err) = player_invoke_global_event(&"stopMovie".to_string(), &vec![]).await {
+        reserve_player_mut(|player| player.on_script_error(&err));
+    }
+
+    player_wait_available().await;
+
+    let ended_sprite_nums = reserve_player_mut_async(|player| {
+        Box::pin(async move { player.end_all_sprites().await })
+    }).await;
+
+    player_wait_available().await;
+
+    reserve_player_mut(|player| {
+        for (score_source, sprite_num) in ended_sprite_nums.iter() {
+            if let Some(sprite) = get_score_sprite_mut(
+                &mut player.movie, score_source, *sprite_num as i16
+            ) {
+                sprite.exited = true;
+            }
+        }
+    });
+
+    player_wait_available().await;
+}
+
+/// Run the movie initialization sequence: prepareMovie, beginSprite, behavior init,
+/// stepFrame, prepareFrame, startMovie, enterFrame, exitFrame.
+/// Shared by `play()` and `transition_to_net_movie`.
+async fn run_movie_init_sequence() {
+    // prepareMovie
+    dispatch_system_event_to_timeouts(&"prepareMovie".to_string(), &vec![]).await;
+
+    if let Err(err) = player_invoke_global_event(&"prepareMovie".to_string(), &vec![]).await {
+        reserve_player_mut(|player| player.on_script_error(&err));
+        return;
+    }
+
+    player_wait_available().await;
+
+    // Initialize sprites
+    reserve_player_mut(|player| {
+        player.movie.frame_script_instance = None;
+        player.begin_all_sprites();
+        player.movie.score.apply_tween_modifiers(player.movie.current_frame);
+    });
+
+    player_wait_available().await;
+
+    // Collect behaviors that need initialization
+    let behaviors_to_init: Vec<(ScriptInstanceRef, u32)> = reserve_player_mut(|player| {
+        player
+            .movie
+            .score
+            .channels
+            .iter()
+            .flat_map(|ch| {
+                let sprite_num = ch.sprite.number as u32;
+                ch.sprite.script_instance_list
+                    .iter()
+                    .filter(|behavior_ref| {
+                        if let Some(entry) = player.allocator.get_script_instance_entry(behavior_ref.id()) {
+                            !entry.script_instance.begin_sprite_called
+                        } else {
+                            false
+                        }
+                    })
+                    .map(move |behavior_ref| (behavior_ref.clone(), sprite_num))
+            })
+            .collect()
+    });
+
+    for (behavior_ref, sprite_num) in behaviors_to_init {
+        if let Err(err) = Score::initialize_behavior_defaults_async(behavior_ref, sprite_num).await {
+            web_sys::console::warn_1(
+                &format!("Failed to initialize behavior defaults: {}", err.message).into()
+            );
+        }
+    }
+
+    player_wait_available().await;
+
+    reserve_player_mut(|player| {
+        player.is_in_frame_update = true;
+    });
+
+    let begin_sprite_nums = player_dispatch_event_beginsprite(
+        &"beginSprite".to_string(),
+        &vec![]
+    ).await;
+
+    player_wait_available().await;
+
+    reserve_player_mut(|player| {
+        for sprite_list in begin_sprite_nums.iter() {
+            for (score_source, sprite_num) in sprite_list.iter() {
+                if let Some(sprite) = get_score_sprite_mut(
+                    &mut player.movie,
+                    score_source,
+                    *sprite_num as i16,
+                ) {
+                    for script_ref in &sprite.script_instance_list {
+                        if let Some(entry) =
+                            player.allocator.get_script_instance_entry_mut(script_ref.id())
+                        {
+                            entry.script_instance.begin_sprite_called = true;
+                        }
+                    }
+                }
+            }
+        }
+    });
+
+    player_wait_available().await;
+
+    // stepFrame to actorList
+    let actor_list_snapshot = reserve_player_ref(|player| {
+        let actor_list_ref = player.globals.get("actorList").unwrap_or(&DatumRef::Void).clone();
+        let actor_list_datum = player.get_datum(&actor_list_ref);
+        match actor_list_datum {
+            Datum::List(_, items, _) => items.clone(),
+            _ => vec![],
+        }
+    });
+
+    for (idx, actor_ref) in actor_list_snapshot.iter().enumerate() {
+        let still_active = reserve_player_ref(|player| {
+            let actor_list_ref = player.globals.get("actorList").unwrap_or(&DatumRef::Void).clone();
+            let actor_list_datum = player.get_datum(&actor_list_ref);
+            match actor_list_datum {
+                Datum::List(_, items, _) => items.contains(&actor_ref),
+                _ => false,
+            }
+        });
+
+        if still_active {
+            let result =
+                player_call_datum_handler(&actor_ref, &"stepFrame".to_string(), &vec![]).await;
+
+            if let Err(err) = result {
+                web_sys::console::log_1(
+                    &format!("⚠ stepFrame[{}] error: {}", idx, err.message).into(),
+                );
+                reserve_player_mut(|player| {
+                    player.on_script_error(&err);
+                    player.is_in_frame_update = false;
+                });
+                return;
+            }
+        }
+    }
+
+    reserve_player_mut(|player| {
+        player.in_prepare_frame = true;
+    });
+
+    dispatch_system_event_to_timeouts(&"prepareFrame".to_string(), &vec![]).await;
+    let _ = dispatch_event_to_all_behaviors(&"prepareFrame".to_string(), &vec![]).await;
+
+    reserve_player_mut(|player| {
+        player.in_prepare_frame = false;
+    });
+
+    // startMovie
+    dispatch_system_event_to_timeouts(&"startMovie".to_string(), &vec![]).await;
+
+    if let Err(err) = player_invoke_global_event(&"startMovie".to_string(), &vec![]).await {
+        reserve_player_mut(|player| player.on_script_error(&err));
+        return;
+    }
+
+    player_wait_available().await;
+
+    // enterFrame
+    reserve_player_mut(|player| {
+        player.in_enter_frame = true;
+    });
+
+    let _ = dispatch_event_to_all_behaviors(&"enterFrame".to_string(), &vec![]).await;
+
+    reserve_player_mut(|player| {
+        player.in_enter_frame = false;
+    });
+
+    player_wait_available().await;
+
+    // exitFrame
+    dispatch_system_event_to_timeouts(&"exitFrame".to_string(), &vec![]).await;
+    let _ = dispatch_event_to_all_behaviors(&"exitFrame".to_string(), &vec![]).await;
+
+    player_wait_available().await;
+
+    reserve_player_mut(|player| {
+        player.is_in_frame_update = false;
+    });
+}
+
+/// Perform the movie transition for gotoNetMovie.
+/// Called from within the frame loop when the pending fetch is complete.
+async fn transition_to_net_movie(task_id: u32, target: MovieFrameTarget) {
+    // 1. Parse the fetched movie data
+    let dir_file = reserve_player_mut(|player| {
+        let task = player.net_manager.get_task(task_id);
+        let data_result = player.net_manager.get_task_result(Some(task_id));
+
+        match (task, data_result) {
+            (Some(task), Some(Ok(data_bytes))) => {
+                let file_name = task.resolved_url
+                    .path_segments()
+                    .and_then(|segments| segments.last())
+                    .unwrap_or("untitled.dcr")
+                    .to_string();
+                let base_url = get_base_url(&task.resolved_url).to_string();
+                read_director_file_bytes(&data_bytes, &file_name, &base_url).ok()
+            }
+            _ => None,
+        }
+    });
+
+    let dir_file = match dir_file {
+        Some(f) => f,
+        None => {
+            log::warn!("gotoNetMovie: failed to parse movie data for task {}", task_id);
+            reserve_player_mut(|player| { player.pending_goto_net_movie = None; });
+            return;
+        }
+    };
+
+    // 2. Shutdown current movie
+    stop_movie_sequence().await;
+
+    // 3. Load the new movie data (preserving globals and allocator)
+    reserve_player_mut(|player| {
+        player.movie.score.reset();
+        player.movie.frame_script_instance = None;
+        player.movie.frame_script_member = None;
+        player.movie.current_frame = 1;
+        player.last_initialized_frame = None;
+
+        for scope in player.scopes.iter_mut() {
+            scope.reset();
+        }
+        player.scope_count = 0;
+    });
+
+    reserve_player_mut_async(|player| {
+        Box::pin(async move {
+            player.load_movie_from_dir(dir_file).await;
+        })
+    }).await;
+
+    // Apply frame target if specified
+    reserve_player_mut(|player| {
+        match &target {
+            MovieFrameTarget::Label(label) => {
+                let target_frame = player.movie.score.frame_labels
+                    .iter()
+                    .find(|fl| fl.label.eq_ignore_ascii_case(label))
+                    .map(|fl| fl.frame_num as u32);
+                if let Some(frame) = target_frame {
+                    player.movie.current_frame = frame;
+                }
+            }
+            MovieFrameTarget::Frame(frame) => {
+                player.movie.current_frame = *frame;
+            }
+            MovieFrameTarget::Default => {}
+        }
+        player.pending_goto_net_movie = None;
+    });
+
+    // 4. Run new movie initialization sequence
+    run_movie_init_sequence().await;
+}
+
 pub async fn run_frame_loop() {
     unsafe {
         let player = PLAYER_OPT.as_ref().unwrap();
@@ -2082,9 +2233,32 @@ pub async fn run_frame_loop() {
     let mut is_script_paused = false;
     let mut last_frame_time = chrono::Local::now();
     while is_playing {
+        // Check for pending gotoNetMovie completion
+        let goto_transition = reserve_player_ref(|player| {
+            if let Some((task_id, ref target)) = player.pending_goto_net_movie {
+                if player.net_manager.is_task_done(Some(task_id)) {
+                    Some((task_id, target.clone()))
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        });
+
+        if let Some((task_id, target)) = goto_transition {
+            transition_to_net_movie(task_id, target).await;
+            // After transition, refresh local state and continue the frame loop
+            (is_playing, is_script_paused) = reserve_player_ref(|player| {
+                (player.is_playing, player.is_script_paused)
+            });
+            last_frame_time = chrono::Local::now();
+            continue;
+        }
+
         if !is_script_paused {
             player_wait_available().await;
-            
+
             let update_result = MovieHandlers::execute_frame_update().await;
 
             reserve_player_mut(|player| {
@@ -2137,48 +2311,7 @@ pub async fn run_frame_loop() {
             }
         });
         if !is_playing {
-            // Movie stopped - send stopMovie event
-            player_wait_available().await;
-            
-            // Relay stopMovie to timeout targets
-            dispatch_system_event_to_timeouts(&"stopMovie".to_string(), &vec![]).await;
-
-            // clear timeouts
-            reserve_player_mut(|player| {
-                player.timeout_manager.clear();
-            });
-
-            player_wait_available().await;
-
-            // Send stopMovie
-            if let Err(err) = player_invoke_global_event(&"stopMovie".to_string(), &vec![]).await {
-                reserve_player_mut(|player| player.on_script_error(&err));
-                return;
-            }
-
-            player_wait_available().await;
-
-            // Send endSprite: Frame behaviors -> Sprite behaviors
-            let ended_sprite_nums = reserve_player_mut_async(|player| {
-                Box::pin(async move {
-                    player.end_all_sprites().await
-                })
-            }).await;
-
-            player_wait_available().await;
-
-            reserve_player_mut(|player| {
-                for (score_source, sprite_num) in ended_sprite_nums.iter() {
-                    // let sprite = player.movie.score.get_sprite_mut(*sprite_num as i16);
-                    if let Some(sprite) =
-                        get_score_sprite_mut(&mut player.movie, score_source, *sprite_num as i16)
-                    {
-                        sprite.exited = true;
-                    }
-                }
-            });
-
-            player_wait_available().await;
+            stop_movie_sequence().await;
             return;
         }
         if new_frame > 1 && prev_frame <= 1 {
@@ -2197,8 +2330,22 @@ pub async fn run_frame_loop() {
             }
         }
 
-        // Only advance frame if enough time has passed AND not paused
-        if should_advance_frame && !is_script_paused {
+        // Check if delay() is in effect
+        let is_delayed = reserve_player_mut(|player| {
+            if let Some(until) = player.delay_until {
+                if chrono::Local::now() < until {
+                    true
+                } else {
+                    player.delay_until = None;
+                    false
+                }
+            } else {
+                false
+            }
+        });
+
+        // Only advance frame if enough time has passed AND not paused AND not delayed
+        if should_advance_frame && !is_script_paused && !is_delayed {
             let (has_player_frame_changed, has_frame_changed_in_go, go_direction) =
                 reserve_player_ref(|player| {
                     (
@@ -2346,7 +2493,7 @@ pub async fn run_frame_loop() {
                             .filter(|behavior_ref| {
                                 // ONLY initialize behaviors that haven't had beginSprite called
                                 // This means they're NEW this frame
-                                if let Some(entry) = player.allocator.script_instances.get(&behavior_ref.id()) {
+                                if let Some(entry) = player.allocator.get_script_instance_entry(behavior_ref.id()) {
                                     !entry.script_instance.begin_sprite_called
                                 } else {
                                     false
@@ -2356,7 +2503,7 @@ pub async fn run_frame_loop() {
                     })
                     .collect()
             });
-            
+
             // Initialize behavior default properties
             for (behavior_ref, sprite_num) in behaviors_to_init {
                 if let Err(err) = Score::initialize_behavior_defaults_async(behavior_ref, sprite_num).await {
@@ -2389,7 +2536,7 @@ pub async fn run_frame_loop() {
                         ) {
                             for script_ref in &sprite.script_instance_list {
                                 if let Some(entry) =
-                                    player.allocator.script_instances.get_mut(&script_ref.id())
+                                    player.allocator.get_script_instance_entry_mut(script_ref.id())
                                 {
                                     entry.script_instance.begin_sprite_called = true;
                                 }
@@ -2518,7 +2665,7 @@ pub fn init_player() {
 
 fn get_active_static_script_refs<'a>(
     movie: &'a Movie,
-    globals: &'a FxHashMap<String, &'a Datum>,
+    globals: &'a FxHashMap<&str, &'a Datum>,
 ) -> Vec<CastMemberRef> {
     let frame_script = movie.score.get_script_in_frame(movie.current_frame);
     let movie_scripts = movie.cast_manager.get_movie_scripts();
