@@ -23,7 +23,7 @@ use crate::player::{
     bitmap::drawing::CopyPixelsParams,
     cast_lib::CastMemberRef,
     cast_member::CastMemberType,
-    font::{measure_text, measure_text_wrapped, get_glyph_preference, GlyphPreference, BitmapFont},
+    font::{bitmap_font_copy_char, measure_text, measure_text_wrapped, get_glyph_preference, GlyphPreference, BitmapFont},
     geometry::IntRect,
     handlers::datum_handlers::cast_member::font::{FontMemberHandlers, StyledSpan, HtmlStyle, TextAlignment},
     score::{get_concrete_sprite_rect, get_sprite_at, ScoreRef},
@@ -72,6 +72,8 @@ pub struct WebGL2Renderer {
     solid_color_textures: HashMap<(u8, u8, u8), web_sys::WebGlTexture>,
     /// Current preview member reference
     preview_member_ref: Option<CastMemberRef>,
+    /// Preview font size override
+    pub preview_font_size: Option<u16>,
     /// Preview container element
     preview_container_element: Option<web_sys::HtmlElement>,
     /// Rendered text texture cache
@@ -145,6 +147,7 @@ impl WebGL2Renderer {
             debug_selected_channel_num: None,
             solid_color_textures: HashMap::new(),
             preview_member_ref: None,
+            preview_font_size: None,
             preview_container_element: None,
             rendered_text_cache: RenderedTextCache::new(),
             last_palette_version: 0,
@@ -3838,137 +3841,26 @@ impl WebGL2Renderer {
             return;
         }
 
-        let member_ref = self.preview_member_ref.as_ref().unwrap();
-        let member = player.movie.cast_manager.find_member_by_ref(member_ref);
-        if member.is_none() {
-            return;
-        }
-        let member = member.unwrap();
+        let member_ref = self.preview_member_ref.as_ref().unwrap().clone();
+        let bitmap = crate::rendering::render_preview_bitmap(player, &member_ref, self.preview_font_size);
+        if let Some(bitmap) = bitmap {
+            let width = bitmap.width as u32;
+            let height = bitmap.height as u32;
 
-        match &member.member_type {
-            CastMemberType::Bitmap(sprite_member) => {
-                let sprite_bitmap = player.bitmap_manager.get_bitmap(sprite_member.image_ref);
-                if sprite_bitmap.is_none() {
-                    return;
-                }
-                let sprite_bitmap = sprite_bitmap.unwrap();
-                let width = sprite_bitmap.width as u32;
-                let height = sprite_bitmap.height as u32;
-
-                // Create a 32-bit bitmap for display
-                let mut bitmap = Bitmap::new(
-                    width as u16,
-                    height as u16,
-                    32,
-                    32,
-                    0,
-                    PaletteRef::BuiltIn(get_system_default_palette()),
-                );
-
-                let palettes = &player.movie.cast_manager.palettes();
-
-                // Fill with background color
-                bitmap.fill_relative_rect(
-                    0,
-                    0,
-                    0,
-                    0,
-                    resolve_color_ref(
-                        &palettes,
-                        &player.bg_color,
-                        &PaletteRef::BuiltIn(get_system_default_palette()),
-                        sprite_bitmap.original_bit_depth,
-                    ),
-                    palettes,
-                    1.0,
-                );
-
-                // Copy the sprite bitmap
-                bitmap.copy_pixels(
-                    &palettes,
-                    sprite_bitmap,
-                    crate::player::geometry::IntRect::from(
-                        0,
-                        0,
-                        sprite_bitmap.width as i32,
-                        sprite_bitmap.height as i32,
-                    ),
-                    crate::player::geometry::IntRect::from(
-                        0,
-                        0,
-                        sprite_bitmap.width as i32,
-                        sprite_bitmap.height as i32,
-                    ),
-                    &HashMap::new(),
-                    None,
-                );
-
-                // Mark registration point with magenta
-                bitmap.set_pixel(
-                    sprite_member.reg_point.0 as i32,
-                    sprite_member.reg_point.1 as i32,
-                    (255, 0, 255),
-                    palettes,
-                );
-
-                // Update preview size if needed
-                if self.preview_size.0 != width || self.preview_size.1 != height {
-                    self.set_preview_size(width, height);
-                }
-
-                // Render to canvas using ImageData
-                let slice_data = Clamped(bitmap.data.as_slice());
-                let image_data = web_sys::ImageData::new_with_u8_clamped_array_and_sh(
-                    slice_data,
-                    width,
-                    height,
-                );
-
-                if let Ok(image_data) = image_data {
-                    let _ = self.preview_ctx2d.put_image_data(&image_data, 0.0, 0.0);
-                }
+            if self.preview_size.0 != width || self.preview_size.1 != height {
+                self.set_preview_size(width, height);
             }
-            CastMemberType::FilmLoop(loop_member) => {
-                let width = loop_member.info.width as u32;
-                let height = loop_member.info.height as u32;
 
-                // Create a bitmap for the film loop
-                let mut bitmap = Bitmap::new(
-                    width as u16,
-                    height as u16,
-                    32,
-                    32,
-                    0,
-                    PaletteRef::BuiltIn(get_system_default_palette()),
-                );
+            let slice_data = Clamped(bitmap.data.as_slice());
+            let image_data = web_sys::ImageData::new_with_u8_clamped_array_and_sh(
+                slice_data,
+                width,
+                height,
+            );
 
-                // Render the film loop score to bitmap
-                crate::rendering::render_score_to_bitmap(
-                    player,
-                    &ScoreRef::FilmLoop(member_ref.clone()),
-                    &mut bitmap,
-                    None,
-                    crate::player::geometry::IntRect::from_size(0, 0, width as i32, height as i32),
-                );
-
-                // Update preview size if needed
-                if self.preview_size.0 != width || self.preview_size.1 != height {
-                    self.set_preview_size(width, height);
-                }
-
-                // Render to canvas using ImageData
-                let slice_data = Clamped(bitmap.data.as_slice());
-                let image_data = web_sys::ImageData::new_with_u8_clamped_array_and_sh(
-                    slice_data,
-                    width,
-                    height,
-                );
-
-                if let Ok(image_data) = image_data {
-                    let _ = self.preview_ctx2d.put_image_data(&image_data, 0.0, 0.0);
-                }
+            if let Ok(image_data) = image_data {
+                let _ = self.preview_ctx2d.put_image_data(&image_data, 0.0, 0.0);
             }
-            _ => {}
         }
     }
 
@@ -4029,5 +3921,13 @@ impl super::Renderer for WebGL2Renderer {
 
     fn set_preview_container_element(&mut self, container_element: Option<web_sys::HtmlElement>) {
         WebGL2Renderer::set_preview_container_element(self, container_element)
+    }
+
+    fn set_preview_font_size(&mut self, size: Option<u16>) {
+        self.preview_font_size = size;
+    }
+
+    fn preview_font_size(&self) -> Option<u16> {
+        self.preview_font_size
     }
 }

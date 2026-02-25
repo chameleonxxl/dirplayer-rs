@@ -535,7 +535,18 @@ pub async fn run_player_command(command: PlayerVMCommand) -> Result<DatumRef, Sc
                 let script = script?;
                 let handler = script.get_own_handler_ref(&handler_name.to_lowercase())?;
 
-                Some((None, handler, vec![]))
+                // Try to get the handler
+                let handler = script.get_own_handler_ref(&handler_name);
+                
+                // ADD THIS CHECK:
+                if handler.is_none() {
+                    debug!("⚠️  Handler '{}' NOT FOUND in script {}", handler_name, script_id);
+                    return None;
+                }
+                
+                debug!("✓ Handler '{}' found!", handler_name);
+                
+                Some((None, handler.unwrap(), vec![]))
             });
 
             if let Some((receiver, handler, args)) = cast_member_script_call {

@@ -322,6 +322,7 @@ impl RenderedTextCacheKey {
         let alignment_key = alignment.trim().trim_start_matches('#').to_ascii_lowercase();
         alignment_key.hash(&mut settings_hasher);
         word_wrap.hash(&mut settings_hasher);
+        font_name.hash(&mut settings_hasher);
         font_size.hash(&mut settings_hasher);
         font_style.hash(&mut settings_hasher);
         line_spacing.hash(&mut settings_hasher);
