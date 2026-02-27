@@ -1,5 +1,5 @@
 use fxhash::FxHashMap;
-use log::warn;
+use log::{warn, debug};
 use std::cell::Cell;
 use std::rc::Rc;
 use wasm_bindgen::JsCast;
@@ -261,10 +261,10 @@ impl FontManager {
             }
         }
 
-        web_sys::console::warn_1(&format!(
+        warn!(
             "[font] No PFR re-rasterization match for '{}' at size {}",
             font_name, requested_size,
-        ).into());
+        );
 
         // Fallback: try default embedded PFR fonts
         if requested_size > 0 {

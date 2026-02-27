@@ -6,6 +6,7 @@ use crate::{
         bitmap::{
             bitmap::{resolve_color_ref, BuiltInPalette, PaletteRef},
             manager::BitmapRef,
+            mask::BitmapMask,
         },
         geometry::IntRect,
         player_duplicate_datum, reserve_player_mut, DatumRef, DirPlayer, ScriptError,
@@ -266,15 +267,15 @@ impl BitmapDatumHandlers {
                         .ok_or_else(|| ScriptError::new("Invalid bitmap reference".to_string()))?;
 
                     // Copy alpha values from the 8-bit image to the alpha channel of the 32-bit image
-                    // For 8-bit images, each byte is a grayscale value that we use as alpha
+                    // For 8-bit palette-indexed images, use raw byte value (palette index) as alpha.
+                    // In systemMac palette: index 0 = white (bg), index 255 = black (fg).
+                    // Director's setAlpha uses raw palette indices as alpha values directly.
                     for y in 0..height {
                         for x in 0..width {
-                            let alpha_idx = (y as usize * width as usize + x as usize) * 4;
+                            let alpha_idx = y as usize * width as usize + x as usize; // 1 byte per pixel for 8-bit
                             let dst_idx = (y as usize * width as usize + x as usize) * 4 + 3;
 
                             if alpha_idx < alpha_data.len() && dst_idx < bitmap.data.len() {
-                                // Use the red channel of the alpha image as the alpha value
-                                // (since it's grayscale, R=G=B)
                                 bitmap.data[dst_idx] = alpha_data[alpha_idx];
                             }
                         }
@@ -532,6 +533,28 @@ impl BitmapDatumHandlers {
                         let value = player.get_datum(value).clone();
                         param_list_concrete.insert(key, value);
                     }
+                }
+            }
+
+            // Pre-convert BitmapRef maskImage to BitmapMask
+            // Director's #maskImage param accepts a bitmap where white=transparent, black=opaque
+            if let Some(Datum::BitmapRef(mask_ref)) = param_list_concrete.get("maskImage") {
+                let mask_ref = *mask_ref;
+                if let Some(mask_bitmap) = player.bitmap_manager.get_bitmap(mask_ref) {
+                    let palettes = player.movie.cast_manager.palettes();
+                    let w = mask_bitmap.width;
+                    let h = mask_bitmap.height;
+                    let mut mask = BitmapMask::new(w, h, false);
+                    for y in 0..h {
+                        for x in 0..w {
+                            let (r, g, b) = mask_bitmap.get_pixel_color(&palettes, x, y);
+                            let luminance = (r as u16 + g as u16 + b as u16) / 3;
+                            if luminance <= 128 {
+                                mask.set_bit(x, y, true);
+                            }
+                        }
+                    }
+                    param_list_concrete.insert("maskImage".to_string(), Datum::Matte(std::sync::Arc::new(mask)));
                 }
             }
 

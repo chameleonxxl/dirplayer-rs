@@ -567,10 +567,10 @@ impl FontMemberHandlers {
                     .map(|m| m.width())
                     .unwrap_or_else(|_| token_text.chars().count() as f64 * (style.size_px * 0.55));
 
-                if line.width + token_width > wrap_width
-                    && !line.segments.is_empty()
-                    && !is_whitespace
-                {
+                let would_overflow = line.width + token_width > wrap_width;
+                let will_wrap = would_overflow && !line.segments.is_empty() && !is_whitespace;
+
+                if will_wrap {
                     lines_out.push(std::mem::take(line));
                 }
 
