@@ -264,6 +264,12 @@ pub async fn run_player_command(command: PlayerVMCommand) -> Result<DatumRef, Sc
                 let any_sprite = get_sprite_at(player, x, y, false);
                 if let Some(sprite_number) = any_sprite {
                     player.click_on_sprite = sprite_number as i16;
+                    // Capture drag offset for moveable sprites (so sprite doesn't jump to cursor)
+                    if let Some(sprite) = player.movie.score.get_sprite(sprite_number as i16) {
+                        if sprite.moveable {
+                            player.drag_offset = (sprite.loc_h - x, sprite.loc_v - y);
+                        }
+                    }
                     let sprite = player.movie.score.get_sprite(sprite_number as i16);
                     let sprite_member = sprite
                         .and_then(|x| x.member.as_ref())
@@ -276,6 +282,30 @@ pub async fn run_player_command(command: PlayerVMCommand) -> Result<DatumRef, Sc
                                 }
                             }
                             _ => {}
+                        }
+                    }
+
+                    // Toggle hilite for button members on mouseDown
+                    if let Some(sprite) = player.movie.score.get_sprite(sprite_number as i16) {
+                        if let Some(member_ref) = sprite.member.clone() {
+                            if let Some(member) = player.movie.cast_manager.find_mut_member_by_ref(&member_ref) {
+                                match &mut member.member_type {
+                                    CastMemberType::Button(button) => {
+                                        match button.button_type {
+                                            crate::player::cast_member::ButtonType::PushButton => {
+                                                button.hilite = true;
+                                            }
+                                            crate::player::cast_member::ButtonType::CheckBox => {
+                                                button.hilite = !button.hilite;
+                                            }
+                                            crate::player::cast_member::ButtonType::RadioButton => {
+                                                button.hilite = true;
+                                            }
+                                        }
+                                    }
+                                    _ => {}
+                                }
+                            }
                         }
                     }
                 } else {
@@ -437,6 +467,22 @@ pub async fn run_player_command(command: PlayerVMCommand) -> Result<DatumRef, Sc
                 player.mouse_loc = (x, y);
                 player.movie.mouse_down = false;
                 let sprite_num_to_notify = player.mouse_down_sprite;
+
+                // Reset hilite for push buttons on mouseUp
+                if player.mouse_down_sprite > 0 {
+                    if let Some(sprite) = player.movie.score.get_sprite(player.mouse_down_sprite) {
+                        if let Some(member_ref) = sprite.member.clone() {
+                            if let Some(member) = player.movie.cast_manager.find_mut_member_by_ref(&member_ref) {
+                                if let CastMemberType::Button(button) = &mut member.member_type {
+                                    if button.button_type == crate::player::cast_member::ButtonType::PushButton {
+                                        button.hilite = false;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
                 let sprite = if player.mouse_down_sprite > 0 {
                     player.movie.score.get_sprite(player.mouse_down_sprite)
                 } else {
@@ -572,6 +618,18 @@ pub async fn run_player_command(command: PlayerVMCommand) -> Result<DatumRef, Sc
             }
             let (sprite_num, hovered_sprite) = reserve_player_mut(|player| {
                 player.mouse_loc = (x, y);
+
+                // Drag moveable sprites (use click_on_sprite, not mouse_down_sprite,
+                // since moveable sprites don't need scripts to be draggable)
+                if player.movie.mouse_down && player.click_on_sprite > 0 {
+                    let drag_sprite_num = player.click_on_sprite;
+                    let (off_x, off_y) = player.drag_offset;
+                    let sprite = player.movie.score.get_sprite_mut(drag_sprite_num);
+                    if sprite.moveable {
+                        sprite.loc_h = x + off_x;
+                        sprite.loc_v = y + off_y;
+                    }
+                }
 
                 let hovered_sprite = player.hovered_sprite;
                 let sprite_num = get_sprite_at(player, x, y, false);

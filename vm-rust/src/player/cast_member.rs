@@ -72,6 +72,40 @@ pub struct FieldMember {
     pub back_color: Option<ColorRef>,  // From FieldInfo bg RGB (& 0xff)
 }
 
+#[derive(Clone, Debug, PartialEq)]
+pub enum ButtonType {
+    PushButton = 0,
+    CheckBox = 1,
+    RadioButton = 2,
+}
+
+impl ButtonType {
+    pub fn from_raw(value: u16) -> ButtonType {
+        match value {
+            1 => ButtonType::CheckBox,
+            2 => ButtonType::RadioButton,
+            _ => ButtonType::PushButton,
+        }
+    }
+
+    pub fn symbol_string(&self) -> &str {
+        match self {
+            ButtonType::PushButton => "pushButton",
+            ButtonType::CheckBox => "checkBox",
+            ButtonType::RadioButton => "radioButton",
+        }
+    }
+}
+
+#[derive(Clone)]
+pub struct ButtonMember {
+    pub field: FieldMember,
+    pub button_type: ButtonType,
+    pub hilite: bool,
+    pub script_id: u32,
+    pub member_script_ref: Option<CastMemberRef>,
+}
+
 #[derive(Clone)]
 pub struct TextMember {
     pub text: String,
@@ -246,6 +280,38 @@ pub struct PaletteMember {
     pub colors: Vec<(u8, u8, u8)>,
 }
 
+#[derive(Clone, Debug)]
+pub struct VectorShapeVertex {
+    pub x: f32,
+    pub y: f32,
+    pub handle1_x: f32,  // outgoing control point offset
+    pub handle1_y: f32,
+    pub handle2_x: f32,  // incoming control point offset
+    pub handle2_y: f32,
+}
+
+#[derive(Clone, Debug)]
+pub struct VectorShapeMember {
+    pub stroke_color: (u8, u8, u8),
+    pub fill_color: (u8, u8, u8),
+    pub bg_color: (u8, u8, u8),
+    pub end_color: (u8, u8, u8),
+    pub stroke_width: f32,
+    pub fill_mode: u32,     // 0=none, 1=solid, 2=gradient
+    pub closed: bool,
+    pub vertices: Vec<VectorShapeVertex>,
+    /// Bounding box computed from vertices + control points + stroke padding
+    pub bbox_left: f32,
+    pub bbox_top: f32,
+    pub bbox_right: f32,
+    pub bbox_bottom: f32,
+}
+
+impl VectorShapeMember {
+    pub fn width(&self) -> f32 { self.bbox_right - self.bbox_left }
+    pub fn height(&self) -> f32 { self.bbox_bottom - self.bbox_top }
+}
+
 #[derive(Clone)]
 pub struct ShapeMember {
     pub shape_info: ShapeInfo,
@@ -306,10 +372,12 @@ pub struct FontMember {
 pub enum CastMemberType {
     Field(FieldMember),
     Text(TextMember),
+    Button(ButtonMember),
     Script(ScriptMember),
     Bitmap(BitmapMember),
     Palette(PaletteMember),
     Shape(ShapeMember),
+    VectorShape(VectorShapeMember),
     FilmLoop(FilmLoopMember),
     Sound(SoundMember),
     Font(FontMember),
@@ -321,10 +389,12 @@ pub enum CastMemberType {
 pub enum CastMemberTypeId {
     Field,
     Text,
+    Button,
     Script,
     Bitmap,
     Palette,
     Shape,
+    VectorShape,
     FilmLoop,
     Sound,
     Font,
@@ -341,6 +411,9 @@ impl fmt::Debug for CastMemberType {
             Self::Text(_) => {
                 write!(f, "Text")
             }
+            Self::Button(_) => {
+                write!(f, "Button")
+            }
             Self::Script(_) => {
                 write!(f, "Script")
             }
@@ -352,6 +425,9 @@ impl fmt::Debug for CastMemberType {
             }
             Self::Shape(_) => {
                 write!(f, "Shape")
+            }
+            Self::VectorShape(_) => {
+                write!(f, "VectorShape")
             }
             Self::FilmLoop(_) => {
                 write!(f, "FilmLoop")
@@ -377,10 +453,12 @@ impl CastMemberTypeId {
         return match self {
             Self::Field => Ok("field"),
             Self::Text => Ok("text"),
+            Self::Button => Ok("button"),
             Self::Script => Ok("script"),
             Self::Bitmap => Ok("bitmap"),
             Self::Palette => Ok("palette"),
             Self::Shape => Ok("shape"),
+            Self::VectorShape => Ok("vectorShape"),
             Self::FilmLoop => Ok("filmLoop"),
             Self::Sound => Ok("sound"),
             Self::Font => Ok("font"),
@@ -395,10 +473,12 @@ impl CastMemberType {
         return match self {
             Self::Field(_) => CastMemberTypeId::Field,
             Self::Text(_) => CastMemberTypeId::Text,
+            Self::Button(_) => CastMemberTypeId::Button,
             Self::Script(_) => CastMemberTypeId::Script,
             Self::Bitmap(_) => CastMemberTypeId::Bitmap,
             Self::Palette(_) => CastMemberTypeId::Palette,
             Self::Shape(_) => CastMemberTypeId::Shape,
+            Self::VectorShape(_) => CastMemberTypeId::VectorShape,
             Self::FilmLoop(_) => CastMemberTypeId::FilmLoop,
             Self::Sound(_) => CastMemberTypeId::Sound,
             Self::Font(_) => CastMemberTypeId::Font,
@@ -411,10 +491,12 @@ impl CastMemberType {
         return match self {
             Self::Field(_) => "field",
             Self::Text(_) => "text",
+            Self::Button(_) => "button",
             Self::Script(_) => "script",
             Self::Bitmap(_) => "bitmap",
             Self::Palette(_) => "palette",
             Self::Shape(_) => "shape",
+            Self::VectorShape(_) => "vectorShape",
             Self::FilmLoop(_) => "filmLoop",
             Self::Sound(_) => "sound",
             Self::Font(_) => "font",
@@ -455,6 +537,20 @@ impl CastMemberType {
     pub fn as_text_mut(&mut self) -> Option<&mut TextMember> {
         return match self {
             Self::Text(data) => Some(data),
+            _ => None,
+        };
+    }
+
+    pub fn as_button(&self) -> Option<&ButtonMember> {
+        return match self {
+            Self::Button(data) => Some(data),
+            _ => None,
+        };
+    }
+
+    pub fn as_button_mut(&mut self) -> Option<&mut ButtonMember> {
+        return match self {
+            Self::Button(data) => Some(data),
             _ => None,
         };
     }
@@ -717,12 +813,14 @@ impl CastMember {
         number: u32,
         bitmap_manager: &mut BitmapManager,
     ) -> BitmapRef {
-        let abmp_chunk = member_def.children.get(0).and_then(|x| x.as_ref());
+        // Search all children for the first Bitmap(BITD) chunk
+        // (it may not be at index 0 — other slots can be None or other chunk types)
+        let bitd_chunk = member_def.children.iter()
+            .find_map(|c| c.as_ref().and_then(|chunk| chunk.as_bitmap()));
 
-        if let Some(abmp_chunk) = abmp_chunk {
-            let abmp_chunk = abmp_chunk.as_bitmap().unwrap();
+        if let Some(bitd_chunk) = bitd_chunk {
             let decompressed =
-                decompress_bitmap(&abmp_chunk.data, &bitmap_info, cast_lib, abmp_chunk.version);
+                decompress_bitmap(&bitd_chunk.data, &bitmap_info, cast_lib, bitd_chunk.version);
             match decompressed {
                 Ok(new_bitmap) => bitmap_manager.add_bitmap(new_bitmap),
                 Err(e) => {
@@ -971,6 +1069,275 @@ impl CastMember {
         None
     }
 
+    /// Try to parse OLE specific_data_raw as a vectorShape member.
+    /// Format: 4-byte BE string length + "vectorShape" + 4-byte FLSH size + "FLSH" fourCC + 4-byte size + payload
+    fn try_parse_vector_shape(raw: &[u8], number: u32, chunk: &CastMemberChunk) -> Option<CastMember> {
+        if raw.len() < 15 {
+            return None;
+        }
+        // Read length-prefixed type string
+        let str_len = u32::from_be_bytes([raw[0], raw[1], raw[2], raw[3]]) as usize;
+        if str_len == 0 || raw.len() < 4 + str_len {
+            return None;
+        }
+        let type_str = std::str::from_utf8(&raw[4..4 + str_len]).ok()?;
+        if type_str != "vectorShape" {
+            return None;
+        }
+
+        // Parse FLSH block: after type string, we have 4-byte size + "FLSH" fourCC + payload
+        let flsh_start = 4 + str_len;
+        if raw.len() < flsh_start + 8 {
+            debug!("OLE member #{}: vectorShape too short for FLSH header", number);
+            return None;
+        }
+        let flsh_fourcc = &raw[flsh_start + 4..flsh_start + 8];
+        if flsh_fourcc != b"FLSH" {
+            debug!("OLE member #{}: vectorShape missing FLSH fourCC", number);
+            return None;
+        }
+
+        // FLSH payload starts after: 4-byte size + "FLSH" = 8 bytes
+        // (the size field covers everything from "FLSH" onwards)
+        let payload = &raw[flsh_start + 8..];
+        let vector_member = Self::parse_flsh_payload(payload);
+
+        web_sys::console::log_1(
+            &format!(
+                "OLE member #{} identified as vectorShape: {} vertices, strokeWidth={}, fillMode={}, closed={}, bbox=({},{},{},{})",
+                number,
+                vector_member.vertices.len(),
+                vector_member.stroke_width,
+                vector_member.fill_mode,
+                vector_member.closed,
+                vector_member.bbox_left, vector_member.bbox_top,
+                vector_member.bbox_right, vector_member.bbox_bottom,
+            ).into(),
+        );
+
+        Some(CastMember {
+            number,
+            name: chunk
+                .member_info
+                .as_ref()
+                .map(|x| x.name.to_owned())
+                .unwrap_or_default(),
+            member_type: CastMemberType::VectorShape(vector_member),
+            color: ColorRef::PaletteIndex(255),
+            bg_color: ColorRef::PaletteIndex(0),
+        })
+    }
+
+    /// Parse the FLSH payload into VectorShapeMember.
+    /// Fixed header (160 bytes) + 4 colors (64 bytes) + vertex list.
+    fn parse_flsh_payload(data: &[u8]) -> VectorShapeMember {
+        let read_u32 = |off: usize| -> u32 {
+            if off + 4 <= data.len() {
+                u32::from_be_bytes([data[off], data[off + 1], data[off + 2], data[off + 3]])
+            } else {
+                0
+            }
+        };
+        let read_f32 = |off: usize| -> f32 {
+            if off + 4 <= data.len() {
+                f32::from_be_bytes([data[off], data[off + 1], data[off + 2], data[off + 3]])
+            } else {
+                0.0
+            }
+        };
+
+        // Fixed header fields
+        let num_vertices = read_u32(100) as usize;
+        let closed = read_u32(112) != 0;
+        let fill_mode = read_u32(124);
+        let stroke_width = read_f32(128);
+
+        // 4 colors starting at offset 160, each: 4-byte marker (0x12) + 3x 4-byte RGB
+        let parse_color = |base: usize| -> (u8, u8, u8) {
+            let r = read_u32(base + 4) as u8;
+            let g = read_u32(base + 8) as u8;
+            let b = read_u32(base + 12) as u8;
+            (r, g, b)
+        };
+        let stroke_color = parse_color(160);
+        let fill_color = parse_color(176);
+        let bg_color = parse_color(192);
+        let end_color = parse_color(208);
+
+        // Vertex list starts at offset 224
+        // Format: 4-byte list type (0x07) + 4-byte numVertices
+        // Then per-vertex entries, each prefixed by: entry_type(4) + item_count(4)
+        let mut vertices = Vec::with_capacity(num_vertices);
+        let mut pos = 224 + 8; // skip list marker + count
+
+        for i in 0..num_vertices {
+            if pos + 8 > data.len() {
+                break;
+            }
+
+            // ALL vertices have an entry header: type(4) + item_count(4)
+            // (0x0A = property list, 0x03 = 3 items: vertex, handle1, handle2)
+            pos += 8;
+
+            if i == 0 {
+                // First vertex uses string keys: type(4) + strlen(4) + string + datasize(4) + data(8)
+                let vertex = Self::parse_string_keyed_point(data, &mut pos);
+                let handle1 = Self::parse_string_keyed_point(data, &mut pos);
+                let handle2 = Self::parse_string_keyed_point(data, &mut pos);
+
+                vertices.push(VectorShapeVertex {
+                    x: vertex.0 as f32,
+                    y: vertex.1 as f32,
+                    handle1_x: handle1.0 as f32,
+                    handle1_y: handle1.1 as f32,
+                    handle2_x: handle2.0 as f32,
+                    handle2_y: handle2.1 as f32,
+                });
+            } else {
+                // Subsequent vertices use hash keys: type(4) + hash(4) + datasize(4) + data(8)
+                let vertex = Self::parse_hash_keyed_point(data, &mut pos);
+                let handle1 = Self::parse_hash_keyed_point(data, &mut pos);
+                let handle2 = Self::parse_hash_keyed_point(data, &mut pos);
+
+                vertices.push(VectorShapeVertex {
+                    x: vertex.0 as f32,
+                    y: vertex.1 as f32,
+                    handle1_x: handle1.0 as f32,
+                    handle1_y: handle1.1 as f32,
+                    handle2_x: handle2.0 as f32,
+                    handle2_y: handle2.1 as f32,
+                });
+            }
+        }
+
+        // Compute bounding box from vertices + control points + stroke padding
+        let mut bbox_left = f32::MAX;
+        let mut bbox_top = f32::MAX;
+        let mut bbox_right = f32::MIN;
+        let mut bbox_bottom = f32::MIN;
+        for v in &vertices {
+            // Include vertex position
+            bbox_left = bbox_left.min(v.x);
+            bbox_top = bbox_top.min(v.y);
+            bbox_right = bbox_right.max(v.x);
+            bbox_bottom = bbox_bottom.max(v.y);
+            // Include absolute control points (vertex + handle offsets)
+            for &(cx, cy) in &[
+                (v.x + v.handle1_x, v.y + v.handle1_y),
+                (v.x + v.handle2_x, v.y + v.handle2_y),
+            ] {
+                bbox_left = bbox_left.min(cx);
+                bbox_top = bbox_top.min(cy);
+                bbox_right = bbox_right.max(cx);
+                bbox_bottom = bbox_bottom.max(cy);
+            }
+        }
+        // Add stroke padding
+        let pad = stroke_width / 2.0;
+        bbox_left -= pad;
+        bbox_top -= pad;
+        bbox_right += pad;
+        bbox_bottom += pad;
+
+        // Fallback for empty vertex lists
+        if vertices.is_empty() {
+            bbox_left = 0.0;
+            bbox_top = 0.0;
+            bbox_right = 0.0;
+            bbox_bottom = 0.0;
+        }
+
+        web_sys::console::log_1(
+            &format!(
+                "  FLSH parsed: stroke=({},{},{}), strokeW={}, fillMode={}, closed={}, verts={}",
+                stroke_color.0, stroke_color.1, stroke_color.2,
+                stroke_width, fill_mode, closed, vertices.len(),
+            ).into(),
+        );
+        for (i, v) in vertices.iter().enumerate() {
+            web_sys::console::log_1(
+                &format!(
+                    "  vertex[{}]: ({}, {}) h1=({}, {}) h2=({}, {})",
+                    i, v.x, v.y, v.handle1_x, v.handle1_y, v.handle2_x, v.handle2_y,
+                ).into(),
+            );
+        }
+
+        VectorShapeMember {
+            stroke_color,
+            fill_color,
+            bg_color,
+            end_color,
+            stroke_width,
+            fill_mode,
+            closed,
+            vertices,
+            bbox_left,
+            bbox_top,
+            bbox_right,
+            bbox_bottom,
+        }
+    }
+
+    /// Parse a string-keyed point entry from FLSH vertex data.
+    /// Format: type(4) + strlen(4) + string_bytes + datasize(4) + locV(4) + locH(4)
+    /// FLSH stores points as (locV, locH) i.e. (y, x). We return (x, y).
+    fn parse_string_keyed_point(data: &[u8], pos: &mut usize) -> (i32, i32) {
+        // type marker (4 bytes, value 0x02)
+        *pos += 4;
+        // string length
+        let str_len = if *pos + 4 <= data.len() {
+            u32::from_be_bytes([data[*pos], data[*pos + 1], data[*pos + 2], data[*pos + 3]]) as usize
+        } else {
+            0
+        };
+        *pos += 4;
+        // skip string bytes
+        *pos += str_len;
+        // data size (4 bytes, should be 8)
+        *pos += 4;
+        // FLSH stores locV first, then locH
+        let loc_v = if *pos + 4 <= data.len() {
+            i32::from_be_bytes([data[*pos], data[*pos + 1], data[*pos + 2], data[*pos + 3]])
+        } else {
+            0
+        };
+        *pos += 4;
+        let loc_h = if *pos + 4 <= data.len() {
+            i32::from_be_bytes([data[*pos], data[*pos + 1], data[*pos + 2], data[*pos + 3]])
+        } else {
+            0
+        };
+        *pos += 4;
+        (loc_h, loc_v) // return as (x, y)
+    }
+
+    /// Parse a hash-keyed point entry from FLSH vertex data.
+    /// Format: type(4) + hash(4) + datasize(4) + locV(4) + locH(4)
+    /// FLSH stores points as (locV, locH) i.e. (y, x). We return (x, y).
+    fn parse_hash_keyed_point(data: &[u8], pos: &mut usize) -> (i32, i32) {
+        // type marker (4 bytes, value 0x02)
+        *pos += 4;
+        // hash key (4 bytes, e.g. 0x80000000 for vertex)
+        *pos += 4;
+        // data size (4 bytes, should be 8)
+        *pos += 4;
+        // FLSH stores locV first, then locH
+        let loc_v = if *pos + 4 <= data.len() {
+            i32::from_be_bytes([data[*pos], data[*pos + 1], data[*pos + 2], data[*pos + 3]])
+        } else {
+            0
+        };
+        *pos += 4;
+        let loc_h = if *pos + 4 <= data.len() {
+            i32::from_be_bytes([data[*pos], data[*pos + 1], data[*pos + 2], data[*pos + 3]])
+        } else {
+            0
+        };
+        *pos += 4;
+        (loc_h, loc_v) // return as (x, y)
+    }
+
     fn try_parse_swf(bytes: Vec<u8>, number: u32, chunk: &CastMemberChunk) -> Option<CastMember> {
         if bytes.len() < 3 {
             return None;
@@ -1115,7 +1482,9 @@ impl CastMember {
     ) -> CastMember {
         use crate::player::handlers::datum_handlers::cast_member::font::TextAlignment;
 
-        debug!("Creating TextMember from XMED styled text (member #{})", number);
+        debug!(
+            "[XMED] Creating TextMember from XMED styled text (member #{})", number
+        );
 
         let alignment_str = match styled_text.alignment {
             TextAlignment::Left => "left",
@@ -1143,7 +1512,7 @@ impl CastMember {
         };
 
         debug!(
-            "  Text: '{}', alignment: {}, font: {}, size: {}, spans: {}, word_wrap: {}",
+            "[XMED]   text='{}', alignment={}, font='{}', size={}, spans={}, word_wrap={}",
             styled_text.text, alignment_str, font_name, font_size, styled_text.styled_spans.len(),
             styled_text.word_wrap
         );
@@ -1225,7 +1594,7 @@ impl CastMember {
             .unwrap_or_default();
 
         debug!(
-            "TextMember #{} name='{}' text='{}' alignment='{}' box_type='{}' word_wrap={} \
+            "[XMED] TextMember #{} name='{}' text='{}' alignment='{}' box_type='{}' word_wrap={} \
              anti_alias={} font='{}' font_style={:?} font_size={} fixed_line_space={} \
              top_spacing={} width={} height={} styled_spans={}",
             number,
@@ -1359,6 +1728,13 @@ impl CastMember {
                     None
                 }
             }
+            CastMemberType::Button(button) => {
+                if button.script_id > 0 {
+                    Some(button.script_id)
+                } else {
+                    None
+                }
+            }
             _ => None,
         }
     }
@@ -1366,6 +1742,7 @@ impl CastMember {
     pub fn get_member_script_ref(&self) -> Option<&CastMemberRef> {
         match &self.member_type {
             CastMemberType::Bitmap(bitmap) => bitmap.member_script_ref.as_ref(),
+            CastMemberType::Button(button) => button.member_script_ref.as_ref(),
             _ => None,
         }
     }
@@ -1374,6 +1751,9 @@ impl CastMember {
         match &mut self.member_type {
             CastMemberType::Bitmap(bitmap) => {
                 bitmap.member_script_ref = Some(script_ref);
+            }
+            CastMemberType::Button(button) => {
+                button.member_script_ref = Some(script_ref);
             }
             _ => {}
         }
@@ -1500,7 +1880,7 @@ impl CastMember {
                 use crate::director::enums::ShapeType;
                 debug!("Flash member {}: checking for shape_info", number);
                 debug!("  specific_data has shape_info: {}", chunk.specific_data.shape_info().is_some());
-                
+
                 if let Some(shape_info) = chunk.specific_data.shape_info() {
                     debug!("Flash member {} is a Shape (via shape_info)", number);
                     return CastMember {
@@ -1517,16 +1897,16 @@ impl CastMember {
                         bg_color: ColorRef::PaletteIndex(0),
                     }
                 }
-                
+
                 // Director MX 2004 can store shapes as Flash members
                 // Try to parse the specific_data_raw as ShapeInfo
                 if !chunk.specific_data_raw.is_empty() {
                     debug!("  specific_data_raw length: {}", chunk.specific_data_raw.len());
-                    
+
                     // Try parsing as ShapeInfo
                     let shape_info = ShapeInfo::from(chunk.specific_data_raw.as_slice());
                     debug!("  Parsed shape_type: {:?}", shape_info.shape_type);
-                    
+
                     // If it looks like valid shape data, treat it as a shape
                     if matches!(shape_info.shape_type, ShapeType::Rect | ShapeType::Oval | ShapeType::OvalRect | ShapeType::Line) {
                         debug!("Flash member {} is actually a Shape!", number);
@@ -1543,7 +1923,7 @@ impl CastMember {
                         }
                     }
                 }
-                
+
                 // Otherwise, process as actual Flash
                 debug!("Creating Flash cast member #{} in cast lib {}", number, cast_lib);
                 if let Some(Some(chunk)) = member_def.children.get(0) {
@@ -1560,6 +1940,12 @@ impl CastMember {
             }
             MemberType::Ole => {
                 Self::log_ole_start(number, cast_lib, chunk);
+
+                // Check if this OLE member is a vectorShape by examining specific_data_raw.
+                // Format: 4-byte string length + "vectorShape" + FLSH data block
+                if let Some(cm) = Self::try_parse_vector_shape(&chunk.specific_data_raw, number, chunk) {
+                    return cm;
+                }
 
                 // Try direct OLE data
                 if let Some(bytes) = Self::get_first_child_bytes(member_def) {
@@ -1884,12 +2270,97 @@ impl CastMember {
                     })
                 }
             }
+            MemberType::Button => {
+                // Button members are parsed identically to Text (FieldInfo + STXT child),
+                // with an extra u16 at bytes 28-29 for button type.
+                let text_chunk = member_def.children.iter()
+                    .find_map(|c| c.as_ref().and_then(|ch| ch.as_text()));
+                let raw = chunk.specific_data_raw.as_slice();
+                let field_info = FieldInfo::from(raw);
+                let mut field_member = FieldMember::from_field_info(&field_info);
+
+                // Button dimensions come from the rect, not text_height
+                field_member.width = field_info.width();
+                field_member.height = field_info.height();
+
+                // Read button type from bytes 28-29 (u16 BE, value is 1-indexed per ScummVM)
+                let button_type_raw = if raw.len() >= 30 {
+                    ((raw[28] as u16) << 8) | (raw[29] as u16)
+                } else {
+                    1 // default to pushButton (1-indexed)
+                };
+                let button_type = ButtonType::from_raw(button_type_raw.wrapping_sub(1));
+
+                if let Some(text_chunk) = text_chunk {
+                    field_member.text = text_chunk.text.clone();
+
+                    let formatting_runs = text_chunk.parse_formatting_runs();
+                    if let Some(first_run) = formatting_runs.first() {
+                        let fg_r = (first_run.color_r >> 8) as u8;
+                        let fg_g = (first_run.color_g >> 8) as u8;
+                        let fg_b = (first_run.color_b >> 8) as u8;
+                        field_member.fore_color = Some(ColorRef::Rgb(fg_r, fg_g, fg_b));
+
+                        field_member.font_id = Some(first_run.font_id);
+                        if let Some(font_name) = font_table.get(&first_run.font_id) {
+                            field_member.font = font_name.clone();
+                        }
+                        if first_run.font_size > 0 {
+                            field_member.font_size = first_run.font_size;
+                        }
+                        if first_run.height > 0 {
+                            field_member.fixed_line_space = first_run.height;
+                        }
+                        if first_run.style != 0 {
+                            let mut styles = Vec::new();
+                            if (first_run.style & 0x01) != 0 { styles.push("bold"); }
+                            if (first_run.style & 0x02) != 0 { styles.push("italic"); }
+                            if (first_run.style & 0x04) != 0 { styles.push("underline"); }
+                            if styles.is_empty() {
+                                field_member.font_style = "plain".to_string();
+                            } else {
+                                field_member.font_style = styles.join(" ");
+                            }
+                        }
+                    }
+                }
+
+                let script_id = chunk
+                    .member_info
+                    .as_ref()
+                    .map(|info| info.header.script_id)
+                    .unwrap_or(0);
+
+                let behavior_script_ref = if script_id > 0 {
+                    let _script_chunk = &lctx.as_ref().unwrap().scripts[&script_id];
+                    Some(CastMemberRef {
+                        cast_lib: cast_lib as i32,
+                        cast_member: script_id as i32,
+                    })
+                } else {
+                    None
+                };
+
+                debug!(
+                    "ButtonMember text='{}' button_type={:?} font='{}' font_size={} width={} height={} script_id={}",
+                    field_member.text, button_type, field_member.font, field_member.font_size,
+                    field_member.width, field_member.height, script_id,
+                );
+
+                CastMemberType::Button(ButtonMember {
+                    field: field_member,
+                    button_type,
+                    hilite: false,
+                    script_id,
+                    member_script_ref: behavior_script_ref,
+                })
+            }
             _ => {
                 // Assuming `chunk.member_type` is an enum backed by a numeric ID
                 // If it's not Copy, clone or cast as needed.
                 let member_type_id = chunk.member_type as u16; // or u32 depending on your enum base type
 
-                warn!(
+                debug!(
                     "[CastMember::from] Unknown member type for member #{} (cast_lib={}): {:?} (id={})",
                     number,
                     cast_lib,
@@ -1899,18 +2370,18 @@ impl CastMember {
 
                 if let Some(info) = &chunk.member_info {
                     debug!(
-                        "  â†’ name='{}', script_id={}, flags={:?}",
+                        " name='{}', script_id={}, flags={:?}",
                         info.name, info.header.script_id, info.header.flags
                     );
                 } else {
-                    debug!("  â†’ No member_info available");
+                    debug!(" No member_info available");
                 }
 
                 // Log all child chunks
                 if member_def.children.is_empty() {
-                    debug!("  â†’ No children found.");
+                    debug!(" No children found.");
                 } else {
-                    debug!("  â†’ {} children:", member_def.children.len());
+                    debug!(" {} children:", member_def.children.len());
 
                     for (i, c_opt) in member_def.children.iter().enumerate() {
                         match c_opt {

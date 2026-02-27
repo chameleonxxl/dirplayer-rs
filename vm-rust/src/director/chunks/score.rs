@@ -51,6 +51,9 @@ pub struct ScoreFrameChannelData {
     pub blend: u8,
     pub rotation: f64,
     pub skew: f64,
+    pub moveable: bool,
+    pub editable: bool,
+    pub trails: bool,
 }
 
 impl ScoreFrameChannelData {
@@ -70,9 +73,11 @@ impl ScoreFrameChannelData {
         let sprite_type = reader
             .read_u8()
             .map_err(|e| format!("Failed to read sprite_type: {:?}", e))?;
-        let raw_ink = reader
+        let raw_ink_byte = reader
             .read_u8()
             .map_err(|e| format!("Failed to read ink: {:?}", e))?;
+        let raw_ink = raw_ink_byte & 0x3f;
+        let trails = (raw_ink_byte & 0x40) != 0;
         let fore_color = reader
             .read_u8()
             .map_err(|e| format!("Failed to read fore_color: {:?}", e))?;
@@ -115,10 +120,15 @@ impl ScoreFrameChannelData {
         let mut rotation_angle: f64 = 0.0;
         let mut skew_angle: f64 = 0.0;
 
+        let mut moveable = false;
+        let mut editable = false;
+
         if sz >= 22 {
             let unk3 = reader.read_u8()
                 .map_err(|e| format!("Failed to read unk3: {:?}", e))?;
-            color_flag = (unk3 & 0xF0) >> 4;
+            color_flag = (unk3 >> 4) & 0x03;  // bits 4-5 only (bits 6-7 are editable/moveable)
+            editable = (unk3 & 0x40) != 0;  // bit 6
+            moveable = (unk3 & 0x80) != 0;  // bit 7
             blend_raw = reader.read_u8()
                 .map_err(|e| format!("Failed to read blend: {:?}", e))?;
         }
@@ -181,6 +191,9 @@ impl ScoreFrameChannelData {
             blend: blend_raw,
             rotation: rotation_angle,
             skew: skew_angle,
+            moveable,
+            editable,
+            trails,
         })
     }
 
@@ -208,6 +221,7 @@ impl ScoreFrameChannelData {
         let ink_data = reader.read_u8()
             .map_err(|e| format!("D5: inkData: {:?}", e))?;             // byte 1
         let ink_val = ink_data & 0x3f;
+        let trails = (ink_data & 0x40) != 0;
         let cast_lib = reader.read_u16()
             .map_err(|e| format!("D5: castLib: {:?}", e))? as i16;      // bytes 2-3
         let cast_member = reader.read_u16()
@@ -228,8 +242,10 @@ impl ScoreFrameChannelData {
             .map_err(|e| format!("D5: height: {:?}", e))?;              // bytes 16-17
         let width = reader.read_u16()
             .map_err(|e| format!("D5: width: {:?}", e))?;               // bytes 18-19
-        let _colorcode = reader.read_u8()
+        let colorcode = reader.read_u8()
             .map_err(|e| format!("D5: colorcode: {:?}", e))?;           // byte 20
+        let editable = (colorcode & 0x40) != 0;  // bit 6
+        let moveable = (colorcode & 0x80) != 0;  // bit 7
         let blend_raw = reader.read_u8()
             .map_err(|e| format!("D5: blend: {:?}", e))?;               // byte 21
         let _thickness = reader.read_u8()
@@ -258,6 +274,9 @@ impl ScoreFrameChannelData {
             blend: blend_raw,
             rotation: 0.0,
             skew: 0.0,
+            moveable,
+            editable,
+            trails,
         })
     }
 
@@ -575,6 +594,9 @@ impl ScoreFrameData {
                             blend: 0,
                             rotation: 0.0,
                             skew: 0.0,
+                            moveable: false,
+                            editable: false,
+                            trails: false,
                         }));
                     }
 

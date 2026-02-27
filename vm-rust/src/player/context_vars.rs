@@ -181,12 +181,26 @@ pub fn player_set_context_var(
                         }
                         Ok(())
                     }
+                    CastMemberType::Button(button) => {
+                        match put_type {
+                            PutType::Into => button.field.text = new_value,
+                            PutType::Before => {
+                                let mut combined = new_value;
+                                combined.push_str(&button.field.text);
+                                button.field.text = combined;
+                            }
+                            PutType::After => {
+                                button.field.text.push_str(&new_value);
+                            }
+                        }
+                        Ok(())
+                    }
                     other => {
                         console::log_1(
-                            &format!("Member exists but is not a Field or Text: {:?}", other).into(),
+                            &format!("Member exists but is not a Field, Text, or Button: {:?}", other).into(),
                         );
                         Err(ScriptError::new(
-                            "Cast member exists but is not a Field or Text".to_string(),
+                            "Cast member exists but is not a Field, Text, or Button".to_string(),
                         ))
                     }
                 }

@@ -846,9 +846,12 @@ impl BuiltInHandlerManager {
                         crate::player::cast_member::CastMemberType::Field(f) => {
                             (f.text.clone(), f.fixed_line_space, f.top_spacing)
                         }
+                        crate::player::cast_member::CastMemberType::Button(b) => {
+                            (b.field.text.clone(), b.field.fixed_line_space, b.field.top_spacing)
+                        }
                         _ => {
                             return Err(ScriptError::new(
-                                "charPosToLoc requires a text or field member".to_string(),
+                                "charPosToLoc requires a text, field, or button member".to_string(),
                             ))
                         }
                     };
