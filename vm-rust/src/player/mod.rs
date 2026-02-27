@@ -185,6 +185,8 @@ pub struct DirPlayer {
     pub last_mouse_down_time: i64,
     pub is_double_click: bool,
     pub mouse_down_sprite: i16,
+    pub drag_offset: (i32, i32),
+    pub trails_bitmap: Option<bitmap::bitmap::Bitmap>,
     pub click_on_sprite: i16,
     pub subscribed_member_refs: Vec<CastMemberRef>, // TODO move to debug module
     pub is_subscribed_to_channel_names: bool,       // TODO move to debug module
@@ -314,6 +316,8 @@ impl DirPlayer {
             last_mouse_down_time: 0,
             is_double_click: false,
             mouse_down_sprite: 0,
+            drag_offset: (0, 0),
+            trails_bitmap: None,
             subscribed_member_refs: vec![],
             is_subscribed_to_channel_names: false,
             font_manager: FontManager::new(),
