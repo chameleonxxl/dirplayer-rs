@@ -43,6 +43,7 @@ use crate::player::font::BitmapFont;
 use crate::player::font::FontManager;
 use crate::player::font::bitmap_font_copy_char;
 use crate::player::handlers::datum_handlers::cast_member::font::{FontMemberHandlers, TextAlignment, StyledSpan, HtmlStyle};
+use crate::director::lingo::datum::Datum;
 use crate::player::score_keyframes::SpritePathKeyframes;
 use crate::rendering_gpu::{DynamicRenderer, Renderer};
 
@@ -971,16 +972,13 @@ fn render_filmloop_from_channel_data(
                     &params,
                 );
             }
-            CastMemberType::Shape(_shape_member) => {
+            CastMemberType::Shape(shape_member) => {
                 // Skip rendering shapes with tiny dimensions (blank placeholders or zero-size)
-                // data.width/height from score data indicate the shape size
-                // Skip if EITHER dimension is <= 1
                 if data.width <= 1 || data.height <= 1 {
                     continue;
                 }
 
                 // Get sprite foreground color from channel data
-                // Detect RGB mode by checking color_flag OR non-zero G/B components
                 let fore_is_rgb = (data.color_flag & 0x1) != 0
                     || data.fore_color_g != 0
                     || data.fore_color_b != 0;
@@ -991,28 +989,27 @@ fn render_filmloop_from_channel_data(
                     ColorRef::PaletteIndex(data.fore_color)
                 };
 
-                let color = resolve_color_ref(
-                    &palettes,
-                    &sprite_color,
-                    &PaletteRef::BuiltIn(get_system_default_palette()),
-                    bitmap.original_bit_depth,
-                );
+                // Build a temporary sprite for draw_shape_with_sprite
+                let mut temp_sprite = Sprite::new(channel_num as usize);
+                temp_sprite.color = sprite_color;
+                temp_sprite.ink = ((data.ink & 0x7F) / 5) as i32;
+                temp_sprite.blend = if data.blend == 255 { 100 } else {
+                    ((255.0 - data.blend as f32) * 100.0 / 255.0) as i32
+                };
 
-                debug!(
-                    "    Shape color: fore_is_rgb={} fore_color={} fore_g={} fore_b={} -> resolved ({}, {}, {})",
-                    fore_is_rgb, data.fore_color, data.fore_color_g, data.fore_color_b,
-                    color.0, color.1, color.2
-                );
-
-                bitmap.fill_rect(
-                    sprite_rect.left,
-                    sprite_rect.top,
-                    sprite_rect.right,
-                    sprite_rect.bottom,
-                    color,
-                    &palettes,
-                    1.0, // Full alpha
-                );
+                bitmap.draw_shape_with_sprite(&temp_sprite, &shape_member.shape_info, sprite_rect, &palettes);
+            }
+            CastMemberType::VectorShape(vector_member) => {
+                if data.width <= 1 || data.height <= 1 {
+                    continue;
+                }
+                let mut temp_sprite = Sprite::new(channel_num as usize);
+                temp_sprite.ink = ((data.ink & 0x7F) / 5) as i32;
+                temp_sprite.blend = if data.blend == 255 { 100 } else {
+                    ((255.0 - data.blend as f32) * 100.0 / 255.0) as i32
+                };
+                let alpha = (temp_sprite.blend as f32 / 100.0).clamp(0.0, 1.0);
+                bitmap.draw_vector_shape(vector_member, sprite_rect, &palettes, alpha);
             }
             _ => {
                 // Other member types not yet supported in filmloop rendering
@@ -1113,6 +1110,29 @@ pub fn render_score_to_bitmap_with_offset(
         ),
         &palettes,
     );
+
+    // Composite accumulated trails bitmap onto the cleared stage
+    if let Some(trails_bmp) = &player.trails_bitmap {
+        if trails_bmp.width == bitmap.width && trails_bmp.height == bitmap.height {
+            // Copy non-transparent pixels from trails bitmap onto stage
+            let w = bitmap.width as usize;
+            let h = bitmap.height as usize;
+            for y in 0..h {
+                for x in 0..w {
+                    let idx = (y * w + x) * 4;
+                    if idx + 3 < trails_bmp.data.len() {
+                        let alpha = trails_bmp.data[idx + 3];
+                        if alpha > 0 {
+                            bitmap.data[idx] = trails_bmp.data[idx];
+                            bitmap.data[idx + 1] = trails_bmp.data[idx + 1];
+                            bitmap.data[idx + 2] = trails_bmp.data[idx + 2];
+                            bitmap.data[idx + 3] = trails_bmp.data[idx + 3];
+                        }
+                    }
+                }
+            }
+        }
+    }
 
     let sorted_channel_numbers = {
         // Get the correct frame number for this score
@@ -1307,19 +1327,15 @@ pub fn render_score_to_bitmap_with_offset(
                     &params,
                 );
             }
-            CastMemberType::Shape(_) => {
+            CastMemberType::Shape(shape_member) => {
                 let sprite = get_score_sprite(&player.movie, score_source, channel_num).unwrap();
 
                 // Skip rendering shapes with tiny dimensions (blank placeholders or zero-size)
-                // These are used in Director as placeholder sprites that get assigned
-                // different members later via scripts. Skip if EITHER dimension is <= 1.
                 if sprite.width <= 1 || sprite.height <= 1 {
                     continue;
                 }
 
-                // Skip rendering shapes that use member 1:1 - this is a placeholder/empty shape
-                // in Director that shouldn't be rendered visually. It's used as a dummy member
-                // for sprites that will have their member changed by scripts.
+                // Skip rendering shapes that use member 1:1 (placeholder)
                 if let Some(member_ref) = &sprite.member {
                     if member_ref.cast_lib == 1 && member_ref.cast_member == 1 {
                         continue;
@@ -1327,27 +1343,57 @@ pub fn render_score_to_bitmap_with_offset(
                 }
 
                 debug!(
-                    "  SHAPE RENDER: channel {} member {:?} size {}x{} color {:?} bg {:?} ink {} blend {}",
-                    channel_num, sprite.member, sprite.width, sprite.height,
-                    sprite.color, sprite.bg_color, sprite.ink, sprite.blend
+                    "  SHAPE RENDER: channel {} member {:?} type {:?} size {}x{} color {:?} bg {:?} ink {} blend {} filled={} lineThick={}",
+                    channel_num, sprite.member, shape_member.shape_info.shape_type,
+                    sprite.width, sprite.height,
+                    sprite.color, sprite.bg_color, sprite.ink, sprite.blend,
+                    shape_member.shape_info.fill_type, shape_member.shape_info.line_thickness
                 );
 
+                let shape_info = &shape_member.shape_info;
                 let rect = get_concrete_sprite_rect(player, sprite);
-                // Apply offset for filmloop coordinate translation
                 let sprite_rect = IntRect::from(
                     rect.left - offset.0,
                     rect.top - offset.1,
                     rect.right - offset.0,
                     rect.bottom - offset.1,
                 );
-                // Create a translated sprite for rendering if we have an offset
                 if offset.0 != 0 || offset.1 != 0 {
                     let mut translated_sprite = sprite.clone();
                     translated_sprite.loc_h -= offset.0;
                     translated_sprite.loc_v -= offset.1;
-                    bitmap.fill_shape_rect_with_sprite(&translated_sprite, sprite_rect, &palettes);
+                    bitmap.draw_shape_with_sprite(&translated_sprite, shape_info, sprite_rect, &palettes);
                 } else {
-                    bitmap.fill_shape_rect_with_sprite(sprite, sprite_rect, &palettes);
+                    bitmap.draw_shape_with_sprite(sprite, shape_info, sprite_rect, &palettes);
+                }
+            }
+            CastMemberType::VectorShape(vector_member) => {
+                let sprite = get_score_sprite(&player.movie, score_source, channel_num).unwrap();
+
+                if sprite.width <= 1 || sprite.height <= 1 {
+                    continue;
+                }
+
+                if let Some(member_ref) = &sprite.member {
+                    if member_ref.cast_lib == 1 && member_ref.cast_member == 1 {
+                        continue;
+                    }
+                }
+
+                let rect = get_concrete_sprite_rect(player, sprite);
+                let sprite_rect = IntRect::from(
+                    rect.left - offset.0,
+                    rect.top - offset.1,
+                    rect.right - offset.0,
+                    rect.bottom - offset.1,
+                );
+                if offset.0 != 0 || offset.1 != 0 {
+                    let mut translated_sprite = sprite.clone();
+                    translated_sprite.loc_h -= offset.0;
+                    translated_sprite.loc_v -= offset.1;
+                    bitmap.draw_vector_shape_with_sprite(&translated_sprite, vector_member, sprite_rect, &palettes);
+                } else {
+                    bitmap.draw_vector_shape_with_sprite(sprite, vector_member, sprite_rect, &palettes);
                 }
             }
             CastMemberType::Field(field_member) => {
@@ -1407,6 +1453,263 @@ pub fn render_score_to_bitmap_with_offset(
                         );
                     }
                 }
+            }
+            CastMemberType::Button(button_member) => {
+                let sprite = get_score_sprite(&player.movie, score_source, channel_num).unwrap();
+                let sprite_rect = get_concrete_sprite_rect(player, sprite);
+                let draw_x = sprite_rect.left;
+                let draw_y = sprite_rect.top;
+                let draw_w = sprite_rect.width();
+                let draw_h = sprite_rect.height();
+
+                if draw_w <= 0 || draw_h <= 0 {
+                    continue;
+                }
+
+                let button_type = &button_member.button_type;
+                let hilite = button_member.hilite;
+                let field = &button_member.field;
+
+                // Determine colors based on hilite state
+                // Only push buttons invert everything; radio/checkbox keep black text
+                let is_push = matches!(button_type, crate::player::cast_member::ButtonType::PushButton);
+                let (frame_color, fill_color, text_color_rgb): ((u8,u8,u8),(u8,u8,u8),(u8,u8,u8)) = if hilite && is_push {
+                    ((255,255,255), (0,0,0), (255,255,255))
+                } else {
+                    ((0,0,0), (255,255,255), (0,0,0))
+                };
+
+                // Render button to intermediate bitmap, then composite with ink.
+                // This handles all ink modes (bgTransparent, addPin, etc.) uniformly.
+                let mut temp = Bitmap::new(
+                    draw_w as u16, draw_h as u16,
+                    32, 32, 0,
+                    PaletteRef::BuiltIn(get_system_default_palette()),
+                );
+                temp.data.fill(0); // Start fully transparent
+                temp.use_alpha = true;
+
+                // For push buttons: draw text FIRST onto transparent bitmap to preserve
+                // AA alpha, then fill remaining transparent pixels with the fill color,
+                // then draw the border on top. This prevents native text AA from blending
+                // with the white fill (which would create near-white pixels that survive
+                // ink 36 color-keying).
+                // For checkbox/radio: draw chrome first (no fill behind text area).
+
+                // Draw non-pushbutton chrome first (checkbox/radio don't have fill behind text)
+                // Chrome is positioned at the top-left, aligned with the first line of text
+                if !is_push {
+                    match button_type {
+                        crate::player::cast_member::ButtonType::CheckBox => {
+                            let box_y = 0;
+                            temp.fill_rect(0, box_y, 10, box_y + 1, (0, 0, 0), &palettes, 1.0);
+                            temp.fill_rect(0, box_y + 9, 10, box_y + 10, (0, 0, 0), &palettes, 1.0);
+                            temp.fill_rect(0, box_y, 1, box_y + 10, (0, 0, 0), &palettes, 1.0);
+                            temp.fill_rect(9, box_y, 10, box_y + 10, (0, 0, 0), &palettes, 1.0);
+                            temp.fill_rect(1, box_y + 1, 9, box_y + 9, (255, 255, 255), &palettes, 1.0);
+                            if hilite {
+                                for i in 1..9 {
+                                    temp.fill_rect(i, box_y + i, i + 1, box_y + i + 1, (0, 0, 0), &palettes, 1.0);
+                                    temp.fill_rect(9 - i, box_y + i, 10 - i, box_y + i + 1, (0, 0, 0), &palettes, 1.0);
+                                }
+                            }
+                        }
+                        crate::player::cast_member::ButtonType::RadioButton => {
+                            let base_y = 0;
+                            let circle_points: &[(i32, i32)] = &[
+                                (4, 0), (5, 0), (6, 0),
+                                (3, 1), (7, 1),
+                                (2, 2), (8, 2),
+                                (1, 3), (9, 3),
+                                (0, 4), (10, 4),
+                                (0, 5), (10, 5),
+                                (0, 6), (10, 6),
+                                (1, 7), (9, 7),
+                                (2, 8), (8, 8),
+                                (3, 9), (7, 9),
+                                (4, 10), (5, 10), (6, 10),
+                            ];
+                            for &(px, py) in circle_points {
+                                temp.fill_rect(px, base_y + py, px + 1, base_y + py + 1, (0, 0, 0), &palettes, 1.0);
+                            }
+                            if hilite {
+                                temp.fill_rect(4, base_y + 3, 7, base_y + 4, (0, 0, 0), &palettes, 1.0);
+                                temp.fill_rect(3, base_y + 4, 8, base_y + 5, (0, 0, 0), &palettes, 1.0);
+                                temp.fill_rect(3, base_y + 5, 8, base_y + 6, (0, 0, 0), &palettes, 1.0);
+                                temp.fill_rect(3, base_y + 6, 8, base_y + 7, (0, 0, 0), &palettes, 1.0);
+                                temp.fill_rect(4, base_y + 7, 7, base_y + 8, (0, 0, 0), &palettes, 1.0);
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+
+                // Draw text label into temp bitmap
+                let chrome_offset_x = match button_type {
+                    crate::player::cast_member::ButtonType::CheckBox => 13, // 10px box + 3px gap
+                    crate::player::cast_member::ButtonType::RadioButton => 14, // 11px circle + 3px gap
+                    _ => 0,
+                };
+
+                let font_opt = get_or_load_font_with_id(
+                    &mut player.font_manager,
+                    &player.movie.cast_manager,
+                    &field.font,
+                    Some(field.font_size),
+                    None,
+                    field.font_id,
+                );
+
+                let text_area_x = chrome_offset_x;
+                let text_area_w = draw_w - chrome_offset_x;
+
+                let is_pfr_font = font_opt.as_ref().map_or(false, |f| f.char_widths.is_some());
+
+                if let (true, Some(font)) = (is_pfr_font, &font_opt) {
+                    let font_bitmap = player.bitmap_manager.get_bitmap(font.bitmap_ref).unwrap();
+
+                    let wrapped_lines = Bitmap::wrap_text_lines(&field.text, font, text_area_w);
+                    let line_h = font.char_height as i32 + field.fixed_line_space as i32;
+                    let total_text_h = (wrapped_lines.len() as i32) * line_h;
+                    // Push buttons center text vertically; radio/checkbox start at top
+                    let text_y = if is_push {
+                        ((draw_h - total_text_h) / 2).max(0)
+                    } else {
+                        0
+                    };
+
+                    let text_params = CopyPixelsParams {
+                        blend: 100,
+                        ink: 36, // bg transparent for text onto temp
+                        color: ColorRef::Rgb(text_color_rgb.0, text_color_rgb.1, text_color_rgb.2),
+                        bg_color: ColorRef::Rgb(255, 255, 255),
+                        mask_image: None,
+                        is_text_rendering: true,
+                        rotation: 0.0,
+                        skew: 0.0,
+                        sprite: None,
+                        original_dst_rect: None,
+                    };
+
+                    temp.draw_text_wrapped(
+                        &field.text,
+                        font,
+                        font_bitmap,
+                        text_area_x,
+                        text_y,
+                        text_area_w,
+                        &field.alignment,
+                        text_params,
+                        &palettes,
+                        field.fixed_line_space,
+                        field.top_spacing,
+                    );
+                } else {
+                    // Native Canvas2D rendering for system fonts (Arial etc.)
+                    let font_name = if field.font.is_empty() { "Arial".to_string() } else { field.font.clone() };
+                    let font_size = if field.font_size > 0 { field.font_size as i32 } else { 12 };
+                    let text_color = ((text_color_rgb.0 as u32) << 16)
+                        | ((text_color_rgb.1 as u32) << 8)
+                        | (text_color_rgb.2 as u32);
+
+                    let span = StyledSpan {
+                        text: field.text.clone(),
+                        style: HtmlStyle {
+                            font_face: Some(font_name),
+                            font_size: Some(font_size),
+                            color: Some(text_color),
+                            ..HtmlStyle::default()
+                        },
+                    };
+
+                    let alignment = match field.alignment.to_lowercase().as_str() {
+                        "center" | "#center" => TextAlignment::Center,
+                        "right" | "#right" => TextAlignment::Right,
+                        _ => TextAlignment::Left,
+                    };
+
+                    // Push buttons center text vertically; radio/checkbox start at top
+                    let text_y = if is_push {
+                        ((draw_h - font_size) / 2).max(0)
+                    } else {
+                        0
+                    };
+
+                    if let Err(e) = FontMemberHandlers::render_native_text_to_bitmap(
+                        &mut temp,
+                        &[span],
+                        text_area_x,
+                        text_y,
+                        text_area_w,
+                        draw_h,
+                        alignment,
+                        text_area_w,
+                        true,
+                        None,
+                        field.fixed_line_space,
+                        field.top_spacing,
+                        0,
+                    ) {
+                        console_warn!("Native text render error for Button: {:?}", e);
+                    }
+                }
+
+                // For push buttons: fill background and draw border.
+                // For matte-like inks (bgTransparent 36, Matte 8, Not Ghost 7),
+                // skip the fill and rely on the alpha channel instead of color-keying.
+                // This avoids white fringe from AA text pixels that don't exactly match bgColor.
+                let use_alpha_matte = sprite.ink == 36 || sprite.ink == 8 || sprite.ink == 7;
+
+                if is_push {
+                    if !use_alpha_matte {
+                        // Fill transparent interior pixels with fill color (inset 1px for border)
+                        for y in 1..(draw_h - 1) {
+                            for x in 1..(draw_w - 1) {
+                                let idx = ((y * draw_w + x) * 4) as usize;
+                                if idx + 3 < temp.data.len() && temp.data[idx + 3] == 0 {
+                                    temp.data[idx] = fill_color.0;
+                                    temp.data[idx + 1] = fill_color.1;
+                                    temp.data[idx + 2] = fill_color.2;
+                                    temp.data[idx + 3] = 255;
+                                }
+                            }
+                        }
+                    }
+                    // Border on top
+                    temp.fill_rect(2, 0, draw_w - 2, 1, frame_color, &palettes, 1.0);
+                    temp.fill_rect(2, draw_h - 1, draw_w - 2, draw_h, frame_color, &palettes, 1.0);
+                    temp.fill_rect(0, 2, 1, draw_h - 2, frame_color, &palettes, 1.0);
+                    temp.fill_rect(draw_w - 1, 2, draw_w, draw_h - 2, frame_color, &palettes, 1.0);
+                    // Corner pixels
+                    temp.fill_rect(1, 0, 2, 1, frame_color, &palettes, 1.0);
+                    temp.fill_rect(draw_w - 2, 0, draw_w - 1, 1, frame_color, &palettes, 1.0);
+                    temp.fill_rect(0, 1, 1, 2, frame_color, &palettes, 1.0);
+                    temp.fill_rect(draw_w - 1, 1, draw_w, 2, frame_color, &palettes, 1.0);
+                    temp.fill_rect(1, draw_h - 1, 2, draw_h, frame_color, &palettes, 1.0);
+                    temp.fill_rect(draw_w - 2, draw_h - 1, draw_w - 1, draw_h, frame_color, &palettes, 1.0);
+                    temp.fill_rect(0, draw_h - 2, 1, draw_h - 1, frame_color, &palettes, 1.0);
+                    temp.fill_rect(draw_w - 1, draw_h - 2, draw_w, draw_h - 1, frame_color, &palettes, 1.0);
+                }
+
+                // Composite temp bitmap onto stage with sprite's ink.
+                // For matte-like inks, use Matte (ink 8) to composite via alpha channel
+                // instead of color-keying, which avoids AA fringe artifacts.
+                let compositing_ink = if use_alpha_matte { 8 } else { sprite.ink as i32 };
+
+                let mut ink_params = HashMap::new();
+                ink_params.insert("blend".into(), Datum::Int(sprite.blend as i32));
+                ink_params.insert("ink".into(), Datum::Int(compositing_ink));
+                ink_params.insert("color".into(), Datum::ColorRef(sprite.color.clone()));
+                ink_params.insert("bgColor".into(), Datum::ColorRef(sprite.bg_color.clone()));
+
+                bitmap.copy_pixels(
+                    &palettes,
+                    &temp,
+                    IntRect::from(draw_x, draw_y, draw_x + draw_w, draw_y + draw_h),
+                    IntRect::from_tuple((0, 0, draw_w, draw_h)),
+                    &ink_params,
+                    None,
+                );
             }
             CastMemberType::Font(font_member) => {
                 let sprite = get_score_sprite(&player.movie, score_source, channel_num).unwrap();
@@ -1815,6 +2118,84 @@ pub fn render_score_to_bitmap_with_offset(
                 );
             }
             _ => {}
+        }
+    }
+
+    // Accumulate trails sprites into the persistent trails bitmap
+    if matches!(score_source, ScoreRef::Stage) {
+        // Check if any sprite in the current frame has trails
+        let mut has_trails = false;
+        let frame_num = player.movie.current_frame;
+        let channels: Vec<i16> = player.movie.score
+            .get_sorted_channels(frame_num)
+            .iter()
+            .map(|x| x.number as i16)
+            .collect();
+        for &ch in &channels {
+            if let Some(sprite) = player.movie.score.get_sprite(ch) {
+                if sprite.trails {
+                    has_trails = true;
+                    break;
+                }
+            }
+        }
+
+        if has_trails {
+            // Ensure trails bitmap exists and is the right size
+            let bw = bitmap.width;
+            let bh = bitmap.height;
+            if player.trails_bitmap.is_none()
+                || player.trails_bitmap.as_ref().unwrap().width != bw
+                || player.trails_bitmap.as_ref().unwrap().height != bh
+            {
+                let mut trails_bmp = Bitmap::new(
+                    bw,
+                    bh,
+                    32,
+                    32,
+                    0,
+                    PaletteRef::BuiltIn(get_system_default_palette()),
+                );
+                // Start fully transparent
+                for pixel in trails_bmp.data.chunks_exact_mut(4) {
+                    pixel[0] = 0;
+                    pixel[1] = 0;
+                    pixel[2] = 0;
+                    pixel[3] = 0;
+                }
+                player.trails_bitmap = Some(trails_bmp);
+            }
+
+            // For each trails sprite, copy its bounding rect from the rendered bitmap to trails_bitmap
+            for &ch in &channels {
+                if let Some(sprite) = player.movie.score.get_sprite(ch) {
+                    if sprite.trails && sprite.member.is_some() {
+                        let sprite_rect = get_concrete_sprite_rect(player, sprite);
+                        let x1 = sprite_rect.left.max(0) as usize;
+                        let y1 = sprite_rect.top.max(0) as usize;
+                        let x2 = (sprite_rect.right as usize).min(bw as usize);
+                        let y2 = (sprite_rect.bottom as usize).min(bh as usize);
+                        let w = bw as usize;
+
+                        if let Some(trails_bmp) = &mut player.trails_bitmap {
+                            for y in y1..y2 {
+                                for x in x1..x2 {
+                                    let idx = (y * w + x) * 4;
+                                    if idx + 3 < bitmap.data.len() {
+                                        trails_bmp.data[idx] = bitmap.data[idx];
+                                        trails_bmp.data[idx + 1] = bitmap.data[idx + 1];
+                                        trails_bmp.data[idx + 2] = bitmap.data[idx + 2];
+                                        trails_bmp.data[idx + 3] = 255; // Mark as opaque
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        } else {
+            // No trails sprites in this frame - clear the trails bitmap
+            player.trails_bitmap = None;
         }
     }
 

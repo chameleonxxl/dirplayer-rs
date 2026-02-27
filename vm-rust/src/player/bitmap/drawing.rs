@@ -4,7 +4,10 @@ use nohash_hasher::IntMap;
 use rgb565::Rgb565;
 
 use crate::{
-    director::lingo::datum::Datum,
+    director::{
+        enums::{ShapeInfo, ShapeType},
+        lingo::datum::Datum,
+    },
     player::{
         font::{bitmap_font_copy_char, BitmapFont},
         geometry::IntRect,
@@ -714,6 +717,695 @@ impl Bitmap {
                     blend_color_alpha(dst_color, color, alpha)
                 };
                 self.set_pixel(x as i32, y as i32, blended_color, palettes);
+            }
+        }
+    }
+
+    /// Draw a filled ellipse inscribed in the given bounding box.
+    /// Uses midpoint ellipse algorithm with horizontal scanline filling.
+    pub fn fill_ellipse(
+        &mut self,
+        x1: i32,
+        y1: i32,
+        x2: i32,
+        y2: i32,
+        color: (u8, u8, u8),
+        palettes: &PaletteMap,
+        alpha: f32,
+    ) {
+        if alpha == 0.0 { return; }
+        let w = (x2 - x1).max(1);
+        let h = (y2 - y1).max(1);
+        // Center coordinates (doubled to avoid fractions)
+        let cx2 = x1 + x2; // 2 * center_x
+        let cy2 = y1 + y2; // 2 * center_y
+        let a = w; // 2 * semi-axis a
+        let b = h; // 2 * semi-axis b
+        let a2 = (a as i64) * (a as i64);
+        let b2 = (b as i64) * (b as i64);
+
+        // Fill scanlines for each y from top to bottom
+        for py in y1..y2 {
+            // Map py to doubled coordinates relative to center
+            let dy2 = 2 * py - cy2 + 1; // doubled distance from center
+            let dy2_sq = (dy2 as i64) * (dy2 as i64);
+            // Ellipse equation: (dx/(w/2))^2 + (dy/(h/2))^2 <= 1
+            // In doubled coords: (dx2/a)^2 + (dy2/b)^2 <= 1
+            // => dx2^2 <= a^2 * (1 - dy2^2/b^2) = a^2 * (b^2 - dy2^2) / b^2
+            if b2 == 0 { continue; }
+            let dx2_sq_max = a2 * (b2 - dy2_sq) / b2;
+            if dx2_sq_max < 0 { continue; }
+            let dx2_max = (dx2_sq_max as f64).sqrt() as i32;
+            let px_left = (cx2 - dx2_max) / 2;
+            let px_right = (cx2 + dx2_max + 1) / 2; // +1 for ceiling
+            let left = px_left.max(x1);
+            let right = px_right.min(x2);
+            for px in left..right {
+                if alpha == 1.0 {
+                    self.set_pixel(px, py, color, palettes);
+                } else {
+                    let dst = self.get_pixel_color(palettes, px as u16, py as u16);
+                    self.set_pixel(px, py, blend_color_alpha(dst, color, alpha), palettes);
+                }
+            }
+        }
+    }
+
+    /// Draw an ellipse outline inscribed in the given bounding box.
+    pub fn stroke_ellipse(
+        &mut self,
+        x1: i32,
+        y1: i32,
+        x2: i32,
+        y2: i32,
+        color: (u8, u8, u8),
+        palettes: &PaletteMap,
+        alpha: f32,
+        thickness: i32,
+    ) {
+        if alpha == 0.0 || thickness <= 0 { return; }
+        // Draw by filling outer ellipse minus inner ellipse
+        // For thickness=1, just plot boundary pixels
+        let w = (x2 - x1).max(1);
+        let h = (y2 - y1).max(1);
+        let cx2 = x1 + x2;
+        let cy2 = y1 + y2;
+        let a_outer = w;
+        let b_outer = h;
+        let a_inner = (w - 2 * thickness).max(0);
+        let b_inner = (h - 2 * thickness).max(0);
+        let a_outer2 = (a_outer as i64) * (a_outer as i64);
+        let b_outer2 = (b_outer as i64) * (b_outer as i64);
+        let a_inner2 = (a_inner as i64) * (a_inner as i64);
+        let b_inner2 = (b_inner as i64) * (b_inner as i64);
+
+        for py in y1..y2 {
+            let dy2 = 2 * py - cy2 + 1;
+            let dy2_sq = (dy2 as i64) * (dy2 as i64);
+
+            // Outer ellipse x range
+            if b_outer2 == 0 { continue; }
+            let dx2_sq_outer = a_outer2 * (b_outer2 - dy2_sq) / b_outer2;
+            if dx2_sq_outer < 0 { continue; }
+            let dx2_outer = (dx2_sq_outer as f64).sqrt() as i32;
+            let outer_left = (cx2 - dx2_outer) / 2;
+            let outer_right = (cx2 + dx2_outer + 1) / 2;
+
+            // Inner ellipse x range
+            let (inner_left, inner_right) = if b_inner2 > 0 && a_inner2 > 0 {
+                let dx2_sq_inner = a_inner2 * (b_inner2 - dy2_sq) / b_inner2;
+                if dx2_sq_inner > 0 {
+                    let dx2_inner = (dx2_sq_inner as f64).sqrt() as i32;
+                    let il = (cx2 - dx2_inner) / 2 + thickness;
+                    let ir = (cx2 + dx2_inner + 1) / 2 - thickness;
+                    if ir > il { (il, ir) } else { (outer_right, outer_left) } // no inner gap
+                } else {
+                    (outer_right, outer_left) // no inner gap at this y
+                }
+            } else {
+                (outer_right, outer_left) // fully filled at this y (thin ellipse)
+            };
+
+            // Draw left stroke band and right stroke band
+            for px in outer_left.max(x1)..inner_left.min(outer_right).min(x2) {
+                if alpha == 1.0 {
+                    self.set_pixel(px, py, color, palettes);
+                } else {
+                    let dst = self.get_pixel_color(palettes, px as u16, py as u16);
+                    self.set_pixel(px, py, blend_color_alpha(dst, color, alpha), palettes);
+                }
+            }
+            for px in inner_right.max(outer_left).max(x1)..outer_right.min(x2) {
+                if alpha == 1.0 {
+                    self.set_pixel(px, py, color, palettes);
+                } else {
+                    let dst = self.get_pixel_color(palettes, px as u16, py as u16);
+                    self.set_pixel(px, py, blend_color_alpha(dst, color, alpha), palettes);
+                }
+            }
+        }
+    }
+
+    /// Draw a filled rounded rectangle with given corner radius.
+    pub fn fill_round_rect(
+        &mut self,
+        x1: i32,
+        y1: i32,
+        x2: i32,
+        y2: i32,
+        radius: i32,
+        color: (u8, u8, u8),
+        palettes: &PaletteMap,
+        alpha: f32,
+    ) {
+        if alpha == 0.0 { return; }
+        let w = x2 - x1;
+        let h = y2 - y1;
+        let r = radius.min(w / 2).min(h / 2).max(0);
+
+        for py in y1..y2 {
+            let dy_top = py - y1;
+            let dy_bottom = (y2 - 1) - py;
+            let dy = dy_top.min(dy_bottom);
+
+            let (left, right) = if dy < r {
+                // In corner region — compute circular inset
+                let ry = r - dy;
+                let rx = r - ((r * r - ry * ry) as f64).sqrt() as i32;
+                (x1 + rx, x2 - rx)
+            } else {
+                (x1, x2)
+            };
+
+            for px in left..right {
+                if alpha == 1.0 {
+                    self.set_pixel(px, py, color, palettes);
+                } else {
+                    let dst = self.get_pixel_color(palettes, px as u16, py as u16);
+                    self.set_pixel(px, py, blend_color_alpha(dst, color, alpha), palettes);
+                }
+            }
+        }
+    }
+
+    /// Draw a rounded rectangle outline with given corner radius and line thickness.
+    pub fn stroke_round_rect(
+        &mut self,
+        x1: i32,
+        y1: i32,
+        x2: i32,
+        y2: i32,
+        radius: i32,
+        color: (u8, u8, u8),
+        palettes: &PaletteMap,
+        alpha: f32,
+        thickness: i32,
+    ) {
+        if alpha == 0.0 || thickness <= 0 { return; }
+        let w = x2 - x1;
+        let h = y2 - y1;
+        let r_outer = radius.min(w / 2).min(h / 2).max(0);
+        let r_inner = (r_outer - thickness).max(0);
+
+        for py in y1..y2 {
+            let dy_top = py - y1;
+            let dy_bottom = (y2 - 1) - py;
+            let dy = dy_top.min(dy_bottom);
+
+            // Outer edge
+            let (outer_left, outer_right) = if dy < r_outer {
+                let ry = r_outer - dy;
+                let rx = r_outer - ((r_outer * r_outer - ry * ry) as f64).sqrt() as i32;
+                (x1 + rx, x2 - rx)
+            } else {
+                (x1, x2)
+            };
+
+            // Inner edge
+            let (inner_left, inner_right) = if dy < thickness {
+                // Top or bottom edge — fill entire outer span
+                (outer_right, outer_left) // signals "no gap"
+            } else if dy < r_outer {
+                let inner_dy = dy - thickness;
+                if inner_dy < r_inner {
+                    let ry = r_inner - inner_dy;
+                    let rx = r_inner - ((r_inner * r_inner - ry * ry).max(0) as f64).sqrt() as i32;
+                    (x1 + thickness + rx, x2 - thickness - rx)
+                } else {
+                    (x1 + thickness, x2 - thickness)
+                }
+            } else {
+                (x1 + thickness, x2 - thickness)
+            };
+
+            // If inner_left >= inner_right, fill the whole outer row
+            if inner_left >= inner_right {
+                for px in outer_left..outer_right {
+                    if alpha == 1.0 {
+                        self.set_pixel(px, py, color, palettes);
+                    } else {
+                        let dst = self.get_pixel_color(palettes, px as u16, py as u16);
+                        self.set_pixel(px, py, blend_color_alpha(dst, color, alpha), palettes);
+                    }
+                }
+            } else {
+                // Left stroke band
+                for px in outer_left..inner_left.min(outer_right) {
+                    if alpha == 1.0 {
+                        self.set_pixel(px, py, color, palettes);
+                    } else {
+                        let dst = self.get_pixel_color(palettes, px as u16, py as u16);
+                        self.set_pixel(px, py, blend_color_alpha(dst, color, alpha), palettes);
+                    }
+                }
+                // Right stroke band
+                for px in inner_right.max(outer_left)..outer_right {
+                    if alpha == 1.0 {
+                        self.set_pixel(px, py, color, palettes);
+                    } else {
+                        let dst = self.get_pixel_color(palettes, px as u16, py as u16);
+                        self.set_pixel(px, py, blend_color_alpha(dst, color, alpha), palettes);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Draw a line with given thickness using Bresenham's algorithm.
+    pub fn draw_line_thick(
+        &mut self,
+        x1: i32,
+        y1: i32,
+        x2: i32,
+        y2: i32,
+        color: (u8, u8, u8),
+        palettes: &PaletteMap,
+        alpha: f32,
+        thickness: i32,
+    ) {
+        if alpha == 0.0 || thickness <= 0 { return; }
+        let half = thickness / 2;
+
+        let dx = (x2 - x1).abs();
+        let dy = -(y2 - y1).abs();
+        let sx: i32 = if x1 < x2 { 1 } else { -1 };
+        let sy: i32 = if y1 < y2 { 1 } else { -1 };
+        let mut err = dx + dy;
+        let mut cx = x1;
+        let mut cy = y1;
+
+        loop {
+            // Draw a filled circle/square at each point for thickness
+            if thickness <= 2 {
+                // For thin lines, draw a small square
+                for oy in -half..=(thickness - 1 - half) {
+                    for ox in -half..=(thickness - 1 - half) {
+                        let px = cx + ox;
+                        let py = cy + oy;
+                        if alpha == 1.0 {
+                            self.set_pixel(px, py, color, palettes);
+                        } else {
+                            let dst = self.get_pixel_color(palettes, px as u16, py as u16);
+                            self.set_pixel(px, py, blend_color_alpha(dst, color, alpha), palettes);
+                        }
+                    }
+                }
+            } else {
+                // For thicker lines, draw perpendicular to line direction
+                for oy in -half..=(thickness - 1 - half) {
+                    for ox in -half..=(thickness - 1 - half) {
+                        let px = cx + ox;
+                        let py = cy + oy;
+                        if alpha == 1.0 {
+                            self.set_pixel(px, py, color, palettes);
+                        } else {
+                            let dst = self.get_pixel_color(palettes, px as u16, py as u16);
+                            self.set_pixel(px, py, blend_color_alpha(dst, color, alpha), palettes);
+                        }
+                    }
+                }
+            }
+
+            if cx == x2 && cy == y2 { break; }
+            let e2 = 2 * err;
+            if e2 >= dy {
+                if cx == x2 { break; }
+                err += dy;
+                cx += sx;
+            }
+            if e2 <= dx {
+                if cy == y2 { break; }
+                err += dx;
+                cy += sy;
+            }
+        }
+    }
+
+    /// Flatten a cubic bezier curve into line segments using adaptive subdivision.
+    /// Returns a list of (x, y) points along the curve.
+    /// P0 = start, C1 = first control point, C2 = second control point, P3 = end.
+    pub fn flatten_cubic_bezier(
+        p0: (f32, f32),
+        c1: (f32, f32),
+        c2: (f32, f32),
+        p3: (f32, f32),
+        tolerance: f32,
+    ) -> Vec<(f32, f32)> {
+        let mut result = vec![p0];
+        Self::flatten_bezier_recursive(p0, c1, c2, p3, tolerance, &mut result, 0);
+        result
+    }
+
+    fn flatten_bezier_recursive(
+        p0: (f32, f32),
+        c1: (f32, f32),
+        c2: (f32, f32),
+        p3: (f32, f32),
+        tolerance: f32,
+        result: &mut Vec<(f32, f32)>,
+        depth: u32,
+    ) {
+        // Check flatness: distance from control points to line P0-P3
+        let dx = p3.0 - p0.0;
+        let dy = p3.1 - p0.1;
+        let len_sq = dx * dx + dy * dy;
+
+        if depth > 10 || len_sq < 0.001 {
+            // Max recursion or degenerate segment
+            result.push(p3);
+            return;
+        }
+
+        // Distance from C1 and C2 to line P0-P3
+        let d1 = ((c1.0 - p0.0) * dy - (c1.1 - p0.1) * dx).abs();
+        let d2 = ((c2.0 - p0.0) * dy - (c2.1 - p0.1) * dx).abs();
+        let max_dist = (d1 + d2) / len_sq.sqrt();
+
+        if max_dist <= tolerance {
+            result.push(p3);
+            return;
+        }
+
+        // De Casteljau subdivision at t=0.5
+        let m01 = ((p0.0 + c1.0) * 0.5, (p0.1 + c1.1) * 0.5);
+        let m12 = ((c1.0 + c2.0) * 0.5, (c1.1 + c2.1) * 0.5);
+        let m23 = ((c2.0 + p3.0) * 0.5, (c2.1 + p3.1) * 0.5);
+        let m012 = ((m01.0 + m12.0) * 0.5, (m01.1 + m12.1) * 0.5);
+        let m123 = ((m12.0 + m23.0) * 0.5, (m12.1 + m23.1) * 0.5);
+        let mid = ((m012.0 + m123.0) * 0.5, (m012.1 + m123.1) * 0.5);
+
+        Self::flatten_bezier_recursive(p0, m01, m012, mid, tolerance, result, depth + 1);
+        Self::flatten_bezier_recursive(mid, m123, m23, p3, tolerance, result, depth + 1);
+    }
+
+    /// Blend a color with alpha onto a 32-bit RGBA pixel in the bitmap data.
+    /// Uses premultiplied alpha "over" compositing.
+    fn blend_pixel_aa(&mut self, px: i32, py: i32, color: (u8, u8, u8), coverage: f32) {
+        if px < 0 || py < 0 || px >= self.width as i32 || py >= self.height as i32 {
+            return;
+        }
+        let idx = (py as usize * self.width as usize + px as usize) * 4;
+        if idx + 3 >= self.data.len() { return; }
+
+        let src_a = (coverage * 255.0 + 0.5) as u8;
+        if src_a == 0 { return; }
+
+        let dst_r = self.data[idx] as u16;
+        let dst_g = self.data[idx + 1] as u16;
+        let dst_b = self.data[idx + 2] as u16;
+        let dst_a = self.data[idx + 3] as u16;
+
+        let sa = src_a as u16;
+        let inv_sa = 255 - sa;
+
+        self.data[idx]     = ((color.0 as u16 * sa + dst_r * inv_sa) / 255) as u8;
+        self.data[idx + 1] = ((color.1 as u16 * sa + dst_g * inv_sa) / 255) as u8;
+        self.data[idx + 2] = ((color.2 as u16 * sa + dst_b * inv_sa) / 255) as u8;
+        self.data[idx + 3] = (dst_a + (sa * (255 - dst_a)) / 255).min(255) as u8;
+    }
+
+    /// Draw an anti-aliased thick line segment using signed distance from the line.
+    fn draw_line_aa(
+        &mut self,
+        x1: f32, y1: f32,
+        x2: f32, y2: f32,
+        half_width: f32,
+        color: (u8, u8, u8),
+        _palettes: &PaletteMap,
+        alpha: f32,
+    ) {
+        let dx = x2 - x1;
+        let dy = y2 - y1;
+        let seg_len = (dx * dx + dy * dy).sqrt();
+        if seg_len < 0.001 { return; }
+
+        // Bounding box of the thick line
+        let expand = half_width + 1.0;
+        let px_min = (x1.min(x2) - expand).floor().max(0.0) as i32;
+        let py_min = (y1.min(y2) - expand).floor().max(0.0) as i32;
+        let px_max = (x1.max(x2) + expand).ceil().min(self.width as f32 - 1.0) as i32;
+        let py_max = (y1.max(y2) + expand).ceil().min(self.height as f32 - 1.0) as i32;
+
+        let inv_len_sq = 1.0 / (seg_len * seg_len);
+        for py in py_min..=py_max {
+            for px in px_min..=px_max {
+                let fx = px as f32 + 0.5;
+                let fy = py as f32 + 0.5;
+
+                // Project onto line segment
+                let t = (((fx - x1) * dx + (fy - y1) * dy) * inv_len_sq).clamp(0.0, 1.0);
+
+                // Distance to closest point on segment
+                let cx = x1 + t * dx;
+                let cy = y1 + t * dy;
+                let dist = ((fx - cx) * (fx - cx) + (fy - cy) * (fy - cy)).sqrt();
+
+                // Coverage with smooth anti-aliased edge
+                let coverage = (half_width + 0.5 - dist).clamp(0.0, 1.0) * alpha;
+                if coverage > 0.001 {
+                    self.blend_pixel_aa(px, py, color, coverage);
+                }
+            }
+        }
+    }
+
+    /// Draw an anti-aliased filled circle for round line joins/caps.
+    fn draw_circle_aa(
+        &mut self,
+        cx: f32, cy: f32,
+        radius: f32,
+        color: (u8, u8, u8),
+        _palettes: &PaletteMap,
+        alpha: f32,
+    ) {
+        let expand = radius + 1.0;
+        let px_min = (cx - expand).floor().max(0.0) as i32;
+        let py_min = (cy - expand).floor().max(0.0) as i32;
+        let px_max = (cx + expand).ceil().min(self.width as f32 - 1.0) as i32;
+        let py_max = (cy + expand).ceil().min(self.height as f32 - 1.0) as i32;
+
+        for py in py_min..=py_max {
+            for px in px_min..=px_max {
+                let fx = px as f32 + 0.5;
+                let fy = py as f32 + 0.5;
+                let dist = ((fx - cx) * (fx - cx) + (fy - cy) * (fy - cy)).sqrt();
+                let coverage = (radius + 0.5 - dist).clamp(0.0, 1.0) * alpha;
+                if coverage > 0.001 {
+                    self.blend_pixel_aa(px, py, color, coverage);
+                }
+            }
+        }
+    }
+
+    /// Draw a vectorShape (bezier curves with stroke/fill) onto this bitmap.
+    /// Coordinates are mapped from local vertex space to the destination rect.
+    pub fn draw_vector_shape(
+        &mut self,
+        vector_data: &crate::player::cast_member::VectorShapeMember,
+        dst_rect: IntRect,
+        palettes: &PaletteMap,
+        alpha: f32,
+    ) {
+        if vector_data.vertices.len() < 2 || alpha == 0.0 {
+            return;
+        }
+
+        let verts = &vector_data.vertices;
+
+        // Compute bounding box from vertices + stroke padding.
+        // The stroke extends half its width beyond vertex positions, so we pad
+        // the bbox to ensure the full stroke fits within the destination bitmap.
+        let mut min_x = f32::MAX;
+        let mut min_y = f32::MAX;
+        let mut max_x = f32::MIN;
+        let mut max_y = f32::MIN;
+        for v in verts.iter() {
+            min_x = min_x.min(v.x);
+            min_y = min_y.min(v.y);
+            max_x = max_x.max(v.x);
+            max_y = max_y.max(v.y);
+        }
+        let pad = vector_data.stroke_width / 1.0;
+        min_x -= pad;
+        min_y -= pad;
+        max_x += pad;
+        max_y += pad;
+
+        let src_w = max_x - min_x;
+        let src_h = max_y - min_y;
+        if src_w <= 0.0 || src_h <= 0.0 {
+            return;
+        }
+
+        let dst_w = (dst_rect.right - dst_rect.left) as f32;
+        let dst_h = (dst_rect.bottom - dst_rect.top) as f32;
+        let scale_x = dst_w / src_w;
+        let scale_y = dst_h / src_h;
+
+        // Map a point from local vertex space to destination pixel coordinates
+        let map_point = |x: f32, y: f32| -> (f32, f32) {
+            let px = (x - min_x) * scale_x + dst_rect.left as f32;
+            let py = (y - min_y) * scale_y + dst_rect.top as f32;
+            (px, py)
+        };
+
+        // Flatten all bezier segments into polyline points
+        let mut all_points: Vec<(f32, f32)> = Vec::new();
+        let num_segments = if vector_data.closed {
+            verts.len()
+        } else {
+            verts.len() - 1
+        };
+
+        for i in 0..num_segments {
+            let j = (i + 1) % verts.len();
+            let v0 = &verts[i];
+            let v1 = &verts[j];
+
+            // P0 = vertex[i]
+            let p0 = map_point(v0.x, v0.y);
+            // C1 = vertex[i] + handle1[i] (outgoing control point)
+            let c1 = map_point(v0.x + v0.handle1_x, v0.y + v0.handle1_y);
+            // C2 = vertex[j] + handle2[j] (incoming control point)
+            let c2 = map_point(v1.x + v1.handle2_x, v1.y + v1.handle2_y);
+            // P3 = vertex[j]
+            let p3 = map_point(v1.x, v1.y);
+
+            let segment_points = Self::flatten_cubic_bezier(p0, c1, c2, p3, 0.5);
+            if i == 0 {
+                all_points.extend_from_slice(&segment_points);
+            } else {
+                // Skip first point (duplicate of previous segment's last point)
+                all_points.extend_from_slice(&segment_points[1..]);
+            }
+        }
+
+        // Fill if fillMode != 0 (solid fill)
+        if vector_data.fill_mode != 0 && all_points.len() >= 3 {
+            self.scanline_fill_polygon(&all_points, vector_data.fill_color, palettes, alpha);
+        }
+
+        // Anti-aliased stroke
+        if vector_data.stroke_width > 0.0 && all_points.len() >= 2 {
+            let half_w = vector_data.stroke_width / 2.0;
+            let color = vector_data.stroke_color;
+            for i in 0..all_points.len() - 1 {
+                let (x1, y1) = all_points[i];
+                let (x2, y2) = all_points[i + 1];
+                self.draw_line_aa(x1, y1, x2, y2, half_w, color, palettes, alpha);
+            }
+            // Draw round caps at each polyline point for smooth joins
+            for &(px, py) in &all_points {
+                self.draw_circle_aa(px, py, half_w, color, palettes, alpha);
+            }
+        }
+    }
+
+    /// Draw a vector shape with full ink support, following the same pattern as
+    /// draw_shape_with_sprite: ink 0 draws directly, other inks use an intermediate
+    /// bitmap + copy_pixels for proper ink compositing.
+    pub fn draw_vector_shape_with_sprite(
+        &mut self,
+        sprite: &crate::player::sprite::Sprite,
+        vector_data: &crate::player::cast_member::VectorShapeMember,
+        dst_rect: IntRect,
+        palettes: &PaletteMap,
+    ) {
+        let alpha = (sprite.blend as f32 / 100.0).clamp(0.0, 1.0);
+
+        if sprite.ink == 0 {
+            // Copy ink: draw directly onto destination bitmap
+            self.draw_vector_shape(vector_data, dst_rect, palettes, alpha);
+        } else {
+            // Non-copy ink: use temp bitmap + copy_pixels for proper ink handling
+            let w = dst_rect.width().max(1);
+            let h = dst_rect.height().max(1);
+            let mut temp = Bitmap::new(
+                w as u16, h as u16,
+                32, 32, 0,
+                super::bitmap::PaletteRef::BuiltIn(get_system_default_palette()),
+            );
+            // Start fully transparent
+            temp.data.fill(0);
+            temp.use_alpha = true;
+
+            // Draw vector shape into temp at local (0,0) coordinates
+            let local_rect = IntRect::from_tuple((0, 0, w, h));
+            temp.draw_vector_shape(vector_data, local_rect, palettes, 1.0);
+
+            let mut params = HashMap::new();
+            params.insert("blend".into(), Datum::Int(sprite.blend as i32));
+            params.insert("ink".into(), Datum::Int(sprite.ink as i32));
+            params.insert("color".into(), Datum::ColorRef(sprite.color.clone()));
+            params.insert("bgColor".into(), Datum::ColorRef(sprite.bg_color.clone()));
+
+            self.copy_pixels(
+                palettes,
+                &temp,
+                dst_rect,
+                IntRect::from_tuple((0, 0, w, h)),
+                &params,
+                None,
+            );
+        }
+    }
+
+    /// Scanline fill a polygon defined by a list of points.
+    fn scanline_fill_polygon(
+        &mut self,
+        points: &[(f32, f32)],
+        color: (u8, u8, u8),
+        palettes: &PaletteMap,
+        alpha: f32,
+    ) {
+        if points.len() < 3 || alpha == 0.0 {
+            return;
+        }
+
+        // Find vertical extent
+        let mut min_y = f32::MAX;
+        let mut max_y = f32::MIN;
+        for p in points.iter() {
+            min_y = min_y.min(p.1);
+            max_y = max_y.max(p.1);
+        }
+        let y_start = min_y.floor() as i32;
+        let y_end = max_y.ceil() as i32;
+
+        // For each scanline, find intersection x-coordinates with polygon edges
+        for y in y_start..=y_end {
+            let yf = y as f32 + 0.5; // sample at scanline center
+            let mut intersections: Vec<f32> = Vec::new();
+
+            let n = points.len();
+            for i in 0..n {
+                let j = (i + 1) % n;
+                let (x0, y0) = points[i];
+                let (x1, y1) = points[j];
+
+                // Check if scanline crosses this edge
+                if (y0 <= yf && y1 > yf) || (y1 <= yf && y0 > yf) {
+                    let t = (yf - y0) / (y1 - y0);
+                    intersections.push(x0 + t * (x1 - x0));
+                }
+            }
+
+            intersections.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+
+            // Fill between pairs of intersections
+            let mut i = 0;
+            while i + 1 < intersections.len() {
+                let x_start = intersections[i].ceil() as i32;
+                let x_end = intersections[i + 1].floor() as i32;
+                for x in x_start..=x_end {
+                    if alpha == 1.0 {
+                        self.set_pixel(x, y, color, palettes);
+                    } else {
+                        let dst = self.get_pixel_color(palettes, x as u16, y as u16);
+                        self.set_pixel(x, y, blend_color_alpha(dst, color, alpha), palettes);
+                    }
+                }
+                i += 2;
             }
         }
     }
@@ -1733,6 +2425,98 @@ impl Bitmap {
         }
     }
 
+    /// Draw text with word wrapping. Returns the number of lines drawn.
+    pub fn draw_text_wrapped(
+        &mut self,
+        text: &str,
+        font: &BitmapFont,
+        font_bitmap: &Bitmap,
+        loc_h: i32,
+        loc_v: i32,
+        max_width: i32,
+        alignment: &str,
+        params: CopyPixelsParams,
+        palettes: &PaletteMap,
+        line_spacing: u16,
+        top_spacing: i16,
+    ) -> i32 {
+        let line_height = font.char_height as i32 + line_spacing as i32;
+
+        // Break text into wrapped lines
+        let lines = Self::wrap_text_lines(text, font, max_width);
+
+        let mut y = loc_v + top_spacing as i32;
+        for line in &lines {
+            // Calculate x based on alignment
+            let line_w: i32 = line.chars()
+                .map(|ch| font.get_char_advance(ch as u8) as i32)
+                .sum();
+            let x = match alignment {
+                "center" => loc_h + ((max_width - line_w) / 2).max(0),
+                "right" => loc_h + (max_width - line_w).max(0),
+                _ => loc_h,
+            };
+
+            // Draw each character
+            let mut cx = x;
+            for ch in line.chars() {
+                bitmap_font_copy_char(
+                    font, font_bitmap, ch as u8,
+                    self, cx, y, palettes, &params,
+                );
+                cx += font.get_char_advance(ch as u8) as i32;
+            }
+            y += line_height;
+        }
+        lines.len() as i32
+    }
+
+    /// Break text into lines that fit within max_width, wrapping at word boundaries.
+    pub fn wrap_text_lines(text: &str, font: &BitmapFont, max_width: i32) -> Vec<String> {
+        let mut lines: Vec<String> = Vec::new();
+
+        for paragraph in text.split(|c| c == '\r' || c == '\n') {
+            if max_width <= 0 {
+                lines.push(paragraph.to_string());
+                continue;
+            }
+
+            let words: Vec<&str> = paragraph.split(' ').collect();
+            let mut current_line = String::new();
+            let mut current_width: i32 = 0;
+            let space_width = font.get_char_advance(b' ') as i32;
+
+            for (i, word) in words.iter().enumerate() {
+                let word_width: i32 = word.chars()
+                    .map(|ch| font.get_char_advance(ch as u8) as i32)
+                    .sum();
+
+                let needed = if current_line.is_empty() {
+                    word_width
+                } else {
+                    space_width + word_width
+                };
+
+                if !current_line.is_empty() && current_width + needed > max_width {
+                    // Wrap: push current line and start new one
+                    lines.push(current_line);
+                    current_line = word.to_string();
+                    current_width = word_width;
+                } else {
+                    if !current_line.is_empty() {
+                        current_line.push(' ');
+                        current_width += space_width;
+                    }
+                    current_line.push_str(word);
+                    current_width += word_width;
+                }
+            }
+            lines.push(current_line);
+        }
+
+        lines
+    }
+
     pub fn trim_whitespace(&mut self, palettes: &PaletteMap) {
         let mut left = 0 as i32;
         let mut top = 0 as i32;
@@ -1909,46 +2693,177 @@ impl Bitmap {
         a.0 == b.0 && a.1 == b.1 && a.2 == b.2
     }
 
-    pub fn fill_shape_rect_with_sprite(
+    /// Draw a vector shape with proper type dispatch and ink/blend support.
+    /// Renders the shape to a temporary bitmap, then copy_pixels onto destination
+    /// to properly handle Director ink modes.
+    /// Draw a vector shape directly onto this bitmap with ink/blend support.
+    pub fn draw_shape_with_sprite(
         &mut self,
         sprite: &crate::player::sprite::Sprite,
+        shape_info: &ShapeInfo,
         dst_rect: IntRect,
         palettes: &PaletteMap,
     ) {
-        // Create a temporary 1×1 bitmap representing the foreground color
-        let mut temp = Bitmap::new(
-            1,
-            1,
-            self.bit_depth,
-            self.original_bit_depth,
-            0,
-            self.palette_ref.clone(),
-        );
+        let x1 = dst_rect.left;
+        let y1 = dst_rect.top;
+        let x2 = dst_rect.right;
+        let y2 = dst_rect.bottom;
 
-        // Resolve sprite.color (foreground)
+        // Resolve foreground color
         let fg_rgb = resolve_color_ref(
             palettes,
             &sprite.color,
             &PaletteRef::BuiltIn(get_system_default_palette()),
             self.original_bit_depth,
         );
-        temp.set_pixel(0, 0, fg_rgb, palettes);
 
-        // Build Director-style copy_pixels parameters
-        let mut params = HashMap::new();
-        params.insert("blend".into(), Datum::Int(sprite.blend as i32));
-        params.insert("ink".into(), Datum::Int(sprite.ink as i32));
-        params.insert("color".into(), Datum::ColorRef(sprite.color.clone()));
-        params.insert("bgColor".into(), Datum::ColorRef(sprite.bg_color.clone()));
+        let filled = shape_info.fill_type != 0;
+        // Per ScummVM: for outlined shapes, line_thickness of 1 means invisible (subtract 1)
+        let thickness = if filled {
+            // Filled shapes: outline is optional, drawn at actual thickness
+            shape_info.line_thickness as i32
+        } else {
+            // Outlined shapes: thickness 1 = invisible per ScummVM convention
+            (shape_info.line_thickness as i32) - 1
+        };
 
-        // Copy the 1×1 bitmap over the rectangle, using copy_pixels
-        self.copy_pixels(
-            palettes,
-            &temp,
-            dst_rect,
-            IntRect::from_tuple((0, 0, 1, 1)),
-            &params,
-            None,
-        );
+        // Convert blend percentage to alpha (0.0-1.0)
+        let alpha = (sprite.blend as f32 / 100.0).clamp(0.0, 1.0);
+
+        // For ink=copy (0), draw directly onto destination bitmap with alpha blending.
+        // For other inks, use temp bitmap + copy_pixels for proper ink handling.
+        let use_direct = sprite.ink == 0;
+
+        if use_direct {
+            // Direct drawing onto destination bitmap
+            match shape_info.shape_type {
+                ShapeType::Rect => {
+                    if filled {
+                        self.fill_rect(x1, y1, x2, y2, fg_rgb, palettes, alpha);
+                    }
+                    if thickness > 0 {
+                        for t in 0..thickness {
+                            self.stroke_rect(x1 + t, y1 + t, x2 - t, y2 - t, fg_rgb, palettes, alpha);
+                        }
+                    }
+                }
+                ShapeType::OvalRect => {
+                    let radius = 12;
+                    if filled {
+                        self.fill_round_rect(x1, y1, x2, y2, radius, fg_rgb, palettes, alpha);
+                    }
+                    if thickness > 0 {
+                        self.stroke_round_rect(x1, y1, x2, y2, radius, fg_rgb, palettes, alpha, thickness);
+                    }
+                }
+                ShapeType::Oval => {
+                    if filled {
+                        self.fill_ellipse(x1, y1, x2, y2, fg_rgb, palettes, alpha);
+                    }
+                    if thickness > 0 {
+                        self.stroke_ellipse(x1, y1, x2, y2, fg_rgb, palettes, alpha, thickness);
+                    }
+                }
+                ShapeType::Line => {
+                    let t = (shape_info.line_thickness as i32).max(1);
+                    if shape_info.line_direction == 6 {
+                        self.draw_line_thick(x1, y2 - 1, x2 - 1, y1, fg_rgb, palettes, alpha, t);
+                    } else {
+                        self.draw_line_thick(x1, y1, x2 - 1, y2 - 1, fg_rgb, palettes, alpha, t);
+                    }
+                }
+                ShapeType::Unknown => {
+                    self.fill_rect(x1, y1, x2, y2, fg_rgb, palettes, alpha);
+                }
+            }
+        } else {
+            // Non-copy ink: use temp bitmap + copy_pixels for proper ink handling
+            let w = (x2 - x1).max(1);
+            let h = (y2 - y1).max(1);
+            let mut temp = Bitmap::new(
+                w as u16, h as u16,
+                self.bit_depth, self.original_bit_depth, 0,
+                self.palette_ref.clone(),
+            );
+
+            match shape_info.shape_type {
+                ShapeType::Rect | ShapeType::Unknown => {
+                    if filled {
+                        temp.fill_rect(0, 0, w, h, fg_rgb, palettes, 1.0);
+                    }
+                    if thickness > 0 {
+                        for t in 0..thickness {
+                            temp.stroke_rect(t, t, w - t, h - t, fg_rgb, palettes, 1.0);
+                        }
+                    }
+                }
+                ShapeType::OvalRect => {
+                    let radius = 12;
+                    if filled {
+                        temp.fill_round_rect(0, 0, w, h, radius, fg_rgb, palettes, 1.0);
+                    }
+                    if thickness > 0 {
+                        temp.stroke_round_rect(0, 0, w, h, radius, fg_rgb, palettes, 1.0, thickness);
+                    }
+                }
+                ShapeType::Oval => {
+                    if filled {
+                        temp.fill_ellipse(0, 0, w, h, fg_rgb, palettes, 1.0);
+                    }
+                    if thickness > 0 {
+                        temp.stroke_ellipse(0, 0, w, h, fg_rgb, palettes, 1.0, thickness);
+                    }
+                }
+                ShapeType::Line => {
+                    let t = (shape_info.line_thickness as i32).max(1);
+                    if shape_info.line_direction == 6 {
+                        temp.draw_line_thick(0, h - 1, w - 1, 0, fg_rgb, palettes, 1.0, t);
+                    } else {
+                        temp.draw_line_thick(0, 0, w - 1, h - 1, fg_rgb, palettes, 1.0, t);
+                    }
+                }
+            }
+
+            let mut params = HashMap::new();
+            params.insert("blend".into(), Datum::Int(sprite.blend as i32));
+            params.insert("ink".into(), Datum::Int(sprite.ink as i32));
+            params.insert("color".into(), Datum::ColorRef(sprite.color.clone()));
+            params.insert("bgColor".into(), Datum::ColorRef(sprite.bg_color.clone()));
+
+            self.copy_pixels(
+                palettes,
+                &temp,
+                dst_rect,
+                IntRect::from_tuple((0, 0, w, h)),
+                &params,
+                None,
+            );
+        }
+    }
+
+    /// Legacy wrapper for backward compatibility — calls draw_shape_with_sprite with default rect shape.
+    pub fn fill_shape_rect_with_sprite(
+        &mut self,
+        sprite: &crate::player::sprite::Sprite,
+        dst_rect: IntRect,
+        palettes: &PaletteMap,
+    ) {
+        let w = (dst_rect.right - dst_rect.left).max(1);
+        let h = (dst_rect.bottom - dst_rect.top).max(1);
+        // Default to filled rect shape
+        let default_shape = ShapeInfo {
+            shape_type: ShapeType::Rect,
+            rect_top: 0,
+            rect_left: 0,
+            rect_bottom: h as i16,
+            rect_right: w as i16,
+            pattern: 0,
+            fore_color: 0,
+            back_color: 0,
+            fill_type: 1,
+            line_thickness: 0,
+            line_direction: 0,
+        };
+        self.draw_shape_with_sprite(sprite, &default_shape, dst_rect, palettes);
     }
 }

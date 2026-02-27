@@ -81,10 +81,40 @@ pub enum ShapeType {
 #[derive(Clone)]
 pub struct ShapeInfo {
     pub shape_type: ShapeType,
-    pub reg_point: (i16, i16),
-    pub width: u16,
-    pub height: u16,
-    pub color: u8,
+    pub rect_top: i16,
+    pub rect_left: i16,
+    pub rect_bottom: i16,
+    pub rect_right: i16,
+    pub pattern: u16,
+    pub fore_color: u8,
+    pub back_color: u8,
+    pub fill_type: u8,
+    pub line_thickness: u8,
+    pub line_direction: u8,
+}
+
+impl ShapeInfo {
+    pub fn width(&self) -> i16 {
+        self.rect_right - self.rect_left
+    }
+    pub fn height(&self) -> i16 {
+        self.rect_bottom - self.rect_top
+    }
+    pub fn default_rect() -> ShapeInfo {
+        ShapeInfo {
+            shape_type: ShapeType::Rect,
+            rect_top: 0,
+            rect_left: 0,
+            rect_bottom: 0,
+            rect_right: 0,
+            pattern: 0,
+            fore_color: 0,
+            back_color: 0,
+            fill_type: 1,
+            line_thickness: 0,
+            line_direction: 0,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -150,11 +180,11 @@ impl From<&[u8]> for FieldInfo {
         // Bytes 12-13: scroll as u16
         let scroll = reader.read_u16().unwrap_or(0);
 
-        // Bytes 14-21: rect (4 × i16)
-        let rect_left = reader.read_i16().unwrap_or(0);
+        // Bytes 14-21: rect in QuickDraw order (top, left, bottom, right)
         let rect_top = reader.read_i16().unwrap_or(0);
-        let rect_right = reader.read_i16().unwrap_or(0);
+        let rect_left = reader.read_i16().unwrap_or(0);
         let rect_bottom = reader.read_i16().unwrap_or(0);
+        let rect_right = reader.read_i16().unwrap_or(0);
 
         // Bytes 22-23: max_height as u16
         let max_height = reader.read_u16().unwrap_or(0);
@@ -404,45 +434,28 @@ impl From<&[u8]> for BitmapInfo {
 
 impl From<&[u8]> for ShapeInfo {
     fn from(bytes: &[u8]) -> ShapeInfo {
-        // Shape specific data: 00 01   00 00 00 00   00 36   02 d0   00 01   ff   00 01   01 05
-        // Shape specific data: 00 01   00 00 00 00   01 30   01 86   00 01   22   00 01   01 05
-        // Shape specific data: 00 01   00 00 00 00   00 35   02 d0   00 01   ff   00 01   01 05
-
-        // lineSize, lineDirection, pattern, filled, shapeType, hilite, regPoint
+        // D4/D5 shape specific data layout (17 bytes):
+        //   shapeType(u16) | rect top(i16) left(i16) bottom(i16) right(i16) |
+        //   pattern(u16) | fgCol(u8) | bgCol(u8) | fillType(u8) | lineThickness(u8) | lineDirection(u8)
+        //
+        // Example: 00 01  00 00 00 00 00 36 02 d0  00 01  ff  00  01  01  05
 
         let mut reader = BinaryReader::from_u8(bytes);
         reader.set_endian(binary_reader::Endian::Big);
 
-        let mut shape_type_raw = 0;
-        let mut reg_y = 0;
-        let mut reg_x = 0;
-        let mut height = 0;
-        let mut width = 0;
-        let mut color = 0;
+        let shape_type_raw = reader.read_u16().unwrap_or(0);
+        let rect_top = reader.read_i16().unwrap_or(0);
+        let rect_left = reader.read_i16().unwrap_or(0);
+        let rect_bottom = reader.read_i16().unwrap_or(0);
+        let rect_right = reader.read_i16().unwrap_or(0);
+        let pattern = reader.read_u16().unwrap_or(0);
+        let fore_color = reader.read_u8().unwrap_or(0);
+        let back_color = reader.read_u8().unwrap_or(0);
+        let fill_type = reader.read_u8().unwrap_or(0);
+        let line_thickness = reader.read_u8().unwrap_or(1);
+        let line_direction = reader.read_u8().unwrap_or(0);
 
-        if let Ok(val) = reader.read_u16() {
-            shape_type_raw = val;
-        } // 00 01
-        if let Ok(val) = reader.read_u16() {
-            reg_y = val;
-        } // 00 00
-        if let Ok(val) = reader.read_u16() {
-            reg_x = val;
-        } // 00 00
-        if let Ok(val) = reader.read_u16() {
-            height = val;
-        } // 00 36
-        if let Ok(val) = reader.read_u16() {
-            width = val;
-        } // 02 d0
-        let _ = reader.read_u16();
-        if let Ok(val) = reader.read_u8() {
-            color = val;
-        }
-        let _ = reader.read_u16();
-        let _ = reader.read_u16();
-
-        return ShapeInfo {
+        ShapeInfo {
             shape_type: match shape_type_raw {
                 0x0001 => ShapeType::Rect,
                 0x0002 => ShapeType::OvalRect,
@@ -453,11 +466,17 @@ impl From<&[u8]> for ShapeInfo {
                     ShapeType::Unknown
                 }
             },
-            reg_point: (reg_x as i16, reg_y as i16),
-            width,
-            height,
-            color,
-        };
+            rect_top,
+            rect_left,
+            rect_bottom,
+            rect_right,
+            pattern,
+            fore_color,
+            back_color,
+            fill_type,
+            line_thickness,
+            line_direction,
+        }
     }
 }
 

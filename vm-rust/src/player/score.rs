@@ -554,6 +554,8 @@ impl Score {
                 }
                 sprite.skew = data.skew as f64;
                 sprite.rotation = data.rotation as f64;
+                sprite.moveable = data.moveable;
+                sprite.trails = data.trails;
 
                 // Check if member is a shape to determine ink/blend handling
                 // Use find_member_by_ref which handles relative cast references (65535)
@@ -802,6 +804,8 @@ impl Score {
                 }
                 sprite.skew = data.skew as f64;
                 sprite.rotation = data.rotation as f64;
+                sprite.moveable = data.moveable;
+                sprite.trails = data.trails;
                 sprite.ink = (data.ink & 0x7F) as i32;
                 sprite.blend = if data.blend == 0 { 100 } else { data.blend as i32 };
             }
@@ -1582,6 +1586,8 @@ impl Score {
             sprite.height = data.height as i32;
             sprite.skew = data.skew as f64;
             sprite.rotation = data.rotation as f64;
+            sprite.moveable = data.moveable;
+            sprite.trails = data.trails;
 
             // Check if member is a shape to determine ink/blend handling
             // Use find_member_by_ref which handles relative cast references (65535)
@@ -2491,6 +2497,8 @@ pub fn sprite_get_prop(
         }
         "visible" | "visibility" => Ok(datum_bool(sprite.map_or(true, |sprite| sprite.visible))),
         "puppet" => Ok(datum_bool(sprite.map_or(false, |sprite| sprite.puppet))),
+        "moveableSprite" | "moveable" => Ok(datum_bool(sprite.map_or(false, |sprite| sprite.moveable))),
+        "trails" => Ok(datum_bool(sprite.map_or(false, |sprite| sprite.trails))),
         "foreColor" | "forecolor" => Ok(Datum::Int(
             sprite.map_or(255, |sprite| sprite.fore_color) as i32,
         )),
@@ -2800,7 +2808,10 @@ pub fn sprite_set_prop(sprite_id: i16, prop_name: &str, value: Datum) -> Result<
                                 Some((bitmap.info.width as i32, bitmap.info.height as i32))
                             }
                             CastMemberType::Shape(shape) => {
-                                Some((shape.shape_info.width as i32, shape.shape_info.height as i32))
+                                Some((shape.shape_info.width() as i32, shape.shape_info.height() as i32))
+                            }
+                            CastMemberType::VectorShape(vs) => {
+                                Some((vs.width().ceil() as i32, vs.height().ceil() as i32))
                             }
                             _ => None,
                         };
@@ -3077,6 +3088,22 @@ pub fn sprite_set_prop(sprite_id: i16, prop_name: &str, value: Datum) -> Result<
             |_| {},
             |sprite, _| {
                 sprite.puppet = value.to_bool()?;
+                Ok(())
+            },
+        ),
+        "moveableSprite" | "moveable" => borrow_sprite_mut(
+            sprite_id,
+            |_| {},
+            |sprite, _| {
+                sprite.moveable = value.to_bool()?;
+                Ok(())
+            },
+        ),
+        "trails" => borrow_sprite_mut(
+            sprite_id,
+            |_| {},
+            |sprite, _| {
+                sprite.trails = value.to_bool()?;
                 Ok(())
             },
         ),
@@ -3364,44 +3391,16 @@ pub fn get_concrete_sprite_rect(player: &DirPlayer, sprite: &Sprite) -> IntRect 
 
             IntRect::from(left, top, right, bottom)
         }
-        CastMemberType::Shape(shape_member) => {
-            let reg_x = shape_member.shape_info.reg_point.0;
-            let reg_y = shape_member.shape_info.reg_point.1;
-
-            // Handle flips for shapes
-            let final_reg_x = if sprite.flip_h {
-                sprite.width - reg_x as i32
-            } else {
-                reg_x as i32
-            };
-
-            let final_reg_y = if sprite.flip_v {
-                sprite.height - reg_y as i32
-            } else {
-                reg_y as i32
-            };
-
-            let left = sprite.loc_h - final_reg_x;
-            let top = sprite.loc_v - final_reg_y;
+        CastMemberType::Shape(_shape_member) => {
+            // Shapes use rect origin (0,0) — no registration point offset
+            let left = sprite.loc_h;
+            let top = sprite.loc_v;
 
             IntRect::from(
                 left,
                 top,
                 left + sprite.width,
                 top + sprite.height,
-            )
-        }
-        CastMemberType::Shape(shape_member) => {
-            let reg_x = shape_member.shape_info.reg_point.0;
-            let reg_y = shape_member.shape_info.reg_point.1;
-            // Apply registration point offset (same as bitmaps)
-            let draw_x = sprite.loc_h - reg_x as i32;
-            let draw_y = sprite.loc_v - reg_y as i32;
-            IntRect::from(
-                draw_x,
-                draw_y,
-                sprite.width + draw_x,
-                sprite.height + draw_y,
             )
         }
         CastMemberType::Field(field_member) => {
@@ -3428,6 +3427,23 @@ pub fn get_concrete_sprite_rect(player: &DirPlayer, sprite: &Sprite) -> IntRect 
             };
             let field_height = field_height.max(1);
             IntRect::from_size(sprite.loc_h, sprite.loc_v, field_width, field_height)
+        }
+        CastMemberType::Button(button_member) => {
+            // Button dimensions come from initialRect (field.rect_*), not sprite bbox
+            let field = &button_member.field;
+            let rect_w = (field.rect_right - field.rect_left).max(0) as i32;
+            let rect_h = (field.rect_bottom - field.rect_top).max(0) as i32;
+            let extras = (2 * field.border as i32)
+                + (2 * field.margin as i32);
+            // Use rect dimensions if available, otherwise fall back to sprite dimensions
+            let btn_w = if rect_w > 0 { rect_w + extras } else { sprite.width };
+            let btn_h = if rect_h > 0 { rect_h + extras } else { sprite.height };
+            // For checkbox/radio, add 16px width for the indicator
+            let extra_w = match button_member.button_type {
+                super::cast_member::ButtonType::CheckBox | super::cast_member::ButtonType::RadioButton => 16,
+                _ => 0,
+            };
+            IntRect::from_size(sprite.loc_h, sprite.loc_v, btn_w + extra_w, btn_h.max(1))
         }
         CastMemberType::Text(text_member) => {
             // Calculate draw position based on registration point from TextInfo
@@ -3489,6 +3505,17 @@ pub fn get_concrete_sprite_rect(player: &DirPlayer, sprite: &Sprite) -> IntRect 
                 sprite.loc_v - reg_y,
                 sprite.loc_h - reg_x + use_width,
                 sprite.loc_v - reg_y + use_height,
+            )
+        }
+        CastMemberType::VectorShape(_vs) => {
+            // VectorShapes with centerRegPoint use center registration
+            let reg_x = sprite.width / 2;
+            let reg_y = sprite.height / 2;
+            IntRect::from(
+                sprite.loc_h - reg_x,
+                sprite.loc_v - reg_y,
+                sprite.loc_h - reg_x + sprite.width,
+                sprite.loc_v - reg_y + sprite.height,
             )
         }
         _ => IntRect::from_size(sprite.loc_h, sprite.loc_v, sprite.width, sprite.height),
