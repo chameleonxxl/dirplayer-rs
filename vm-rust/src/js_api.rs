@@ -1122,7 +1122,7 @@ impl JsApi {
                         script_ref_map.str_set("castLib", &behavior.cast_lib.to_js_value());
                         script_ref_map.str_set("castMember", &behavior.cast_member.to_js_value());
                         script_ref_map.str_set("channelNumber", &span.channel_number.to_js_value());
-                        script_ref_map.to_js_object()
+                        JsValue::from(script_ref_map.to_js_object())
                     }),
             ),
         );
@@ -1158,7 +1158,7 @@ impl JsApi {
                     init_data_map.str_set("spriteListIdx", &init_data.sprite_list_idx().to_js_value());
 
                     channel_map.str_set("initData", &init_data_map.to_js_object());
-                    channel_map.to_js_object()
+                    JsValue::from(channel_map.to_js_object())
                 },
             )),
         );
