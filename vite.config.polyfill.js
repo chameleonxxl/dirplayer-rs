@@ -50,7 +50,8 @@ export default defineConfig({
   publicDir: false,
   // Replace Node.js globals for browser compatibility
   define: {
-    "process.env.NODE_ENV": JSON.stringify("production"),
+    "process.env": JSON.stringify({ NODE_ENV: "production" }),
+    "process.platform": JSON.stringify("browser"),
     "DIRPLAYER_VERSION": JSON.stringify(pkg.version),
   },
   build: {
