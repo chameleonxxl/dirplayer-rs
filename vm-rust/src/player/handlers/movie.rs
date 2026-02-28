@@ -6,8 +6,8 @@ use crate::{
         cast_lib::INVALID_CAST_MEMBER_REF,
         datum_formatting::format_datum, ScriptInstanceRef, Score,
         reserve_player_mut, reserve_player_ref, reserve_player_mut_async,
-        score::get_sprite_at, handlers::datum_handlers::player_call_datum_handler,
-        DatumRef, ScriptError, get_score_sprite_mut, MovieFrameTarget,
+        score::{get_sprite_at, concrete_sprite_hit_test}, handlers::datum_handlers::player_call_datum_handler,
+        DatumRef, ScriptError, ScriptErrorCode, get_score_sprite_mut, MovieFrameTarget,
         events::{
             player_invoke_event_to_instances, player_invoke_static_event,
             player_invoke_global_event, player_wait_available, player_unwrap_result,
@@ -161,9 +161,12 @@ impl MovieHandlers {
                 _ => None,
             };
 
-            let frame = dest.ok_or_else(|| {
-                ScriptError::new("Unsupported or invalid frame label passed to go()".to_string())
-            })?;
+            let frame = match dest {
+                Some(f) => f,
+                None => {
+                    return Err(ScriptError::new("Unsupported or invalid frame label passed to go()".to_string()));
+                }
+            };
 
             if player.next_frame.is_none() || frame != player.movie.current_frame {
                 player.next_frame = Some(frame);
@@ -315,6 +318,12 @@ impl MovieHandlers {
                             player_call_datum_handler(&actor_ref, &"stepFrame".to_string(), &vec![]).await;
 
                         if let Err(err) = result {
+                            if err.code == ScriptErrorCode::Abort {
+                                reserve_player_mut(|player| {
+                                    player.is_in_frame_update = false;
+                                });
+                                return Err(err);
+                            }
                             web_sys::console::log_1(
                                 &format!("⚠ stepFrame[{}] error: {}", idx, err.message).into(),
                             );
@@ -688,6 +697,12 @@ impl MovieHandlers {
                     player_call_datum_handler(&actor_ref, &"stepFrame".to_string(), &vec![]).await;
 
                 if let Err(err) = result {
+                    if err.code == ScriptErrorCode::Abort {
+                        reserve_player_mut(|player| {
+                            player.is_in_frame_update = false;
+                        });
+                        return Err(err);
+                    }
                     web_sys::console::log_1(
                         &format!("⚠ stepFrame[{}] error: {}", idx, err.message).into(),
                     );
@@ -738,7 +753,7 @@ impl MovieHandlers {
 
     pub async fn update_stage(_: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
         let should_yield = reserve_player_ref(|player| {
-            Ok(player.is_yield_safe() || player.command_handler_yielding)
+            Ok(player.is_yield_safe() || player.command_handler_yielding || player.in_mouse_command)
         })?;
 
         if should_yield {
@@ -751,16 +766,37 @@ impl MovieHandlers {
                 }
             });
 
+            // Yield to allow the browser event loop to process pending events
+            // (mouse up/move, keyboard, etc.). This is essential for scripts
+            // using "repeat while the mouseDown" or similar busy-wait loops.
+            // The mouse_up()/mouse_down() WASM exports update movie.mouse_down
+            // immediately via reserve_player_mut, so the state is correct when
+            // the script resumes. The MouseUp command stays queued and won't
+            // dispatch until the current handler finishes.
             async_std::task::sleep(std::time::Duration::from_millis(2)).await;
         }
 
         Ok(DatumRef::Void)
     }
 
-    pub fn rollover(_: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+    pub fn rollover(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
         reserve_player_mut(|player| {
-            let sprite = get_sprite_at(player, player.mouse_loc.0, player.mouse_loc.1, false);
-            Ok(player.alloc_datum(Datum::Int(sprite.unwrap_or(0) as i32)))
+            if !args.is_empty() {
+                // rollOver(spriteNum) - returns TRUE if the mouse is over the specified sprite
+                let sprite_num = player.get_datum(&args[0]).int_value()?;
+                let sprite = player.movie.score.get_sprite(sprite_num as i16);
+                if let Some(sprite) = sprite {
+                    let hit = concrete_sprite_hit_test(player, sprite, player.mouse_loc.0, player.mouse_loc.1);
+                    let result = if hit { 1 } else { 0 };
+                    Ok(player.alloc_datum(Datum::Int(result)))
+                } else {
+                    Ok(player.alloc_datum(Datum::Int(0)))
+                }
+            } else {
+                // the rollOver - returns the sprite number under the mouse
+                let sprite = get_sprite_at(player, player.mouse_loc.0, player.mouse_loc.1, false);
+                Ok(player.alloc_datum(Datum::Int(sprite.unwrap_or(0) as i32)))
+            }
         })
     }
 

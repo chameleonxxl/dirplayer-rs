@@ -101,11 +101,18 @@ pub async fn run_command_loop(rx: Receiver<PlayerVMExecutionItem>) {
                 }
             }
             Err(err) => {
-                // TODO ignore error if it's a CancelledException
-                // TODO print stack trace
-                reserve_player_mut(|player| player.on_script_error(&err));
-                if let Some(completer) = item.completer {
-                    completer.complete(Err(err)).await;
+                if err.code == super::ScriptErrorCode::Abort {
+                    // abort is a normal control flow mechanism, not an error
+                    if let Some(completer) = item.completer {
+                        completer.complete(Ok(DatumRef::Void)).await;
+                    }
+                } else {
+                    // TODO ignore error if it's a CancelledException
+                    // TODO print stack trace
+                    reserve_player_mut(|player| player.on_script_error(&err));
+                    if let Some(completer) = item.completer {
+                        completer.complete(Err(err)).await;
+                    }
                 }
             }
         }
@@ -324,10 +331,13 @@ pub async fn run_player_command(command: PlayerVMCommand) -> Result<DatumRef, Sc
             });
 
             // Temporarily clear ALL is_yield_safe() flags so that updateStage()
-            // called from within mouseDown handlers will render AND yield.
+            // called from within mouseDown handlers will render (but not yield).
             // MouseDown commands can be processed at any .await point in the frame
             // loop, where multiple flags may be true simultaneously (e.g.
             // is_in_frame_update AND in_enter_frame during enterFrame dispatch).
+            // Set in_mouse_command so the frame loop skips frame updates/advancement
+            // and updateStage renders without sleeping (preventing re-entrant event
+            // dispatch and timing issues with mouseUp processing).
             let saved_yield_flags = reserve_player_mut(|player| {
                 let saved = (
                     player.is_in_frame_update,
@@ -335,12 +345,14 @@ pub async fn run_player_command(command: PlayerVMCommand) -> Result<DatumRef, Sc
                     player.in_enter_frame,
                     player.in_prepare_frame,
                     player.in_event_dispatch,
+                    player.in_mouse_command,
                 );
                 player.is_in_frame_update = false;
                 player.in_frame_script = false;
                 player.in_enter_frame = false;
                 player.in_prepare_frame = false;
                 player.in_event_dispatch = false;
+                player.in_mouse_command = true;
                 saved
             });
 
@@ -422,23 +434,35 @@ pub async fn run_player_command(command: PlayerVMCommand) -> Result<DatumRef, Sc
                 Some((None, handler, vec![]))
             });
 
+            let mut handler_err: Option<ScriptError> = None;
             if let Some((receiver, handler, args)) = cast_member_script_call {
-                player_call_script_handler(receiver, handler, &args).await?;
+                if let Err(e) = player_call_script_handler(receiver, handler, &args).await {
+                    handler_err = Some(e);
+                }
             }
 
             // Dispatch mouseDownScript last as well (for cases where it was set
             // during sprite handler execution, e.g. not set at start of event)
-            player_dispatch_movie_callback("mouseDown").await?;
+            if handler_err.is_none() {
+                if let Err(e) = player_dispatch_movie_callback("mouseDown").await {
+                    handler_err = Some(e);
+                }
+            }
 
-            // Restore all is_yield_safe() flags
+            // Restore all is_yield_safe() flags and in_mouse_command
+            // MUST happen even on error to prevent skip_frame getting stuck
             reserve_player_mut(|player| {
                 player.is_in_frame_update = saved_yield_flags.0;
                 player.in_frame_script = saved_yield_flags.1;
                 player.in_enter_frame = saved_yield_flags.2;
                 player.in_prepare_frame = saved_yield_flags.3;
                 player.in_event_dispatch = saved_yield_flags.4;
+                player.in_mouse_command = saved_yield_flags.5;
             });
 
+            if let Some(e) = handler_err {
+                return Err(e);
+            }
             return Ok(DatumRef::Void);
         }
         PlayerVMCommand::MouseUp((x, y)) => {
@@ -504,9 +528,11 @@ pub async fn run_player_command(command: PlayerVMCommand) -> Result<DatumRef, Sc
             };
 
             // Temporarily clear ALL is_yield_safe() flags so that updateStage()
-            // called from within mouseUp handlers will render AND yield.
+            // called from within mouseUp handlers will render (but not yield).
             // Same rationale as mouseDown: multiple flags may be true when
             // the mouseUp command is processed at a frame loop .await point.
+            // Set in_mouse_command to prevent re-entrant frame updates and
+            // make updateStage synchronous (render-only, no sleep).
             let saved_yield_flags = reserve_player_mut(|player| {
                 let saved = (
                     player.is_in_frame_update,
@@ -514,12 +540,14 @@ pub async fn run_player_command(command: PlayerVMCommand) -> Result<DatumRef, Sc
                     player.in_enter_frame,
                     player.in_prepare_frame,
                     player.in_event_dispatch,
+                    player.in_mouse_command,
                 );
                 player.is_in_frame_update = false;
                 player.in_frame_script = false;
                 player.in_enter_frame = false;
                 player.in_prepare_frame = false;
                 player.in_event_dispatch = false;
+                player.in_mouse_command = true;
                 saved
             });
 
@@ -595,21 +623,34 @@ pub async fn run_player_command(command: PlayerVMCommand) -> Result<DatumRef, Sc
                 Some((None, handler.unwrap(), vec![]))
             });
 
+            let mut handler_err: Option<ScriptError> = None;
             if let Some((receiver, handler, args)) = cast_member_script_call {
-                player_call_script_handler(receiver, handler, &args).await?;
+                if let Err(e) = player_call_script_handler(receiver, handler, &args).await {
+                    handler_err = Some(e);
+                }
             }
 
-            player_dispatch_movie_callback("mouseUp").await?;
+            if handler_err.is_none() {
+                if let Err(e) = player_dispatch_movie_callback("mouseUp").await {
+                    handler_err = Some(e);
+                }
+            }
 
-            // Restore all is_yield_safe() flags
+            // Restore all is_yield_safe() flags and command_handler_yielding
+            // MUST happen even on error to prevent skip_frame getting stuck
             reserve_player_mut(|player| {
                 player.is_in_frame_update = saved_yield_flags.0;
                 player.in_frame_script = saved_yield_flags.1;
                 player.in_enter_frame = saved_yield_flags.2;
                 player.in_prepare_frame = saved_yield_flags.3;
                 player.in_event_dispatch = saved_yield_flags.4;
+                player.in_mouse_command = saved_yield_flags.5;
                 player.is_double_click = false;
             });
+
+            if let Some(e) = handler_err {
+                return Err(e);
+            }
             return Ok(DatumRef::Void);
         }
         PlayerVMCommand::MouseMove((x, y)) => {

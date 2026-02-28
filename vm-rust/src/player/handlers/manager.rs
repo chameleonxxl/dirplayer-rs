@@ -21,7 +21,7 @@ use crate::{
     director::lingo::datum::{Datum, DatumType, datum_bool},
     js_api::JsApi,
     player::{
-        DatumRef, DirPlayer, ScriptError, bitmap::bitmap::{Bitmap, PaletteRef, get_system_default_palette}, datum_formatting::{format_concrete_datum, format_datum}, geometry::IntRect, handlers::datum_handlers::xml::XmlHelper, keyboard_map, player_alloc_datum, player_call_global_handler, player_call_script_handler, reserve_player_mut, reserve_player_ref, script_ref::ScriptInstanceRef, xtra::manager::call_xtra_instance_handler
+        DatumRef, DirPlayer, ScriptError, ScriptErrorCode, bitmap::bitmap::{Bitmap, PaletteRef, get_system_default_palette}, datum_formatting::{format_concrete_datum, format_datum}, geometry::IntRect, handlers::datum_handlers::xml::XmlHelper, keyboard_map, player_alloc_datum, player_call_global_handler, player_call_script_handler, reserve_player_mut, reserve_player_ref, script_ref::ScriptInstanceRef, xtra::manager::call_xtra_instance_handler
     },
 };
 
@@ -528,6 +528,7 @@ impl BuiltInHandlerManager {
             "do" => true,
             "updateStage" => true,
             "go" => true,
+            "nothing" => true,
             _ => false,
         }
     }
@@ -547,6 +548,13 @@ impl BuiltInHandlerManager {
             "do" => Self::do_command(args).await,
             "updateStage" => MovieHandlers::update_stage(args).await,
             "go" => MovieHandlers::go(args).await,
+            "nothing" => {
+                // Yield to the browser event loop. In Director, nothing() is
+                // a no-op, but in WASM we use it to yield in busy-wait loops
+                // like waitABit() so the browser can repaint the canvas.
+                async_std::task::sleep(std::time::Duration::from_millis(0)).await;
+                Ok(DatumRef::Void)
+            }
             _ => {
                 let msg = format!("No built-in async handler: {}", name);
                 return Err(ScriptError::new(msg));
@@ -623,7 +631,11 @@ impl BuiltInHandlerManager {
             "bitxor" => TypeHandlers::bit_xor(args),
             "power" => TypeHandlers::power(args),
             "add" => TypeHandlers::add(args),
-            "nothing" => TypeHandlers::nothing(args),
+            "nothing" => {
+                // nothing() is handled as async to yield in busy-wait loops
+                return Ok(DatumRef::Void);
+            }
+            "abort" => Err(ScriptError::new_code(ScriptErrorCode::Abort, "abort".to_string())),
             "getaprop" => TypeHandlers::get_a_prop(args),
             "inside" => {
                 let point = &args[0];
@@ -658,6 +670,10 @@ impl BuiltInHandlerManager {
                 let list = &args[0];
                 let args = &args[1..].to_vec();
                 ListDatumHandlers::delete_one(list, &args)
+            }
+            "deleteall" => {
+                let list = &args[0];
+                ListDatumHandlers::delete_all(list, &vec![])
             }
             "getone" => reserve_player_mut(|player| {
                 let list = &args[0];

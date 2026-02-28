@@ -220,6 +220,7 @@ pub struct DirPlayer {
     pub in_prepare_frame: bool,
     pub in_event_dispatch: bool,
     pub command_handler_yielding: bool, // Pauses frame loop when a command handler (keyDown) needs updateStage to yield
+    pub in_mouse_command: bool, // Pauses frame loop during mouse handlers; updateStage renders without yielding
     pub current_frame_tempo: u32,  // Cached tempo for the current frame
     pub has_player_frame_changed: bool,
     pub has_frame_changed_in_go: bool,
@@ -351,6 +352,7 @@ impl DirPlayer {
             in_prepare_frame: false,
             in_event_dispatch: false,
             command_handler_yielding: false,
+            in_mouse_command: false,
             current_frame_tempo: 30,  // Default to 30 fps
             has_player_frame_changed: false,
             has_frame_changed_in_go: false,
@@ -1122,6 +1124,10 @@ impl DirPlayer {
     }
 
     fn on_script_error(&mut self, err: &ScriptError) {
+        // abort is flow control (exits handler chain), not a real error
+        if err.code == ScriptErrorCode::Abort {
+            return;
+        }
         warn!("[!!] play failed with error: {}", err.message);
         self.stop();
 
@@ -1479,6 +1485,7 @@ pub fn player_alloc_datum(datum: Datum) -> DatumRef {
 pub enum ScriptErrorCode {
     HandlerNotFound,
     Generic,
+    Abort,
 }
 
 #[derive(Debug, Clone)]
@@ -1836,19 +1843,21 @@ pub async fn player_call_script_handler_raw_args(
         let result = match player_execute_bytecode(&ctx).await {
             Ok(result) => result,
             Err(err) => {
-                // Check if break-on-error is enabled
-                let should_break = reserve_player_ref(|player| player.break_on_error);
-                if should_break {
-                    let (current_script_ref, current_bytecode_idx) = reserve_player_ref(|player| {
-                        let scope = player.scopes.get(scope_ref).unwrap();
-                        (scope.script_ref.clone(), scope.bytecode_index)
-                    });
-                    player_trigger_error_pause(
-                        err.clone(),
-                        current_script_ref,
-                        (script_member_ref.clone(), handler_name.clone()),
-                        current_bytecode_idx,
-                    ).await;
+                // abort is flow control, not a real error - skip break-on-error
+                if err.code != ScriptErrorCode::Abort {
+                    let should_break = reserve_player_ref(|player| player.break_on_error);
+                    if should_break {
+                        let (current_script_ref, current_bytecode_idx) = reserve_player_ref(|player| {
+                            let scope = player.scopes.get(scope_ref).unwrap();
+                            (scope.script_ref.clone(), scope.bytecode_index)
+                        });
+                        player_trigger_error_pause(
+                            err.clone(),
+                            current_script_ref,
+                            (script_member_ref.clone(), handler_name.clone()),
+                            current_bytecode_idx,
+                        ).await;
+                    }
                 }
                 // Cleanup on error
                 reserve_player_mut(|player| {
@@ -1878,19 +1887,21 @@ pub async fn player_call_script_handler_raw_args(
                 should_return = true;
             }
             HandlerExecutionResult::Error(err) => {
-                // Check if break-on-error is enabled
-                let should_break = reserve_player_ref(|player| player.break_on_error);
-                if should_break {
-                    let (current_script_ref, current_bytecode_idx) = reserve_player_ref(|player| {
-                        let scope = player.scopes.get(scope_ref).unwrap();
-                        (scope.script_ref.clone(), scope.bytecode_index)
-                    });
-                    player_trigger_error_pause(
-                        err.clone(),
-                        current_script_ref,
-                        (script_member_ref.clone(), handler_name.clone()),
-                        current_bytecode_idx,
-                    ).await;
+                // abort is flow control, not a real error - skip break-on-error
+                if err.code != ScriptErrorCode::Abort {
+                    let should_break = reserve_player_ref(|player| player.break_on_error);
+                    if should_break {
+                        let (current_script_ref, current_bytecode_idx) = reserve_player_ref(|player| {
+                            let scope = player.scopes.get(scope_ref).unwrap();
+                            (scope.script_ref.clone(), scope.bytecode_index)
+                        });
+                        player_trigger_error_pause(
+                            err.clone(),
+                            current_script_ref,
+                            (script_member_ref.clone(), handler_name.clone()),
+                            current_bytecode_idx,
+                        ).await;
+                    }
                 }
                 // Cleanup on error
                 reserve_player_mut(|player| {
@@ -1955,7 +1966,9 @@ async fn stop_movie_sequence() {
     player_wait_available().await;
 
     if let Err(err) = player_invoke_global_event(&"stopMovie".to_string(), &vec![]).await {
-        reserve_player_mut(|player| player.on_script_error(&err));
+        if err.code != ScriptErrorCode::Abort {
+            reserve_player_mut(|player| player.on_script_error(&err));
+        }
     }
 
     player_wait_available().await;
@@ -1987,7 +2000,9 @@ async fn run_movie_init_sequence() {
     dispatch_system_event_to_timeouts(&"prepareMovie".to_string(), &vec![]).await;
 
     if let Err(err) = player_invoke_global_event(&"prepareMovie".to_string(), &vec![]).await {
-        reserve_player_mut(|player| player.on_script_error(&err));
+        if err.code != ScriptErrorCode::Abort {
+            reserve_player_mut(|player| player.on_script_error(&err));
+        }
         return;
     }
 
@@ -2093,6 +2108,12 @@ async fn run_movie_init_sequence() {
                 player_call_datum_handler(&actor_ref, &"stepFrame".to_string(), &vec![]).await;
 
             if let Err(err) = result {
+                if err.code == ScriptErrorCode::Abort {
+                    reserve_player_mut(|player| {
+                        player.is_in_frame_update = false;
+                    });
+                    return;
+                }
                 web_sys::console::log_1(
                     &format!("⚠ stepFrame[{}] error: {}", idx, err.message).into(),
                 );
@@ -2120,7 +2141,9 @@ async fn run_movie_init_sequence() {
     dispatch_system_event_to_timeouts(&"startMovie".to_string(), &vec![]).await;
 
     if let Err(err) = player_invoke_global_event(&"startMovie".to_string(), &vec![]).await {
-        reserve_player_mut(|player| player.on_script_error(&err));
+        if err.code != ScriptErrorCode::Abort {
+            reserve_player_mut(|player| player.on_script_error(&err));
+        }
         return;
     }
 
@@ -2266,16 +2289,18 @@ pub async fn run_frame_loop() {
         if !is_script_paused {
             player_wait_available().await;
 
-            // Skip frame update if a command handler (e.g. keyDown) is yielding
-            // in updateStage. Running frame scripts concurrently with the command
-            // handler's bytecodes would corrupt the shared scope stack.
-            let skip_frame = reserve_player_ref(|player| player.command_handler_yielding);
+            // Skip frame update if a command handler (e.g. keyDown, mouseDown) is active.
+            // Running frame scripts concurrently with the command handler's bytecodes
+            // would corrupt the shared scope stack.
+            let skip_frame = reserve_player_ref(|player| player.command_handler_yielding || player.in_mouse_command);
             if !skip_frame {
                 let update_result = MovieHandlers::execute_frame_update().await;
 
                 reserve_player_mut(|player| {
                     if let Err(err) = update_result {
-                        player.on_script_error(&err);
+                        if err.code != ScriptErrorCode::Abort {
+                            player.on_script_error(&err);
+                        }
                     }
                 });
             }
@@ -2358,7 +2383,7 @@ pub async fn run_frame_loop() {
         });
 
         // Skip frame advancement if a command handler is yielding
-        let skip_frame = reserve_player_ref(|player| player.command_handler_yielding);
+        let skip_frame = reserve_player_ref(|player| player.command_handler_yielding || player.in_mouse_command);
 
         // Only advance frame if enough time has passed AND not paused AND not delayed
         if should_advance_frame && !is_script_paused && !is_delayed && !skip_frame {
@@ -2383,7 +2408,9 @@ pub async fn run_frame_loop() {
                     dispatch_event_to_all_behaviors(&"exitFrame".to_string(), &vec![]).await;
                 } else {
                     if let Err(err) = player_invoke_frame_and_movie_scripts(&"exitFrame".to_string(), &vec![]).await {
-                        reserve_player_mut(|player| player.on_script_error(&err));
+                        if err.code != ScriptErrorCode::Abort {
+                            reserve_player_mut(|player| player.on_script_error(&err));
+                        }
                     }
                 }
 

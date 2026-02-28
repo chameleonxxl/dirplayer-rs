@@ -146,17 +146,19 @@ pub async fn player_invoke_event_to_instances(
                 }
             }
             Err(err) => {
-                // Dump bytecode execution history before the error
-                crate::player::bytecode::handler_manager::dump_execution_history_on_error(&err.message);
-                // Log the error to console
-                web_sys::console::error_1(
-                    &format!("⚠ Error in handler '{}': {}", handler_name, err.message).into()
-                );
-                // Report to player's error handler
-                reserve_player_mut(|player| {
-                    player.on_script_error(&err);
-                });
-                // Return the error to caller
+                if err.code != ScriptErrorCode::Abort {
+                    // Dump bytecode execution history before the error
+                    crate::player::bytecode::handler_manager::dump_execution_history_on_error(&err.message);
+                    // Log the error to console
+                    web_sys::console::error_1(
+                        &format!("⚠ Error in handler '{}': {}", handler_name, err.message).into()
+                    );
+                    // Report to player's error handler
+                    reserve_player_mut(|player| {
+                        player.on_script_error(&err);
+                    });
+                }
+                // Return the error to caller (abort propagates to stop handler chain)
                 return Err(err);
             }
         }
@@ -242,10 +244,12 @@ pub async fn player_invoke_frame_and_movie_scripts(
         match &result {
             Ok(_) => {}
             Err(err) => {
-                web_sys::console::warn_1(&format!(
-                    "  {} handler on {:?} ERROR: {}",
-                    handler_name, script_member_ref, err.message
-                ).into());
+                if err.code != ScriptErrorCode::Abort {
+                    web_sys::console::warn_1(&format!(
+                        "  {} handler on {:?} ERROR: {}",
+                        handler_name, script_member_ref, err.message
+                    ).into());
+                }
             }
         }
         let result = result?;
@@ -426,9 +430,11 @@ pub async fn run_event_loop(rx: Receiver<PlayerVMEvent>) {
         };
         match result {
             Err(err) => {
-                // TODO ignore error if it's a CancelledException
-                // TODO print stack trace
-                reserve_player_mut(|player| player.on_script_error(&err));
+                if err.code != super::ScriptErrorCode::Abort {
+                    // TODO ignore error if it's a CancelledException
+                    // TODO print stack trace
+                    reserve_player_mut(|player| player.on_script_error(&err));
+                }
             }
             _ => {}
         };
@@ -440,7 +446,9 @@ pub fn player_unwrap_result(result: Result<DatumRef, ScriptError>) -> DatumRef {
     match result {
         Ok(result) => result,
         Err(err) => {
-            reserve_player_mut(|player| player.on_script_error(&err));
+            if err.code != ScriptErrorCode::Abort {
+                reserve_player_mut(|player| player.on_script_error(&err));
+            }
             DatumRef::Void
         }
     }
@@ -570,6 +578,12 @@ pub async fn player_dispatch_event_beginsprite(
 
         let receivers = vec![behavior.clone()];
         if let Err(err) = player_invoke_targeted_event(handler_name, args, Some(receivers).as_ref()).await {
+            if err.code == ScriptErrorCode::Abort {
+                reserve_player_mut(|player| {
+                    player.current_score_context = ScoreRef::Stage;
+                });
+                return Ok(vec![]);
+            }
             web_sys::console::error_1(
                 &format!("Error in {} for sprite {}: {}", handler_name, sprite_number, err.message).into()
             );
@@ -661,6 +675,9 @@ pub async fn dispatch_event_endsprite_for_score(score_ref: ScoreRef, sprite_nums
             if let Err(err) = player_invoke_event_to_instances(
                     &"endSprite".to_string(), &vec![], &receivers
                 ).await {
+                if err.code == ScriptErrorCode::Abort {
+                    break;
+                }
                 web_sys::console::error_1(
                     &format!("Error in endSprite for sprite {}: {}", sprite_num, err.message).into()
                 );
@@ -794,6 +811,14 @@ pub async fn dispatch_event_to_all_behaviors(
             let receivers = vec![behavior.clone()];
 
             if let Err(err) = player_invoke_event_to_instances(handler_name, args, &receivers).await {
+                if err.code == ScriptErrorCode::Abort {
+                    // abort is flow control: stop all remaining handlers
+                    reserve_player_mut(|player| {
+                        player.is_dispatching_events = false;
+                        player.current_score_context = ScoreRef::Stage;
+                    });
+                    return;
+                }
                 web_sys::console::error_1(
                     &format!("Error in {} for sprite {}: {}", handler_name, sprite_number, err.message).into()
                 );
@@ -810,7 +835,9 @@ pub async fn dispatch_event_to_all_behaviors(
     }
     // Dispatch event to frame/movie scripts
     if let Err(err) = player_invoke_frame_and_movie_scripts(handler_name, args).await {
-        reserve_player_mut(|player| player.on_script_error(&err));
+        if err.code != ScriptErrorCode::Abort {
+            reserve_player_mut(|player| player.on_script_error(&err));
+        }
     }
 
     // Reset the flag after dispatching
@@ -844,6 +871,9 @@ pub async fn dispatch_system_event_to_timeouts(
     for target_ref in timeout_targets {
         let result = player_call_datum_handler(&target_ref, handler_name, args).await;
         if let Err(err) = result {
+            if err.code == ScriptErrorCode::Abort {
+                return; // abort stops the entire handler chain
+            }
             // HandlerNotFound is expected when a script doesn't have the event handler
             // (e.g., timeout target script doesn't have prepareFrame or exitFrame).
             // This is normal Director behavior - just silently skip.
