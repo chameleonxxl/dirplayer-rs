@@ -28,7 +28,7 @@ use super::{
     keyboard_events::{player_key_down, player_key_up},
     player_alloc_datum, player_call_script_handler, player_dispatch_global_event,
     player_is_playing, reserve_player_mut, reserve_player_ref,
-    score::{concrete_sprite_hit_test, get_sprite_at},
+    score::{concrete_sprite_hit_test, get_concrete_sprite_rect, get_sprite_at},
     script_ref::ScriptInstanceRef,
     PlayerVMExecutionItem, ScriptError, ScriptReceiver, PLAYER_TX,
 };
@@ -626,8 +626,28 @@ pub async fn run_player_command(command: PlayerVMCommand) -> Result<DatumRef, Sc
                     let (off_x, off_y) = player.drag_offset;
                     let sprite = player.movie.score.get_sprite_mut(drag_sprite_num);
                     if sprite.moveable {
-                        sprite.loc_h = x + off_x;
-                        sprite.loc_v = y + off_y;
+                        let mut new_h = x + off_x;
+                        let mut new_v = y + off_y;
+
+                        // Apply constraint bounds
+                        let constraint_num = sprite.constraint;
+                        if constraint_num > 0 {
+                            // Constrain to the bounding rect of the constraint sprite
+                            if let Some(constraint_sprite) = player.movie.score.get_sprite(constraint_num as i16) {
+                                let bounds = get_concrete_sprite_rect(player, constraint_sprite);
+                                new_h = new_h.max(bounds.left).min(bounds.right);
+                                new_v = new_v.max(bounds.top).min(bounds.bottom);
+                            }
+                        } else {
+                            // Constrain to stage
+                            let stage = &player.movie.rect;
+                            new_h = new_h.max(stage.left).min(stage.right);
+                            new_v = new_v.max(stage.top).min(stage.bottom);
+                        }
+
+                        let sprite = player.movie.score.get_sprite_mut(drag_sprite_num);
+                        sprite.loc_h = new_h;
+                        sprite.loc_v = new_v;
                     }
                 }
 

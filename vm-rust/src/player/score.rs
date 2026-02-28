@@ -2498,6 +2498,7 @@ pub fn sprite_get_prop(
         "visible" | "visibility" => Ok(datum_bool(sprite.map_or(true, |sprite| sprite.visible))),
         "puppet" => Ok(datum_bool(sprite.map_or(false, |sprite| sprite.puppet))),
         "moveableSprite" | "moveable" => Ok(datum_bool(sprite.map_or(false, |sprite| sprite.moveable))),
+        "constraint" => Ok(Datum::Int(sprite.map_or(0, |sprite| sprite.constraint))),
         "trails" => Ok(datum_bool(sprite.map_or(false, |sprite| sprite.trails))),
         "foreColor" | "forecolor" => Ok(Datum::Int(
             sprite.map_or(255, |sprite| sprite.fore_color) as i32,
@@ -3099,6 +3100,15 @@ pub fn sprite_set_prop(sprite_id: i16, prop_name: &str, value: Datum) -> Result<
                 Ok(())
             },
         ),
+        "constraint" => borrow_sprite_mut(
+            sprite_id,
+            |player| value.int_value(),
+            |sprite, value| {
+                let val = value?;
+                sprite.constraint = val;
+                Ok(())
+            },
+        ),
         "trails" => borrow_sprite_mut(
             sprite_id,
             |_| {},
@@ -3446,21 +3456,24 @@ pub fn get_concrete_sprite_rect(player: &DirPlayer, sprite: &Sprite) -> IntRect 
             IntRect::from_size(sprite.loc_h, sprite.loc_v, btn_w + extra_w, btn_h.max(1))
         }
         CastMemberType::Text(text_member) => {
-            // Calculate draw position based on registration point from TextInfo
-            let (draw_x, draw_y, info_height) = if let Some(info) = &text_member.info {
-                let ih = if info.height > 0 { info.height as i32 } else { 0 };
-                if info.center_reg_point {
-                    let half_width = sprite.width / 2;
-                    let half_height = sprite.height / 2;
-                    (sprite.loc_h - half_width, sprite.loc_v - half_height, ih)
-                } else if info.reg_x != 0 || info.reg_y != 0 {
-                    (sprite.loc_h - info.reg_x, sprite.loc_v - info.reg_y, ih)
-                } else {
-                    (sprite.loc_h, sprite.loc_v, ih)
-                }
+            // Use member dimensions (from TextInfo or TextMember), falling back to sprite
+            let (info_width, info_height) = if let Some(info) = &text_member.info {
+                (
+                    if info.width > 0 { info.width as i32 } else { 0 },
+                    if info.height > 0 { info.height as i32 } else { 0 },
+                )
             } else {
-                (sprite.loc_h, sprite.loc_v, 0)
+                (0, 0)
             };
+
+            let text_width = if info_width > 0 {
+                info_width
+            } else if text_member.width > 0 {
+                text_member.width as i32
+            } else {
+                sprite.width
+            };
+
             let text_height = if info_height > 0 {
                 info_height
             } else if text_member.height > 0 {
@@ -3468,17 +3481,30 @@ pub fn get_concrete_sprite_rect(player: &DirPlayer, sprite: &Sprite) -> IntRect 
             } else {
                 sprite.height
             };
+
+            // Calculate draw position based on registration point from TextInfo
+            let (draw_x, draw_y) = if let Some(info) = &text_member.info {
+                if info.center_reg_point {
+                    (sprite.loc_h - text_width / 2, sprite.loc_v - text_height / 2)
+                } else if info.reg_x != 0 || info.reg_y != 0 {
+                    (sprite.loc_h - info.reg_x, sprite.loc_v - info.reg_y)
+                } else {
+                    (sprite.loc_h, sprite.loc_v)
+                }
+            } else {
+                (sprite.loc_h, sprite.loc_v)
+            };
+
             debug!(
-                "[TEXT_RECT] sprite#{} text='{}' info_h={} member_h={} sprite_h={} -> h={} w={}",
+                "[TEXT_RECT] sprite#{} text='{}' info={}x{} member={}x{} sprite={}x{} -> {}x{}",
                 sprite.number,
                 &text_member.text[..text_member.text.len().min(30)],
-                info_height,
-                text_member.height,
-                sprite.height,
-                text_height,
-                sprite.width,
+                info_width, info_height,
+                text_member.width, text_member.height,
+                sprite.width, sprite.height,
+                text_width, text_height,
             );
-            IntRect::from_size(draw_x, draw_y, sprite.width, text_height)
+            IntRect::from_size(draw_x, draw_y, text_width, text_height)
         }
         CastMemberType::FilmLoop(film_loop) => {
             // The filmloop's rect is stored in info as:
