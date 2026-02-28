@@ -197,6 +197,12 @@ pub fn player_print_member_bitmap_hex(cast_lib: i32, cast_member: i32) {
 
 #[wasm_bindgen]
 pub fn mouse_down(x: f64, y: f64) {
+    // Update mouse state immediately so the mouseH/the mouseV/the stillDown
+    // reflect real state even during long-running script handlers
+    reserve_player_mut(|player| {
+        player.mouse_loc = (x.to_i32().unwrap(), y.to_i32().unwrap());
+        player.movie.mouse_down = true;
+    });
     player_dispatch(PlayerVMCommand::MouseDown((
         x.to_i32().unwrap(),
         y.to_i32().unwrap(),
@@ -205,6 +211,12 @@ pub fn mouse_down(x: f64, y: f64) {
 
 #[wasm_bindgen]
 pub fn mouse_up(x: f64, y: f64) {
+    // Update mouse state immediately so the mouseH/the mouseV/the stillDown
+    // reflect real state even during long-running script handlers
+    reserve_player_mut(|player| {
+        player.mouse_loc = (x.to_i32().unwrap(), y.to_i32().unwrap());
+        player.movie.mouse_down = false;
+    });
     player_dispatch(PlayerVMCommand::MouseUp((
         x.to_i32().unwrap(),
         y.to_i32().unwrap(),
@@ -213,6 +225,11 @@ pub fn mouse_up(x: f64, y: f64) {
 
 #[wasm_bindgen]
 pub fn mouse_move(x: f64, y: f64) {
+    // Update mouse_loc immediately so the mouseH/the mouseV reflect real
+    // position even during long-running script handlers (same pattern as key_down/key_up)
+    reserve_player_mut(|player| {
+        player.mouse_loc = (x.to_i32().unwrap(), y.to_i32().unwrap());
+    });
     player_dispatch(PlayerVMCommand::MouseMove((
         x.to_i32().unwrap(),
         y.to_i32().unwrap(),
