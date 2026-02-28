@@ -13,6 +13,7 @@ use crate::{
         lingo::datum::{datum_bool, Datum, DatumType},
     },
     js_api::JsApi,
+    player::bitmap::drawing::should_matte_sprite,
     player::bitmap::palette::SYSTEM_WIN_PALETTE,
     player::events::{dispatch_event_endsprite, dispatch_event_endsprite_for_score},
     player::font::measure_text,
@@ -448,7 +449,11 @@ impl Score {
                     }
                 };
                 let sprite: &mut Sprite = score.get_sprite_mut(sprite_num as i16);
-                if sprite.visible {
+                if sprite.puppet {
+                    // Puppeted sprites keep their state across frame transitions.
+                    // Just clear the exited flag so they remain active.
+                    sprite.exited = false;
+                } else if sprite.visible {
                     sprite.reset();
                 }
             });
@@ -1774,11 +1779,15 @@ impl Score {
             let sprite = &mut channel.sprite;
             let sprite_num = sprite.number as u16;
 
+            // In Director, puppeted sprites are controlled by Lingo and
+            // score tweens do NOT apply to them.
+            if sprite.puppet {
+                continue;
+            }
+
             // Skip if sprite isn't in an active span at this frame
             if !active_channels.contains(&(sprite_num as u32)) {
-                if !sprite.puppet || !sprite.visible {
-                    continue;
-                }
+                continue;
             }
 
             let Some(keyframes) = self.keyframes_cache.get(&sprite_num) else {
@@ -3154,6 +3163,44 @@ pub fn sprite_set_prop(sprite_id: i16, prop_name: &str, value: Datum) -> Result<
     result
 }
 
+/// For matte-ink sprites, check if a point (in stage coordinates) hits an opaque pixel.
+/// Returns true if the sprite is not matte-ink, or if the matte is not yet computed,
+/// or if the pixel at the given point is opaque.
+fn matte_pixel_hit_test(player: &DirPlayer, sprite: &Sprite, rect: &IntRect, hit_x: i32, hit_y: i32) -> bool {
+    if !should_matte_sprite(sprite.ink as u32) {
+        return true;
+    }
+    let member_ref = match sprite.member.as_ref() {
+        Some(r) => r,
+        None => return true,
+    };
+    let member = match player.movie.cast_manager.find_member_by_ref(member_ref) {
+        Some(m) => m,
+        None => return true,
+    };
+    let bmp_member = match member.member_type.as_bitmap() {
+        Some(b) => b,
+        None => return true,
+    };
+    let bitmap = match player.bitmap_manager.get_bitmap(bmp_member.image_ref) {
+        Some(b) => b,
+        None => return true,
+    };
+    let matte = match bitmap.matte.as_ref() {
+        Some(m) => m,
+        None => return true, // Matte not yet computed, fall back to bounding box
+    };
+
+    let rect_w = (rect.right - rect.left).max(1);
+    let rect_h = (rect.bottom - rect.top).max(1);
+
+    // Map stage coordinates to bitmap coordinates (handling scaling)
+    let bx = ((hit_x - rect.left) as u32 * bitmap.width as u32 / rect_w as u32) as u16;
+    let by = ((hit_y - rect.top) as u32 * bitmap.height as u32 / rect_h as u32) as u16;
+
+    matte.get_bit(bx, by)
+}
+
 pub fn concrete_sprite_hit_test(player: &DirPlayer, sprite: &Sprite, x: i32, y: i32) -> bool {
     // Don't test collision for invisible sprites
     if !sprite.visible || !sprite.member.is_some() {
@@ -3198,15 +3245,22 @@ pub fn concrete_sprite_hit_test(player: &DirPlayer, sprite: &Sprite, x: i32, y: 
         let transformed_x = (rx + center_x) as i32;
         let transformed_y = (ry + center_y) as i32;
 
-        return transformed_x >= rect.left && transformed_x < rect.right
-            && transformed_y >= rect.top && transformed_y < rect.bottom;
+        if transformed_x >= rect.left && transformed_x < rect.right
+            && transformed_y >= rect.top && transformed_y < rect.bottom
+        {
+            return matte_pixel_hit_test(player, sprite, &rect, transformed_x, transformed_y);
+        }
+        return false;
     }
 
     let left = rect.left;
     let top = rect.top;
     let right = rect.right;
     let bottom = rect.bottom;
-    return x >= left && x < right && y >= top && y < bottom;
+    if x >= left && x < right && y >= top && y < bottom {
+        return matte_pixel_hit_test(player, sprite, &rect, x, y);
+    }
+    false
 }
 
 fn is_active_sprite(player: &DirPlayer, sprite: &Sprite) -> bool {
