@@ -3,8 +3,9 @@ use crate::director::lingo::datum::Datum;
 use crate::player::{
     cast_member::CastMemberType,
     font::{get_text_index_at_pos, DrawTextParams},
-    player_call_script_handler, player_call_global_handler, player_handle_scope_return,
+    player_call_script_handler, player_handle_scope_return,
     reserve_player_mut, reserve_player_ref,
+    script::{script_get_prop, script_set_prop},
     script_ref::ScriptInstanceRef, DatumRef, DirPlayer, ScriptError, ScriptErrorCode,
     score::get_concrete_sprite_rect,
 };
@@ -87,7 +88,7 @@ impl SpriteDatumHandlers {
     /// 2. Any handler that isn't a built-in sync handler (to allow fallback to global handlers)
     pub fn has_async_handler(datum: &DatumRef, handler_name: &String) -> Result<bool, ScriptError> {
         // First check if it's a built-in sync handler
-        let is_sync_handler = matches!(handler_name.as_str(), "intersects" | "getProp" | "pointToWord" | "pointToLine");
+        let is_sync_handler = matches!(handler_name.as_str(), "intersects" | "getProp" | "getAt" | "setAt" | "getaProp" | "setaProp" | "pointToWord" | "pointToLine");
         if is_sync_handler {
             return Ok(false);
         }
@@ -188,7 +189,7 @@ impl SpriteDatumHandlers {
 
                     // Try to get the property from the sprite's script instances
                     for instance_ref in instance_refs {
-                        if let Ok(result) = crate::player::script::script_get_prop(
+                        if let Ok(result) = script_get_prop(
                             player,
                             &instance_ref,
                             &prop_name,
@@ -205,6 +206,86 @@ impl SpriteDatumHandlers {
 
                     // If not found anywhere, return void
                     Ok(DatumRef::Void)
+                })
+            }
+            // getAt / getaProp: bracket access on sprite, e.g. sprite(9)[#pLevel]
+            "getAt" | "getaProp" => {
+                reserve_player_mut(|player| {
+                    if args.is_empty() {
+                        return Err(ScriptError::new(
+                            "getAt requires 1 argument".to_string(),
+                        ));
+                    }
+
+                    let sprite_num = player.get_datum(datum).to_sprite_ref()?;
+                    let prop_name = player.get_datum(&args[0]).string_value()?;
+
+                    // Try built-in sprite property first
+                    match crate::player::score::sprite_get_prop(
+                        player,
+                        sprite_num as i16,
+                        &prop_name,
+                    ) {
+                        Ok(prop_datum) => {
+                            return Ok(player.alloc_datum(prop_datum));
+                        }
+                        Err(_) => {}
+                    }
+
+                    // Fall back to sprite's script instance properties
+                    let sprite = player.movie.score.get_sprite(sprite_num);
+                    if sprite.is_none() {
+                        return Ok(DatumRef::Void);
+                    }
+                    let instance_refs = sprite.unwrap().script_instance_list.clone();
+                    for instance_ref in instance_refs {
+                        if let Ok(result) = script_get_prop(player, &instance_ref, &prop_name) {
+                            return Ok(result);
+                        }
+                    }
+
+                    Ok(DatumRef::Void)
+                })
+            }
+            // setAt / setaProp: bracket assignment on sprite, e.g. sprite(9)[#pLevel] = value
+            "setAt" | "setaProp" => {
+                reserve_player_mut(|player| {
+                    if args.len() < 2 {
+                        return Err(ScriptError::new(
+                            "setAt requires 2 arguments".to_string(),
+                        ));
+                    }
+
+                    let sprite_num = player.get_datum(datum).to_sprite_ref()?;
+                    let prop_name = player.get_datum(&args[0]).string_value()?;
+                    let value = player.get_datum(&args[1]).clone();
+                    let value_ref = &args[1];
+
+                    // Try built-in sprite property first
+                    match crate::player::score::sprite_set_prop(
+                        sprite_num as i16,
+                        &prop_name,
+                        value,
+                    ) {
+                        Ok(_) => return Ok(DatumRef::Void),
+                        Err(_) => {}
+                    }
+
+                    // Fall back to sprite's script instance properties
+                    let sprite = player.movie.score.get_sprite(sprite_num);
+                    if sprite.is_none() {
+                        return Err(ScriptError::new(format!("Sprite {} not found", sprite_num)));
+                    }
+                    let instance_refs = sprite.unwrap().script_instance_list.clone();
+                    for instance_ref in instance_refs {
+                        if let Ok(_) = script_set_prop(player, &instance_ref, &prop_name, value_ref, false) {
+                            return Ok(DatumRef::Void);
+                        }
+                    }
+
+                    Err(ScriptError::new(format!(
+                        "Property {} not found on sprite {}", prop_name, sprite_num
+                    )))
                 })
             }
             "pointToWord" => {
