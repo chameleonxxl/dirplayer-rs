@@ -8,6 +8,112 @@ use js_sys::Float32Array;
 
 use crate::director::chunks::MediaChunk;
 
+/// Parsed "sndH" chunk - for Director 6+ sounds.
+#[derive(Clone, Debug)]
+pub struct SndHeaderChunk {
+    pub offset: i32,
+    pub size: i32,
+    pub playback_start: i32,
+    pub playback_start_frame: i32,
+    pub loop_start: i32,
+    pub loop_start_frame: i32,
+    pub loop_end: i32,
+    pub loop_end_frame: i32,
+    pub playback_end: i32,
+    pub playback_end_frame: i32,
+    pub num_frames: i32,
+    pub frame_rate: i32,
+    pub byte_rate: i32,
+    pub compression_type: [u8; 16],
+    pub bits_per_sample: i32,
+    pub bytes_per_sample: i32,
+    pub num_channels: i32,
+    pub bytes_per_frame: i32,
+    pub sound_header_type: [u8; 16],
+    pub bytes_per_block: i32,
+}
+
+impl SndHeaderChunk {
+    pub fn from_reader(reader: &mut BinaryReader) -> Result<SndHeaderChunk, String> {
+        let original_endian = reader.endian;
+        reader.endian = Endian::Big;
+
+        let offset = reader.read_i32().map_err(|e| format!("sndH offset: {}", e))?;
+        let size = reader.read_i32().map_err(|e| format!("sndH size: {}", e))?;
+        let playback_start = reader.read_i32().map_err(|e| format!("sndH playbackStart: {}", e))?;
+        let playback_start_frame = reader.read_i32().map_err(|e| format!("sndH playbackStartFrame: {}", e))?;
+        let loop_start = reader.read_i32().map_err(|e| format!("sndH loopStart: {}", e))?;
+        let loop_start_frame = reader.read_i32().map_err(|e| format!("sndH loopStartFrame: {}", e))?;
+        let loop_end = reader.read_i32().map_err(|e| format!("sndH loopEnd: {}", e))?;
+        let loop_end_frame = reader.read_i32().map_err(|e| format!("sndH loopEndFrame: {}", e))?;
+        let playback_end = reader.read_i32().map_err(|e| format!("sndH playbackEnd: {}", e))?;
+        let playback_end_frame = reader.read_i32().map_err(|e| format!("sndH playbackEndFrame: {}", e))?;
+        let num_frames = reader.read_i32().map_err(|e| format!("sndH numFrames: {}", e))?;
+        let frame_rate = reader.read_i32().map_err(|e| format!("sndH frameRate: {}", e))?;
+        let byte_rate = reader.read_i32().map_err(|e| format!("sndH byteRate: {}", e))?;
+
+        let mut compression_type = [0u8; 16];
+        for i in 0..16 {
+            compression_type[i] = reader.read_u8().map_err(|e| format!("sndH compressionType: {}", e))?;
+        }
+
+        let bits_per_sample = reader.read_i32().map_err(|e| format!("sndH bitsPerSample: {}", e))?;
+        let bytes_per_sample = reader.read_i32().map_err(|e| format!("sndH bytesPerSample: {}", e))?;
+        let num_channels = reader.read_i32().map_err(|e| format!("sndH numChannels: {}", e))?;
+        let bytes_per_frame = reader.read_i32().map_err(|e| format!("sndH bytesPerFrame: {}", e))?;
+
+        let mut sound_header_type = [0u8; 16];
+        for i in 0..16 {
+            sound_header_type[i] = reader.read_u8().map_err(|e| format!("sndH soundHeaderType: {}", e))?;
+        }
+
+        // Skip platformData (63 × u32 = 252 bytes)
+        for _ in 0..63 {
+            let _ = reader.read_u32();
+        }
+
+        let bytes_per_block = reader.read_i32().unwrap_or(0);
+
+        reader.endian = original_endian;
+
+        debug!(
+            "sndH: offset={}, size={}, numFrames={}, frameRate={}, byteRate={}, bitsPerSample={}, bytesPerSample={}, numChannels={}, bytesPerFrame={}, bytesPerBlock={}",
+            offset, size, num_frames, frame_rate, byte_rate, bits_per_sample, bytes_per_sample, num_channels, bytes_per_frame, bytes_per_block
+        );
+
+        let compression_str = String::from_utf8_lossy(&compression_type);
+        let header_type_str = String::from_utf8_lossy(&sound_header_type);
+        debug!(
+            "sndH: compressionType='{}', soundHeaderType='{}'",
+            compression_str.trim_end_matches('\0'),
+            header_type_str.trim_end_matches('\0')
+        );
+
+        Ok(SndHeaderChunk {
+            offset,
+            size,
+            playback_start,
+            playback_start_frame,
+            loop_start,
+            loop_start_frame,
+            loop_end,
+            loop_end_frame,
+            playback_end,
+            playback_end_frame,
+            num_frames,
+            frame_rate,
+            byte_rate,
+            compression_type,
+            bits_per_sample,
+            bytes_per_sample,
+            num_channels,
+            bytes_per_frame,
+            sound_header_type,
+            bytes_per_block,
+        })
+    }
+}
+
 #[derive(Clone)]
 pub struct SoundChunk {
     channels: u16,
@@ -392,6 +498,71 @@ impl SoundChunk {
             sample_count,
             codec: codec.to_string(),
             data: media.audio_data.clone(),
+            version: 0,
+        }
+    }
+
+    /// Create a SoundChunk from sndH (header) and sndS (samples) chunks.
+    /// Uses MoaSoundFormat fields from the sndH header for metadata.
+    pub fn from_snd_header_and_samples(header: &SndHeaderChunk, samples: &[u8]) -> SoundChunk {
+        let sample_rate = header.frame_rate as u32;
+        let bits_per_sample = if header.bits_per_sample > 0 {
+            header.bits_per_sample as u16
+        } else {
+            16 // default
+        };
+        let channels = if header.num_channels > 0 {
+            header.num_channels as u16
+        } else {
+            1
+        };
+
+        // Determine codec from compression_type GUID
+        let codec = {
+            // Check for null/empty compression type (= raw PCM)
+            let is_null = header.compression_type.iter().all(|&b| b == 0);
+            if is_null {
+                "raw_pcm".to_string()
+            } else {
+                // Check known GUIDs
+                // IMA ADPCM: 5A08CD40-535B-11D0-...
+                if header.compression_type[0..4] == [0x5A, 0x08, 0xCD, 0x40] {
+                    "ima_adpcm".to_string()
+                } else {
+                    let type_str = String::from_utf8_lossy(&header.compression_type);
+                    debug!("Unknown compression type: {:02X?} ('{}')", header.compression_type, type_str.trim_end_matches('\0'));
+                    "raw_pcm".to_string()
+                }
+            }
+        };
+
+        // Calculate sample count
+        // num_frames from header is the frame count
+        let sample_count = if header.num_frames > 0 {
+            header.num_frames as u32
+        } else {
+            // Fall back to computing from data length
+            let bytes_per_sample_val = if bits_per_sample > 0 { (bits_per_sample / 8) as usize } else { 2 };
+            let ch = channels as usize;
+            if bytes_per_sample_val > 0 && ch > 0 {
+                (samples.len() / (bytes_per_sample_val * ch)) as u32
+            } else {
+                0
+            }
+        };
+
+        debug!(
+            "from_snd_header_and_samples: rate={}, bits={}, ch={}, codec={}, numFrames={}, samples_len={}, sample_count={}",
+            sample_rate, bits_per_sample, channels, codec, header.num_frames, samples.len(), sample_count
+        );
+
+        SoundChunk {
+            channels,
+            sample_rate,
+            bits_per_sample,
+            sample_count,
+            codec,
+            data: samples.to_vec(),
             version: 0,
         }
     }

@@ -36,7 +36,7 @@ use score::FrameLabelsChunk;
 
 use self::media::MediaChunk;
 use self::score_order::SordChunk;
-use self::sound::SoundChunk;
+use self::sound::{SoundChunk, SndHeaderChunk};
 use self::{
     bitmap::BitmapChunk, cast::CastChunk, cast_list::CastListChunk, cast_member::CastMemberChunk,
     lctx::ScriptContextChunk, palette::PaletteChunk, score::ScoreChunk, script::ScriptChunk,
@@ -73,6 +73,8 @@ pub enum Chunk {
     Bitmap(BitmapChunk),
     Palette(PaletteChunk),
     Sound(SoundChunk),
+    SndHeader(SndHeaderChunk),
+    SndSamples(Vec<u8>),
     Media(MediaChunk),
     XMedia(XMediaChunk),
     CstInfo(CastInfoChunk),
@@ -241,6 +243,16 @@ pub fn make_chunk(
             )?))
         }
         "snd " => return Ok(Chunk::Sound(SoundChunk::from_snd_chunk(&mut chunk_reader, version)?)),
+        "sndH" => return Ok(Chunk::SndHeader(SndHeaderChunk::from_reader(&mut chunk_reader)?)),
+        "sndS" => {
+            // Sound samples chunk - just raw audio bytes
+            let mut data = Vec::new();
+            while let Ok(byte) = chunk_reader.read_u8() {
+                data.push(byte);
+            }
+            log::debug!("sndS chunk: {} bytes of audio data", data.len());
+            return Ok(Chunk::SndSamples(data));
+        }
         "STXT" => return Ok(Chunk::Text(TextChunk::read(&mut chunk_reader)?)),
         "BITD" => {
             return Ok(Chunk::Bitmap(BitmapChunk::read(

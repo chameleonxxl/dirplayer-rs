@@ -315,6 +315,8 @@ impl VectorShapeMember {
 #[derive(Clone)]
 pub struct ShapeMember {
     pub shape_info: ShapeInfo,
+    pub script_id: u32,
+    pub member_script_ref: Option<CastMemberRef>,
 }
 
 impl PaletteMember {
@@ -640,6 +642,8 @@ impl CastMember {
             Chunk::Bitmap(_) => "Bitmap",
             Chunk::Palette(_) => "Palette",
             Chunk::Sound(_) => "Sound",
+            Chunk::SndHeader(_) => "SndHeader",
+            Chunk::SndSamples(_) => "SndSamples",
             Chunk::Media(_) => "Media",
             Chunk::XMedia(_) => "XMedia",
             Chunk::CstInfo(_) => "Cinf",
@@ -651,6 +655,7 @@ impl CastMember {
 
     /// Recursively searches children of a CastMemberDef for a sound chunk
     fn find_sound_chunk_in_def(def: &CastMemberDef) -> Option<SoundChunk> {
+        // First check for direct sound/media chunks
         for child_opt in &def.children {
             if let Some(child) = child_opt {
                 match child {
@@ -670,16 +675,31 @@ impl CastMember {
                 }
             }
         }
+        // Then try sndH + sndS combination
+        let snd_header = def.children.iter()
+            .filter_map(|c| c.as_ref())
+            .find_map(|c| match c { Chunk::SndHeader(h) => Some(h), _ => None });
+        let snd_samples = def.children.iter()
+            .filter_map(|c| c.as_ref())
+            .find_map(|c| match c { Chunk::SndSamples(d) => Some(d), _ => None });
+        if let (Some(header), Some(samples)) = (snd_header, snd_samples) {
+            return Some(SoundChunk::from_snd_header_and_samples(header, samples));
+        }
         None
     }
 
     fn child_has_sound_in_def(def: &CastMemberDef) -> bool {
-        def.children.iter().any(|c| match c {
+        let has_direct = def.children.iter().any(|c| match c {
             Some(Chunk::Sound(_)) => true,
             Some(Chunk::Media(m)) => !m.audio_data.is_empty(),
             Some(Chunk::CastMember(_)) => false,
             _ => false,
-        })
+        });
+        if has_direct { return true; }
+        // Check for sndH + sndS
+        let has_header = def.children.iter().any(|c| matches!(c, Some(Chunk::SndHeader(_))));
+        let has_samples = def.children.iter().any(|c| matches!(c, Some(Chunk::SndSamples(_))));
+        has_header && has_samples
     }
 
     /// Recursively find a SoundChunk in a Chunk (handles Media & nested CastMembers)
@@ -1735,6 +1755,13 @@ impl CastMember {
                     None
                 }
             }
+            CastMemberType::Shape(shape) => {
+                if shape.script_id > 0 {
+                    Some(shape.script_id)
+                } else {
+                    None
+                }
+            }
             _ => None,
         }
     }
@@ -1743,6 +1770,7 @@ impl CastMember {
         match &self.member_type {
             CastMemberType::Bitmap(bitmap) => bitmap.member_script_ref.as_ref(),
             CastMemberType::Button(button) => button.member_script_ref.as_ref(),
+            CastMemberType::Shape(shape) => shape.member_script_ref.as_ref(),
             _ => None,
         }
     }
@@ -1754,6 +1782,9 @@ impl CastMember {
             }
             CastMemberType::Button(button) => {
                 button.member_script_ref = Some(script_ref);
+            }
+            CastMemberType::Shape(shape) => {
+                shape.member_script_ref = Some(script_ref);
             }
             _ => {}
         }
@@ -1882,7 +1913,13 @@ impl CastMember {
                 debug!("  specific_data has shape_info: {}", chunk.specific_data.shape_info().is_some());
 
                 if let Some(shape_info) = chunk.specific_data.shape_info() {
-                    debug!("Flash member {} is a Shape (via shape_info)", number);
+                    let script_id = chunk.member_info.as_ref()
+                        .map(|info| info.header.script_id)
+                        .unwrap_or(0);
+                    let member_script_ref = if script_id > 0 {
+                        Some(CastMemberRef { cast_lib: cast_lib as i32, cast_member: script_id as i32 })
+                    } else { None };
+                    debug!("Flash member {} is a Shape (via shape_info), script_id={}", number, script_id);
                     return CastMember {
                         number,
                         name: chunk
@@ -1892,6 +1929,8 @@ impl CastMember {
                             .unwrap_or_default(),
                         member_type: CastMemberType::Shape(ShapeMember {
                             shape_info: shape_info.clone(),
+                            script_id,
+                            member_script_ref,
                         }),
                         color: ColorRef::PaletteIndex(255),
                         bg_color: ColorRef::PaletteIndex(0),
@@ -1909,7 +1948,13 @@ impl CastMember {
 
                     // If it looks like valid shape data, treat it as a shape
                     if matches!(shape_info.shape_type, ShapeType::Rect | ShapeType::Oval | ShapeType::OvalRect | ShapeType::Line) {
-                        debug!("Flash member {} is actually a Shape!", number);
+                        let script_id = chunk.member_info.as_ref()
+                            .map(|info| info.header.script_id)
+                            .unwrap_or(0);
+                        let member_script_ref = if script_id > 0 {
+                            Some(CastMemberRef { cast_lib: cast_lib as i32, cast_member: script_id as i32 })
+                        } else { None };
+                        debug!("Flash member {} is actually a Shape! script_id={}", number, script_id);
                         return CastMember {
                             number,
                             name: chunk
@@ -1917,7 +1962,11 @@ impl CastMember {
                                 .as_ref()
                                 .map(|x| x.name.to_owned())
                                 .unwrap_or_default(),
-                            member_type: CastMemberType::Shape(ShapeMember { shape_info }),
+                            member_type: CastMemberType::Shape(ShapeMember {
+                                shape_info,
+                                script_id,
+                                member_script_ref,
+                            }),
                             color: ColorRef::PaletteIndex(255),
                             bg_color: ColorRef::PaletteIndex(0),
                         }
@@ -2104,10 +2153,27 @@ impl CastMember {
                     }
                 }
 
-                web_sys::console::log_1(&format!("Shape member {}", number).into());
+                let script_id = chunk
+                    .member_info
+                    .as_ref()
+                    .map(|info| info.header.script_id)
+                    .unwrap_or(0);
+
+                let member_script_ref = if script_id > 0 {
+                    Some(CastMemberRef {
+                        cast_lib: cast_lib as i32,
+                        cast_member: script_id as i32,
+                    })
+                } else {
+                    None
+                };
+
+                web_sys::console::log_1(&format!("Shape member {} script_id={}", number, script_id).into());
 
                 CastMemberType::Shape(ShapeMember {
                     shape_info: chunk.specific_data.shape_info().unwrap().clone(),
+                    script_id,
+                    member_script_ref,
                 })
             }
             MemberType::FilmLoop => {
@@ -2188,7 +2254,10 @@ impl CastMember {
                     }
                 }
 
-                // Try to find a sound chunk
+                // Try to find a sound chunk - check multiple formats:
+                // 1. "snd " chunk (Mac snd resource)
+                // 2. "ediM" chunk (MediaChunk)
+                // 3. "sndH" + "sndS" chunks (Director 6+ split format)
                 let sound_chunk_opt = member_def.children.iter()
                 .filter_map(|c_opt| c_opt.as_ref())
                 .find_map(|chunk| match chunk {
@@ -2218,6 +2287,38 @@ impl CastMember {
                     },
                     _ => None,
                 });
+
+                // If no sound found yet, try sndH + sndS combination
+                let sound_chunk_opt = if sound_chunk_opt.is_some() {
+                    sound_chunk_opt
+                } else {
+                    // Look for sndH (header) and sndS (samples) children
+                    let snd_header = member_def.children.iter()
+                        .filter_map(|c| c.as_ref())
+                        .find_map(|c| match c {
+                            Chunk::SndHeader(h) => Some(h),
+                            _ => None,
+                        });
+                    let snd_samples = member_def.children.iter()
+                        .filter_map(|c| c.as_ref())
+                        .find_map(|c| match c {
+                            Chunk::SndSamples(data) => Some(data),
+                            _ => None,
+                        });
+
+                    if let (Some(header), Some(samples)) = (snd_header, snd_samples) {
+                        debug!(
+                            "Found sndH + sndS: rate={}, bits={}, channels={}, numFrames={}, samples_len={}",
+                            header.frame_rate, header.bits_per_sample, header.num_channels, header.num_frames, samples.len()
+                        );
+                        Some(SoundChunk::from_snd_header_and_samples(header, samples))
+                    } else if let Some(_header) = snd_header {
+                        debug!("Found sndH but no sndS data");
+                        None
+                    } else {
+                        None
+                    }
+                };
 
                 let found_sound = sound_chunk_opt.is_some();
                 debug!(
