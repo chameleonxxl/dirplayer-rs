@@ -30,8 +30,10 @@ pub async fn player_key_down(key: String, code: u16) -> Result<DatumRef, ScriptE
         return Ok(DatumRef::Void);
     }
 
+    // Note: keyboard_manager.key_down() is NOT called here because it's already
+    // handled immediately in the WASM entry point (lib.rs key_down()). Calling it
+    // here would re-add keys from stale queued commands after the user released them.
     let (instance_ids, is_editable_field, sprite_id) = reserve_player_mut(|player| {
-        player.keyboard_manager.key_down(key.clone(), code);
         if player.keyboard_focus_sprite != -1 {
             let sprite_id = player.keyboard_focus_sprite as i16;
             let sprite = player.movie.score.get_sprite(sprite_id);
@@ -110,8 +112,9 @@ pub async fn player_key_up(key: String, code: u16) -> Result<DatumRef, ScriptErr
     if !player_is_playing().await {
         return Ok(DatumRef::Void);
     }
+    // Note: keyboard_manager.key_up() is NOT called here because it's already
+    // handled immediately in the WASM entry point (lib.rs key_up()).
     let instance_ids = reserve_player_mut(|player| {
-        player.keyboard_manager.key_up(&key, code);
         if player.keyboard_focus_sprite != -1 {
             let sprite = player.keyboard_focus_sprite as usize;
             let sprite = player.movie.score.get_sprite(sprite as i16);

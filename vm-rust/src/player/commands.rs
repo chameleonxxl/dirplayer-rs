@@ -663,7 +663,23 @@ pub async fn run_player_command(command: PlayerVMCommand) -> Result<DatumRef, Sc
             }
         }
         PlayerVMCommand::KeyDown(key, code) => {
-            return player_key_down(key, code).await;
+            // Set command_handler_yielding so that:
+            // 1. updateStage() always yields (bypasses is_yield_safe check),
+            //    letting the browser process keyUp events during repeat-while-
+            //    keyPressed loops (like the Hook script's movement).
+            // 2. The frame loop skips frame updates and advancement to avoid
+            //    running frame scripts that would corrupt the shared scope stack.
+            reserve_player_mut(|player| {
+                player.command_handler_yielding = true;
+            });
+
+            let result = player_key_down(key, code).await;
+
+            reserve_player_mut(|player| {
+                player.command_handler_yielding = false;
+            });
+
+            return result;
         }
         PlayerVMCommand::KeyUp(key, code) => {
             return player_key_up(key, code).await;

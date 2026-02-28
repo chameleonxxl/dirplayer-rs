@@ -219,6 +219,7 @@ pub struct DirPlayer {
     pub in_enter_frame: bool,
     pub in_prepare_frame: bool,
     pub in_event_dispatch: bool,
+    pub command_handler_yielding: bool, // Pauses frame loop when a command handler (keyDown) needs updateStage to yield
     pub current_frame_tempo: u32,  // Cached tempo for the current frame
     pub has_player_frame_changed: bool,
     pub has_frame_changed_in_go: bool,
@@ -349,6 +350,7 @@ impl DirPlayer {
             in_enter_frame: false,
             in_prepare_frame: false,
             in_event_dispatch: false,
+            command_handler_yielding: false,
             current_frame_tempo: 30,  // Default to 30 fps
             has_player_frame_changed: false,
             has_frame_changed_in_go: false,
@@ -2263,13 +2265,19 @@ pub async fn run_frame_loop() {
         if !is_script_paused {
             player_wait_available().await;
 
-            let update_result = MovieHandlers::execute_frame_update().await;
+            // Skip frame update if a command handler (e.g. keyDown) is yielding
+            // in updateStage. Running frame scripts concurrently with the command
+            // handler's bytecodes would corrupt the shared scope stack.
+            let skip_frame = reserve_player_ref(|player| player.command_handler_yielding);
+            if !skip_frame {
+                let update_result = MovieHandlers::execute_frame_update().await;
 
-            reserve_player_mut(|player| {
-                if let Err(err) = update_result {
-                    player.on_script_error(&err);
-                }
-            });
+                reserve_player_mut(|player| {
+                    if let Err(err) = update_result {
+                        player.on_script_error(&err);
+                    }
+                });
+            }
         }
 
         // Get the target frame delay based on cached tempo for current frame
@@ -2348,8 +2356,11 @@ pub async fn run_frame_loop() {
             }
         });
 
+        // Skip frame advancement if a command handler is yielding
+        let skip_frame = reserve_player_ref(|player| player.command_handler_yielding);
+
         // Only advance frame if enough time has passed AND not paused AND not delayed
-        if should_advance_frame && !is_script_paused && !is_delayed {
+        if should_advance_frame && !is_script_paused && !is_delayed && !skip_frame {
             let (has_player_frame_changed, has_frame_changed_in_go, go_direction) =
                 reserve_player_ref(|player| {
                     (

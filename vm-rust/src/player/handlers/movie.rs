@@ -738,7 +738,7 @@ impl MovieHandlers {
 
     pub async fn update_stage(_: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
         let should_yield = reserve_player_ref(|player| {
-            Ok(player.is_yield_safe())
+            Ok(player.is_yield_safe() || player.command_handler_yielding)
         })?;
 
         if should_yield {

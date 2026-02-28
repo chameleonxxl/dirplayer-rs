@@ -221,11 +221,21 @@ pub fn mouse_move(x: f64, y: f64) {
 
 #[wasm_bindgen]
 pub fn key_down(key: String, code: u16) {
+    // Update keyboard state immediately so keyPressed() reflects
+    // real state even during long-running script handlers
+    reserve_player_mut(|player| {
+        player.keyboard_manager.key_down(key.clone(), code);
+    });
     player_dispatch(PlayerVMCommand::KeyDown(key, code));
 }
 
 #[wasm_bindgen]
 pub fn key_up(key: String, code: u16) {
+    // Update keyboard state immediately so keyPressed() reflects
+    // real state even during long-running script handlers
+    reserve_player_mut(|player| {
+        player.keyboard_manager.key_up(&key, code);
+    });
     player_dispatch(PlayerVMCommand::KeyUp(key, code));
 }
 

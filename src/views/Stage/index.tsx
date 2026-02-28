@@ -112,6 +112,7 @@ export default function Stage({ showControls }: { showControls?: boolean }) {
         onPointerUp={(e) => onMouseEvent('up', e)}
         onKeyDown={e => {
           e.preventDefault();
+          if (e.repeat) return; // Skip browser key repeats; Lingo handles held keys via keyPressed()
           key_down(e.key, e.keyCode)
         }}
         onKeyUp={e => key_up(e.key, e.keyCode)}
