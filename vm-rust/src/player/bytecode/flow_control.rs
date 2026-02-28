@@ -33,7 +33,15 @@ impl FlowControlBytecodeHandler {
 
             let name = get_name(player_cell, &ctx, name_id).unwrap().to_owned();
             let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
-            let arg_list_datum_ref = scope.stack.pop().unwrap();
+            let arg_list_datum_ref = match scope.stack.pop() {
+                Some(datum_ref) => datum_ref,
+                None => {
+                    return Err(ScriptError::new(format!(
+                        "ext_call '{}': operand stack is empty (scope_ref={}, bytecode_index={})",
+                        name, ctx.scope_ref, scope.bytecode_index
+                    )));
+                }
+            };
             let arg_list_datum = player.get_datum(&arg_list_datum_ref);
 
             if let Datum::List(list_type, list, _) = arg_list_datum {
@@ -43,7 +51,10 @@ impl FlowControlBytecodeHandler {
                 };
                 (name, list.to_owned(), is_no_ret)
             } else {
-                panic!("ext_call was not passed a list");
+                return Err(ScriptError::new(format!(
+                    "ext_call '{}': expected arg list on stack",
+                    name
+                )));
             }
         };
 
