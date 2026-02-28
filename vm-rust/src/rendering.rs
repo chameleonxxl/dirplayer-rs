@@ -2310,7 +2310,7 @@ fn draw_cursor(player: &mut DirPlayer, bitmap: &mut Bitmap, palettes: &PaletteMa
             ),
             &CopyPixelsParams {
                 blend: 100,
-                ink: 41,
+                ink: 0,
                 bg_color: bitmap.get_bg_color_ref(),
                 color: bitmap.get_fg_color_ref(),
                 mask_image: mask.as_ref(),

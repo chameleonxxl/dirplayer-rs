@@ -132,6 +132,7 @@ impl ListDatumHandlers {
             "append" => Self::append(datum, args),
             "deleteOne" => Self::delete_one(datum, args),
             "deleteAt" => Self::delete_at(datum, args),
+            "deleteAll" => Self::delete_all(datum, args),
             "findPos" => Self::find_pos(datum, args),
             "getPos" => Self::find_pos(datum, args),
             "join" => Self::join(datum, args),
@@ -291,6 +292,14 @@ impl ListDatumHandlers {
             } else {
                 Err(ScriptError::new("Index out of bounds".to_string()))
             }
+        })
+    }
+
+    pub fn delete_all(datum: &DatumRef, _args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+        reserve_player_mut(|player| {
+            let (_, list_vec, _) = player.get_datum_mut(datum).to_list_mut()?;
+            list_vec.clear();
+            Ok(DatumRef::Void)
         })
     }
 

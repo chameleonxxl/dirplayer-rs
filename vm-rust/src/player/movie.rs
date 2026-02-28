@@ -172,7 +172,9 @@ impl Movie {
                     Ok(Datum::Int(ticks as i32))
                 })
             }
-            "mouseDown" => Ok(datum_bool(self.mouse_down)),
+            "mouseDown" => {
+                Ok(datum_bool(self.mouse_down))
+            }
             "traceScript" => Ok(datum_bool(self.trace_script)),
             "activeWindow" => Ok(Datum::Stage),
             "rollOver" => {

@@ -578,7 +578,7 @@ impl CastMemberRefHandlers {
             "name" => Ok(Datum::String(name)),
             "memberNum" => Ok(Datum::Int(member_num as i32)),
             "number" => {
-                if player.movie.dir_version >= 700 {
+                if player.movie.dir_version >= 600 {
                     Ok(Datum::Int(slot_number))
                 } else {
                     Ok(Datum::Int(member_num as i32))
