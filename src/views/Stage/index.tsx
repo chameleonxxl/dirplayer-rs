@@ -104,7 +104,7 @@ export default function Stage({ showControls }: { showControls?: boolean }) {
   return (
     <div className={styles.container} ref={onContainerRef}>
       <div
-        style={{ transform: `scale(${scale})`, cursor: pickingMode ? 'crosshair' : undefined }}
+        style={{ transform: scale !== 1 ? `scale(${scale})` : undefined, cursor: pickingMode ? 'crosshair' : undefined }}
         tabIndex={0}
         id="stage_canvas_container"
         onPointerMove={(e) => onMouseEvent('move', e)}
@@ -112,6 +112,7 @@ export default function Stage({ showControls }: { showControls?: boolean }) {
         onPointerUp={(e) => onMouseEvent('up', e)}
         onKeyDown={e => {
           e.preventDefault();
+          if (e.repeat) return; // Skip browser key repeats; Lingo handles held keys via keyPressed()
           key_down(e.key, e.keyCode)
         }}
         onKeyUp={e => key_up(e.key, e.keyCode)}

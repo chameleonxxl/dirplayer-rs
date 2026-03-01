@@ -1,6 +1,6 @@
 use super::{
     cast_member::CastMemberType,
-    events::{player_dispatch_targeted_event, player_dispatch_movie_callback, player_invoke_frame_and_movie_scripts},
+    events::{player_invoke_event_to_instances, player_dispatch_movie_callback, player_invoke_frame_and_movie_scripts},
     player_is_playing, reserve_player_mut, DatumRef, DirPlayer, ScriptError,
 };
 
@@ -29,55 +29,82 @@ pub async fn player_key_down(key: String, code: u16) -> Result<DatumRef, ScriptE
     if !player_is_playing().await {
         return Ok(DatumRef::Void);
     }
-    let instance_ids = reserve_player_mut(|player| {
-        player.keyboard_manager.key_down(key.clone(), code);
+
+    // Note: keyboard_manager.key_down() is NOT called here because it's already
+    // handled immediately in the WASM entry point (lib.rs key_down()). Calling it
+    // here would re-add keys from stale queued commands after the user released them.
+    let (instance_ids, is_editable_field, sprite_id) = reserve_player_mut(|player| {
         if player.keyboard_focus_sprite != -1 {
-            let sprite_id = player.keyboard_focus_sprite as usize;
-            let sprite = player.movie.score.get_sprite(sprite_id as i16);
+            let sprite_id = player.keyboard_focus_sprite as i16;
+            let sprite = player.movie.score.get_sprite(sprite_id);
             if let Some(sprite) = sprite {
                 let instance_list = sprite.script_instance_list.clone();
                 let member_ref = sprite.member.clone();
-                let member_ref_clone = member_ref.clone();
                 let member =
-                    member_ref.and_then(|x| player.movie.cast_manager.find_mut_member_by_ref(&x));
-                if let Some(member) = member {
-                    match &mut member.member_type {
-                        CastMemberType::Field(field_member) => {
-                            if field_member.editable {
-                                if key == "Backspace" {
-                                    field_member.text.pop();
-                                } else if key == "Tab" {
-                                    let next_focus_sprite_id =
-                                        get_next_focus_sprite_id(player, sprite_id as i16);
-                                    player.keyboard_focus_sprite = next_focus_sprite_id;
-                                } else if key.len() == 1 {
-                                    field_member.text = format!("{}{}", field_member.text, key);
-                                }
-                            }
-                        }
-                        _ => {}
+                    member_ref.and_then(|x| player.movie.cast_manager.find_member_by_ref(&x));
+                let is_editable = member.map_or(false, |m| {
+                    if let CastMemberType::Field(f) = &m.member_type {
+                        f.editable
+                    } else {
+                        false
                     }
-                } else {
-                    // Debug: Log when member is not found
-                    #[cfg(target_arch = "wasm32")]
-                    if let Some(ref mref) = member_ref_clone {
-                        web_sys::console::warn_1(&format!(
-                            "DEBUG: Keyboard input - member not found for sprite {} (cast={}, num={})",
-                            sprite_id, mref.cast_lib, mref.cast_member
-                        ).into());
-                    }
-                }
-                Some(instance_list)
+                });
+                (Some(instance_list), is_editable, sprite_id)
             } else {
-                None
+                (None, false, -1)
             }
         } else {
-            None
+            (None, false, -1)
         }
     });
-    player_dispatch_targeted_event(&"keyDown".to_string(), &vec![], instance_ids.as_ref());
-    player_invoke_frame_and_movie_scripts(&"keyDown".to_string(), &vec![]).await?;
+
+    // Director event propagation order:
+    // 1. Behavior scripts on focused sprite (synchronous)
+    // 2. If not handled → frame script → movie scripts
+    // 3. Movie callback
+    // 4. If no script handled it → default text insertion
+    let mut handled = false;
+    if let Some(ref instances) = instance_ids {
+        if !instances.is_empty() {
+            handled = player_invoke_event_to_instances(
+                &"keyDown".to_string(), &vec![], instances,
+            ).await?;
+        }
+    }
+    if !handled {
+        player_invoke_frame_and_movie_scripts(&"keyDown".to_string(), &vec![]).await?;
+    }
     player_dispatch_movie_callback("keyDown").await?;
+
+    // Default text insertion: only if no script handled the event.
+    if is_editable_field && !handled {
+        reserve_player_mut(|player| {
+            if player.keyboard_focus_sprite != sprite_id {
+                return;
+            }
+            let sprite = player.movie.score.get_sprite(sprite_id);
+            if let Some(sprite) = sprite {
+                let member_ref = sprite.member.clone();
+                let member = member_ref.and_then(|x| player.movie.cast_manager.find_mut_member_by_ref(&x));
+                if let Some(member) = member {
+                    if let CastMemberType::Field(field_member) = &mut member.member_type {
+                        if field_member.editable {
+                            if key == "Backspace" {
+                                field_member.text.pop();
+                            } else if key == "Tab" {
+                                let next_focus_sprite_id =
+                                    get_next_focus_sprite_id(player, sprite_id);
+                                player.keyboard_focus_sprite = next_focus_sprite_id;
+                            } else if key.len() == 1 {
+                                field_member.text.push_str(&key);
+                            }
+                        }
+                    }
+                }
+            }
+        });
+    }
+
     Ok(DatumRef::Void)
 }
 
@@ -85,8 +112,9 @@ pub async fn player_key_up(key: String, code: u16) -> Result<DatumRef, ScriptErr
     if !player_is_playing().await {
         return Ok(DatumRef::Void);
     }
+    // Note: keyboard_manager.key_up() is NOT called here because it's already
+    // handled immediately in the WASM entry point (lib.rs key_up()).
     let instance_ids = reserve_player_mut(|player| {
-        player.keyboard_manager.key_up(&key, code);
         if player.keyboard_focus_sprite != -1 {
             let sprite = player.keyboard_focus_sprite as usize;
             let sprite = player.movie.score.get_sprite(sprite as i16);
@@ -95,8 +123,17 @@ pub async fn player_key_up(key: String, code: u16) -> Result<DatumRef, ScriptErr
             None
         }
     });
-    player_dispatch_targeted_event(&"keyUp".to_string(), &vec![], instance_ids.as_ref());
-    player_invoke_frame_and_movie_scripts(&"keyUp".to_string(), &vec![]).await?;
+    let mut handled = false;
+    if let Some(ref instances) = instance_ids {
+        if !instances.is_empty() {
+            handled = player_invoke_event_to_instances(
+                &"keyUp".to_string(), &vec![], instances,
+            ).await?;
+        }
+    }
+    if !handled {
+        player_invoke_frame_and_movie_scripts(&"keyUp".to_string(), &vec![]).await?;
+    }
     player_dispatch_movie_callback("keyUp").await?;
     Ok(DatumRef::Void)
 }

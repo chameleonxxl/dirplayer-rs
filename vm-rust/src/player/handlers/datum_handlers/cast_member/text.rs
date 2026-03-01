@@ -10,9 +10,9 @@ use crate::{
             drawing::CopyPixelsParams,
         },
         cast_lib::CastMemberRef,
-        font::{get_text_index_at_pos, measure_text, DrawTextParams},
+        font::{get_text_index_at_pos, get_glyph_preference, GlyphPreference, measure_text, DrawTextParams},
         handlers::datum_handlers::{
-            cast_member::font::{FontMemberHandlers, HtmlParser, StyledSpan, HtmlStyle, TextAlignment},
+            cast_member::font::{FontMemberHandlers, HtmlParser, HtmlStyle, StyledSpan, TextAlignment},
             cast_member_ref::borrow_member_mut, string_chunk::StringChunkUtils,
         },
         DatumRef, DirPlayer, ScriptError,
@@ -526,10 +526,14 @@ impl TextMemberHandlers {
                         .filter(|&s| s > 0)
                         .or_else(|| if text_data.font_size > 0 { Some(text_data.font_size as i32) } else { None })
                         .unwrap_or(12) as u16;
-                    let font_name = first_style.font_face.clone()
-                        .filter(|f| !f.is_empty())
-                        .or_else(|| if !text_data.font.is_empty() { Some(text_data.font.clone()) } else { None })
-                        .unwrap_or_else(|| "Arial".to_string());
+                    // Always prefer text_data.font (may have been changed at runtime via Lingo)
+                    let font_name = if !text_data.font.is_empty() {
+                        text_data.font.clone()
+                    } else {
+                        first_style.font_face.clone()
+                            .filter(|f| !f.is_empty())
+                            .unwrap_or_else(|| "Arial".to_string())
+                    };
                     preferred_font_name = Some(font_name.clone());
                     preferred_font_size = Some(font_size);
                     if DEBUG_TEXT_IMAGE {
@@ -637,440 +641,281 @@ impl TextMemberHandlers {
                     _ => TextAlignment::Left,
                 };
 
-                // Choose font for rendering
-                let render_font = if let Some(ref name) = preferred_font_name {
-                    player
-                        .font_manager
-                        .get_font_with_cast_and_bitmap(
+                let glyph_pref = get_glyph_preference();
+                let is_pfr_font;
+
+                // Load font from font_manager (PFR rasterizer), fall back to system font.
+                let font = {
+                    let font_name = preferred_font_name.as_deref()
+                        .or(if !text_data.font.is_empty() { Some(text_data.font.as_str()) } else { None });
+                    let font_size = preferred_font_size
+                        .or(if text_data.font_size > 0 { Some(text_data.font_size) } else { None });
+                    // Mirror the WebGL2 renderer's font lookup chain:
+                    // 1. Name-based lookup
+                    let mut loaded = if let Some(name) = font_name {
+                        player.font_manager.get_font_with_cast_and_bitmap(
                             name,
                             &player.movie.cast_manager,
                             &mut player.bitmap_manager,
-                            preferred_font_size,
+                            font_size,
                             None,
                         )
-                        .or_else(|| player.font_manager.get_system_font())
-                } else {
-                    player.font_manager.get_system_font()
-                };
-                if DEBUG_TEXT_IMAGE {
-                    if let Some(ref f) = render_font {
-                        web_sys::console::log_1(&format!(
-                            "[text.image] render font='{}' pfr={} size={} char={}x{}",
-                            f.font_name,
-                            f.char_widths.is_some(),
-                            f.font_size,
-                            f.char_width,
-                            f.char_height
-                        ).into());
-                    } else {
-                        web_sys::console::log_1(&"[text.image] render font: none".into());
-                    }
-                }
-
-                // If this is a PFR bitmap font, render via bitmap font path (not native canvas)
-                if let Some(ref font) = render_font {
-                    if font.char_widths.is_some() {
-                        if DEBUG_TEXT_IMAGE {
-                            web_sys::console::log_1(&format!(
-                                "[text.image] PFR bitmap path box={}x{} explicit_w={:?}",
-                                box_width, box_height, explicit_box_width
-                            ).into());
-                        }
-                        // Recompute bounds using bitmap font metrics to avoid clipping.
-                        let (mw, mh) = measure_text(
-                            &text_data.text,
-                            font,
-                            Some(font.char_height),
-                            text_data.fixed_line_space,
-                            text_data.top_spacing,
-                            text_data.bottom_spacing,
-                        );
-                        width = mw.max(1);
-                        height = mh.max(1);
-                        // Keep authored text-member box dimensions; only auto-grow when no explicit box exists.
-                        let has_explicit_box = explicit_box_width.is_some()
-                            || text_data.height > 0
-                            || text_data
-                                .info
-                                .as_ref()
-                                .map_or(false, |i| i.width > 0 || i.height > 0);
-                        if !has_explicit_box {
-                            if box_width < width { box_width = width; }
-                            if box_height < height { box_height = height; }
-                        }
-                        if bitmap.width != box_width || bitmap.height != box_height {
-                            bitmap = Bitmap::new(
-                                box_width.max(1),
-                                box_height.max(1),
-                                32,
-                                32,
-                                8,
-                                PaletteRef::BuiltIn(get_system_default_palette()),
-                            );
-                            bitmap.use_alpha = true;
-                            bitmap.data.fill(0);
-                        }
-
-                        let font_bitmap = player
-                            .bitmap_manager
-                            .get_bitmap(font.bitmap_ref)
-                            .ok_or_else(|| ScriptError::new("Font bitmap not found".to_string()))?;
-                        let palettes = player.movie.cast_manager.palettes();
-                        let params = CopyPixelsParams {
-                            blend: 100,
-                            ink: 36,
-                            color: member.color.clone(),
-                            bg_color: crate::player::sprite::ColorRef::Rgb(255, 255, 255),
-                            mask_image: None,
-                            is_text_rendering: true,
-                            rotation: 0.0,
-                            skew: 0.0,
-                            sprite: None,
-                            original_dst_rect: None,
-                        };
-
-                        use crate::player::bitmap::bitmap::resolve_color_ref;
-                        use crate::player::font::bitmap_font_copy_char;
-
-                        let text_color = resolve_color_ref(
-                            &palettes,
-                            &params.color,
-                            &bitmap.palette_ref,
-                            bitmap.original_bit_depth,
-                        );
-                        let bold = text_data.font_style.iter().any(|s| s == "bold");
-                        let italic = text_data.font_style.iter().any(|s| s == "italic");
-                        let underline = text_data.font_style.iter().any(|s| s == "underline");
-
-                        let max_width = box_width as i32;
-                        let mut y = text_data.top_spacing as i32;
-                        let line_height = (font.char_height as i32 - 1).max(1);
-
-                        let mut flush_line = |line: &str, y_pos: i32, bitmap: &mut Bitmap| {
-                            let line_width: i32 = line
-                                .chars()
-                                .map(|c| font.get_char_advance(c as u8) as i32)
-                                .sum();
-                            let start_x = match alignment {
-                                TextAlignment::Center => ((max_width - line_width) / 2).max(0),
-                                TextAlignment::Right => (max_width - line_width).max(0),
-                                _ => 0,
-                            };
-                            let mut x = start_x;
-                            for ch in line.chars() {
-                                bitmap_font_copy_char(
-                                    font,
-                                    font_bitmap,
-                                    ch as u8,
-                                    bitmap,
-                                    x,
-                                    y_pos,
-                                    &palettes,
-                                    &params,
-                                );
-                                if bold {
-                                    bitmap_font_copy_char(
-                                        font,
-                                        font_bitmap,
-                                        ch as u8,
-                                        bitmap,
-                                        x + 1,
-                                        y_pos,
-                                        &palettes,
-                                        &params,
-                                    );
-                                }
-                                if italic {
-                                    // Simple shear: offset by 1 pixel every 4 rows.
-                                    let shear = (y_pos / 4) as i32;
-                                    bitmap_font_copy_char(
-                                        font,
-                                        font_bitmap,
-                                        ch as u8,
-                                        bitmap,
-                                        x + shear,
-                                        y_pos,
-                                        &palettes,
-                                        &params,
-                                    );
-                                }
-                                x += font.get_char_advance(ch as u8) as i32;
-                            }
-
-                            if underline {
-                                let underline_y = y_pos + line_height - 1;
-                                for ux in start_x..(start_x + line_width).max(start_x) {
-                                    bitmap.set_pixel(ux, underline_y, text_color, &palettes);
-                                }
-                            }
-                        };
-
-                        let raw_lines: Vec<&str> = text_data.text.split(|c| c == '\r' || c == '\n').collect();
-                        let mut lines_to_draw: Vec<String> = Vec::new();
-
-                        if text_data.word_wrap && max_width > 0 {
-                            for raw in raw_lines {
-                                if raw.is_empty() {
-                                    lines_to_draw.push(String::new());
-                                    continue;
-                                }
-
-                                let mut current = String::new();
-                                for word in raw.split_whitespace() {
-                                    let candidate = if current.is_empty() {
-                                        word.to_string()
-                                    } else {
-                                        format!("{} {}", current, word)
-                                    };
-
-                                    let candidate_width: i32 = candidate
-                                        .chars()
-                                        .map(|c| font.get_char_advance(c as u8) as i32)
-                                        .sum();
-
-                                    if candidate_width <= max_width || current.is_empty() {
-                                        current = candidate;
-                                    } else {
-                                        lines_to_draw.push(current);
-                                        current = word.to_string();
-                                    }
-                                }
-
-                                if !current.is_empty() {
-                                    lines_to_draw.push(current);
-                                }
-                            }
-                        } else {
-                            lines_to_draw = raw_lines.iter().map(|s| s.to_string()).collect();
-                        }
-
-                        // fixedLineSpace overrides glyph height; topSpacing + bottomSpacing added on top.
-                        let effective_line_height = if text_data.fixed_line_space > 0 {
-                            text_data.fixed_line_space as i32
-                        } else {
-                            line_height
-                        };
-                        let line_step = effective_line_height
-                            + text_data.bottom_spacing as i32
-                            + text_data.top_spacing as i32;
-                        for line in lines_to_draw {
-                            flush_line(&line, y, &mut bitmap);
-                            y += line_step;
-                        }
-
-                        // Trim only when left-aligned and no explicit box size; otherwise keep width for centering.
-                        let has_explicit_box = explicit_box_width.is_some()
-                            || text_data.height > 0
-                            || text_data
-                                .info
-                                .as_ref()
-                                .map_or(false, |i| i.width > 0 || i.height > 0);
-                        let allow_trim = matches!(alignment, TextAlignment::Left) && !has_explicit_box;
-                        if allow_trim {
-                            let mut max_x = -1i32;
-                            let mut max_y = -1i32;
-                            for y in 0..bitmap.height as i32 {
-                                for x in 0..bitmap.width as i32 {
-                                    let idx = (y as usize * bitmap.width as usize + x as usize) * 4 + 3;
-                                    if idx < bitmap.data.len() && bitmap.data[idx] != 0 {
-                                        if x > max_x { max_x = x; }
-                                        if y > max_y { max_y = y; }
-                                    }
-                                }
-                            }
-
-                            if max_x >= 0 && max_y >= 0 {
-                                let new_w = (max_x + 1) as u16;
-                                let new_h = (max_y + 1) as u16;
-                                if new_w < bitmap.width || new_h < bitmap.height {
-                                    let mut trimmed = Bitmap::new(
-                                        new_w,
-                                        new_h,
-                                        bitmap.bit_depth,
-                                        bitmap.original_bit_depth,
-                                        if bitmap.use_alpha || bitmap.bit_depth == 32 { 8 } else { 0 },
-                                        bitmap.palette_ref.clone(),
-                                    );
-                                    trimmed.use_alpha = bitmap.use_alpha;
-                                    for y in 0..new_h as i32 {
-                                        for x in 0..new_w as i32 {
-                                            let src_idx = (y as usize * bitmap.width as usize + x as usize) * 4;
-                                            let dst_idx = (y as usize * new_w as usize + x as usize) * 4;
-                                            if src_idx + 3 < bitmap.data.len() && dst_idx + 3 < trimmed.data.len() {
-                                                trimmed.data[dst_idx..dst_idx + 4]
-                                                    .copy_from_slice(&bitmap.data[src_idx..src_idx + 4]);
-                                            }
-                                        }
-                                    }
-                                    bitmap = trimmed;
-                                }
-                            }
-                        }
-
-                        let bitmap_ref = player.bitmap_manager.add_bitmap(bitmap);
-                        return Ok(Datum::BitmapRef(bitmap_ref));
-                    }
-                }
-
-                // Use styled spans if available, otherwise create a basic span
-                if !text_data.html_styled_spans.is_empty() {
-                    let initial_span_size = text_data
-                        .html_styled_spans
-                        .iter()
-                        .filter_map(|s| s.style.font_size)
-                        .filter(|s| *s > 0)
-                        .max()
-                        .unwrap_or(0);
-                    let runtime_size_scale = if text_data.font_size > 0
-                        && initial_span_size > 0
-                        && (text_data.font_size as i32) != initial_span_size
-                    {
-                        Some(text_data.font_size as f32 / initial_span_size as f32)
                     } else {
                         None
                     };
-
-                    // Clone spans while preserving per-run style from XMED data.
-                    // Runtime fontSize changes scale runs proportionally.
-                    let spans_with_defaults: Vec<StyledSpan> = text_data.html_styled_spans.iter().map(|span| {
-                        let mut style = span.style.clone();
-
-                        // Only fill missing font face; preserve per-run font assignments.
-                        if style.font_face.as_ref().map_or(true, |f| f.is_empty()) {
-                            if !text_data.font.is_empty() {
-                                style.font_face = Some(text_data.font.clone());
-                            } else {
-                                style.font_face = Some("Arial".to_string());
-                            }
-                        }
-
-                        // Preserve run sizes, but allow runtime fontSize to scale all runs.
-                        if let Some(scale) = runtime_size_scale {
-                            if let Some(span_size) = style.font_size.filter(|s| *s > 0) {
-                                style.font_size = Some(((span_size as f32 * scale).round() as i32).max(1));
-                            } else {
-                                style.font_size = Some(text_data.font_size as i32);
-                            }
-                        } else if style.font_size.map_or(true, |s| s <= 0) {
-                            // Use member fontSize as fallback when no run size exists.
-                            if text_data.font_size > 0 {
-                                style.font_size = Some(text_data.font_size as i32);
-                            } else {
-                                style.font_size = Some(12);
-                            }
-                        }
-
-                        // Use cast member color if span doesn't have color.
-                        if style.color.is_none() {
-                            style.color = match member.color {
-                                crate::player::sprite::ColorRef::Rgb(r, g, b) => {
-                                    Some(((r as u32) << 16) | ((g as u32) << 8) | (b as u32))
+                    // 2. Case-insensitive match in font cache
+                    if loaded.is_none() {
+                        if let Some(name) = font_name {
+                            let name_lower = name.to_lowercase();
+                            for (key, font) in player.font_manager.font_cache.iter() {
+                                if key.to_lowercase() == name_lower
+                                    || key.to_lowercase().starts_with(&format!("{}_", name_lower))
+                                {
+                                    loaded = Some(font.clone());
+                                    break;
                                 }
-                                crate::player::sprite::ColorRef::PaletteIndex(idx) => match idx {
-                                    0 => Some(0xFFFFFF),
-                                    255 => Some(0x000000),
-                                    _ => Some(0x000000),
-                                },
-                            };
+                            }
                         }
-
-                        StyledSpan {
-                            text: span.text.clone(),
-                            style,
-                        }
-                    }).collect();
-                    if DEBUG_TEXT_IMAGE {
-                        let preview: Vec<String> = spans_with_defaults
-                            .iter()
-                            .take(3)
-                            .map(|s| format!(
-                                "'{}' size={:?} face={:?} color={:?}",
-                                s.text.chars().take(12).collect::<String>(),
-                                s.style.font_size,
-                                s.style.font_face,
-                                s.style.color
-                            ))
-                            .collect();
-                        web_sys::console::log_1(&format!(
-                            "[text.image] native styled path spans={} box={}x{} preview={:?}",
-                            spans_with_defaults.len(),
-                            box_width,
-                            box_height,
-                            preview
-                        ).into());
                     }
+                    loaded.or_else(|| player.font_manager.get_system_font())
+                        .ok_or_else(|| ScriptError::new("No font available for text rendering".to_string()))?
+                };
+                is_pfr_font = font.char_widths.is_some();
 
-                    // Use native browser text rendering with styled spans
-                    let _ = FontMemberHandlers::render_native_text_to_bitmap(
-                        &mut bitmap,
-                        &spans_with_defaults,
-                        0,
-                        0,
-                        box_width as i32,
-                        box_height as i32,
-                        alignment,
-                        box_width as i32,
-                        text_data.word_wrap,
-                        None, // Don't pass text_color - it's now in the span
-                        text_data.fixed_line_space,
-                        text_data.top_spacing,
-                        text_data.bottom_spacing,
-                    );
-                } else {
-                    // Create a basic styled span from text member properties
-                    // Use None for empty/zero values so renderer uses proper defaults
-                    let style = HtmlStyle {
-                        font_face: if !text_data.font.is_empty() {
-                            Some(text_data.font.clone())
-                        } else {
-                            None
-                        },
-                        font_size: if text_data.font_size > 0 {
-                            Some(text_data.font_size as i32)
-                        } else {
-                            None
-                        },
-                        color: match member.color {
-                            crate::player::sprite::ColorRef::Rgb(r, g, b) => {
-                                Some(((r as u32) << 16) | ((g as u32) << 8) | (b as u32))
-                            }
-                            crate::player::sprite::ColorRef::PaletteIndex(idx) => {
-                                // Convert common palette indices to RGB
-                                match idx {
-                                    0 => Some(0xFFFFFF), // White
-                                    255 => Some(0x000000), // Black
-                                    _ => Some(0x000000), // Default to black
-                                }
-                            }
-                        },
-                        bg_color: None, // Transparent background
-                        bold: text_data.font_style.iter().any(|s| s == "bold"),
-                        italic: text_data.font_style.iter().any(|s| s == "italic"),
-                        underline: text_data.font_style.iter().any(|s| s == "underline"),
-                        kerning: 0,      // Default: no kerning adjustment for non-XMED text
-                        char_spacing: 0, // Default: no extra spacing for non-XMED text
+                let use_native = match glyph_pref {
+                    GlyphPreference::Native => true,
+                    GlyphPreference::Bitmap | GlyphPreference::Outline => false,
+                    GlyphPreference::Auto => false, // Default: bitmap for image property
+                };
+
+                if use_native && !is_pfr_font {
+                    // Native Canvas2D rendering for standard fonts
+                    let font_name_str = preferred_font_name.as_deref().unwrap_or("Arial");
+                    let font_size_val = preferred_font_size.unwrap_or(12);
+                    let (r, g, b) = {
+                        use crate::player::bitmap::bitmap::resolve_color_ref;
+                        let palettes = player.movie.cast_manager.palettes();
+                        resolve_color_ref(
+                            &palettes,
+                            &member.color,
+                            &bitmap.palette_ref,
+                            bitmap.original_bit_depth,
+                        )
                     };
+                    let mut style = HtmlStyle::default();
+                    style.font_face = Some(font_name_str.to_string());
+                    style.font_size = Some(font_size_val as i32);
+                    style.color = Some(((r as u32) << 16) | ((g as u32) << 8) | (b as u32));
                     let spans = vec![StyledSpan {
                         text: text_data.text.clone(),
                         style,
                     }];
-
-                    let _ = FontMemberHandlers::render_native_text_to_bitmap(
+                    if let Err(e) = FontMemberHandlers::render_native_text_to_bitmap(
                         &mut bitmap,
                         &spans,
                         0,
-                        0,
+                        text_data.top_spacing as i32,
                         box_width as i32,
                         box_height as i32,
                         alignment,
                         box_width as i32,
                         text_data.word_wrap,
-                        None, // Don't pass text_color since we set it in the span
+                        None,
                         text_data.fixed_line_space,
                         text_data.top_spacing,
                         text_data.bottom_spacing,
+                    ) {
+                        web_sys::console::warn_1(
+                            &format!("[text.image] Native render error: {:?}", e).into()
+                        );
+                    }
+                } else if use_native && is_pfr_font {
+                    // Native Canvas2D for PFR fonts - use the PFR font name, but Canvas2D
+                    // won't have it registered, so it will fall back to a browser default.
+                    // Still useful for comparison/debugging purposes.
+                    let font_name_str = preferred_font_name.as_deref().unwrap_or(&font.font_name);
+                    let font_size_val = preferred_font_size.unwrap_or(font.font_size.max(12));
+                    let (r, g, b) = {
+                        use crate::player::bitmap::bitmap::resolve_color_ref;
+                        let palettes = player.movie.cast_manager.palettes();
+                        resolve_color_ref(
+                            &palettes,
+                            &member.color,
+                            &bitmap.palette_ref,
+                            bitmap.original_bit_depth,
+                        )
+                    };
+                    let mut style = HtmlStyle::default();
+                    style.font_face = Some(font_name_str.to_string());
+                    style.font_size = Some(font_size_val as i32);
+                    style.color = Some(((r as u32) << 16) | ((g as u32) << 8) | (b as u32));
+                    let spans = vec![StyledSpan {
+                        text: text_data.text.clone(),
+                        style,
+                    }];
+                    if let Err(e) = FontMemberHandlers::render_native_text_to_bitmap(
+                        &mut bitmap,
+                        &spans,
+                        0,
+                        text_data.top_spacing as i32,
+                        box_width as i32,
+                        box_height as i32,
+                        alignment,
+                        box_width as i32,
+                        text_data.word_wrap,
+                        None,
+                        text_data.fixed_line_space,
+                        text_data.top_spacing,
+                        text_data.bottom_spacing,
+                    ) {
+                        web_sys::console::warn_1(
+                            &format!("[text.image] Native render error (PFR): {:?}", e).into()
+                        );
+                    }
+                } else {
+                    // Bitmap glyph rendering using PFR rasterizer font
+                    let font_bitmap = player
+                        .bitmap_manager
+                        .get_bitmap(font.bitmap_ref)
+                        .ok_or_else(|| ScriptError::new("Font bitmap not found".to_string()))?;
+                    let palettes = player.movie.cast_manager.palettes();
+                    let params = CopyPixelsParams {
+                        blend: 100,
+                        ink: 36,
+                        color: member.color.clone(),
+                        bg_color: crate::player::sprite::ColorRef::Rgb(255, 255, 255),
+                        mask_image: None,
+                        is_text_rendering: true,
+                        rotation: 0.0,
+                        skew: 0.0,
+                        sprite: None,
+                        original_dst_rect: None,
+                    };
+
+                    use crate::player::bitmap::bitmap::resolve_color_ref;
+                    use crate::player::font::{bitmap_font_copy_char, bitmap_font_copy_char_tight};
+
+                    let text_color = resolve_color_ref(
+                        &palettes,
+                        &params.color,
+                        &bitmap.palette_ref,
+                        bitmap.original_bit_depth,
                     );
-                }
+                    let bold = text_data.font_style.iter().any(|s| s == "bold");
+                    let italic = text_data.font_style.iter().any(|s| s == "italic");
+                    let underline = text_data.font_style.iter().any(|s| s == "underline");
+                    let is_pfr_font = font.char_widths.is_some();
+
+                    let max_width = box_width as i32;
+                    let mut y = text_data.top_spacing as i32;
+                    let line_height = (font.char_height as i32 - 1).max(1);
+
+                    // Get char_spacing from styled spans (XMED data)
+                    let char_spacing: i32 = text_data.html_styled_spans.first()
+                        .map(|s| s.style.char_spacing)
+                        .unwrap_or(0);
+
+                    let mut flush_line = |line: &str, y_pos: i32, bitmap: &mut Bitmap| {
+                        let line_width: i32 = line
+                            .chars()
+                            .map(|c| font.get_char_advance(c as u8) as i32 + char_spacing)
+                            .sum();
+                        let start_x = match alignment {
+                            TextAlignment::Center => ((max_width - line_width) / 2).max(0),
+                            TextAlignment::Right => (max_width - line_width).max(0),
+                            _ => 0,
+                        };
+                        let mut x = start_x;
+                        for ch in line.chars() {
+                            let adv = font.get_char_advance(ch as u8) as i32;
+                            // Use tight copy for PFR fonts when cell width is much larger
+                            // than character advance, to prevent transparent cell areas from
+                            // overlapping and erasing adjacent characters.
+                            let use_tight = is_pfr_font && (font.char_width as i32) > (adv * 2).max(16);
+                            if use_tight {
+                                bitmap_font_copy_char_tight(
+                                    &font, font_bitmap, ch as u8, bitmap,
+                                    x, y_pos, &palettes, &params,
+                                );
+                            } else {
+                                bitmap_font_copy_char(
+                                    &font, font_bitmap, ch as u8, bitmap,
+                                    x, y_pos, &palettes, &params,
+                                );
+                            }
+                            if bold {
+                                if use_tight {
+                                    bitmap_font_copy_char_tight(
+                                        &font, font_bitmap, ch as u8, bitmap,
+                                        x + 1, y_pos, &palettes, &params,
+                                    );
+                                } else {
+                                    bitmap_font_copy_char(
+                                        &font, font_bitmap, ch as u8, bitmap,
+                                        x + 1, y_pos, &palettes, &params,
+                                    );
+                                }
+                            }
+                            x += adv + char_spacing;
+                        }
+
+                        if underline {
+                            let underline_y = y_pos + line_height - 1;
+                            for ux in start_x..(start_x + line_width).max(start_x) {
+                                bitmap.set_pixel(ux, underline_y, text_color, &palettes);
+                            }
+                        }
+                    };
+
+                    let raw_lines: Vec<&str> = text_data.text.split(|c| c == '\r' || c == '\n').collect();
+                    let mut lines_to_draw: Vec<String> = Vec::new();
+
+                    if text_data.word_wrap && max_width > 0 {
+                        for raw in raw_lines {
+                            if raw.is_empty() {
+                                lines_to_draw.push(String::new());
+                                continue;
+                            }
+                            let mut current = String::new();
+                            for word in raw.split_whitespace() {
+                                let candidate = if current.is_empty() {
+                                    word.to_string()
+                                } else {
+                                    format!("{} {}", current, word)
+                                };
+                                let candidate_width: i32 = candidate
+                                    .chars()
+                                    .map(|c| font.get_char_advance(c as u8) as i32 + char_spacing)
+                                    .sum();
+                                if candidate_width <= max_width || current.is_empty() {
+                                    current = candidate;
+                                } else {
+                                    lines_to_draw.push(current);
+                                    current = word.to_string();
+                                }
+                            }
+                            if !current.is_empty() {
+                                lines_to_draw.push(current);
+                            }
+                        }
+                    } else {
+                        lines_to_draw = raw_lines.iter().map(|s| s.to_string()).collect();
+                    }
+
+                    let effective_line_height = if text_data.fixed_line_space > 0 {
+                        text_data.fixed_line_space as i32
+                    } else {
+                        line_height
+                    };
+                    let line_step = effective_line_height
+                        + text_data.bottom_spacing as i32
+                        + text_data.top_spacing as i32;
+                    for line in lines_to_draw {
+                        flush_line(&line, y, &mut bitmap);
+                        y += line_step;
+                    }
+
+                } // end bitmap glyph else branch
 
                 let bitmap_ref = player.bitmap_manager.add_bitmap(bitmap);
                 Ok(Datum::BitmapRef(bitmap_ref))

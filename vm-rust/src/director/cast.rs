@@ -36,6 +36,10 @@ pub struct CastDef {
     /// Section IDs of chunks referenced internally by Lctx (Lscr scripts + Lnam names).
     /// These are NOT in the KeyTable as children of Lctx, so they must be tracked separately.
     pub lctx_child_section_ids: Vec<u32>,
+    /// Offset to adjust bitmap clutId values from Config-based numbering to MCsL-based numbering.
+    /// Computed as `config.min_member - mcsl.min_member`. Applied to positive palette_id values
+    /// in bitmap member data to convert from file-stored references to loaded member numbers.
+    pub palette_id_offset: i16,
 }
 
 impl CastDef {
@@ -48,6 +52,7 @@ impl CastDef {
         chunk_container: &mut ChunkContainer,
         rifx: &mut RIFXReaderContext,
         key_table: &KeyTableChunk,
+        palette_id_offset: i16,
     ) -> Result<CastDef, String> {
         // TODO script names, scripts
         let lctx_entry =
@@ -157,6 +162,7 @@ impl CastDef {
             section_to_member,
             lctx_section_id,
             lctx_child_section_ids,
+            palette_id_offset,
         });
     }
 }

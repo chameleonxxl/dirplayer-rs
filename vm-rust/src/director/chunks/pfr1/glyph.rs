@@ -5,6 +5,20 @@ use super::types::*;
 use super::log;
 use super::stroke_builder;
 
+/// 16.16 fixed-point multiplication.
+/// Used by the rasterizer for Director-accurate advance width computation.
+pub fn fixed_point_multiply16(a: i32, b: i32) -> i32 {
+    let negate = (a < 0) ^ (b < 0);
+    let a_abs = a.abs();
+    let b_abs = b.abs();
+    let hi_a = a_abs >> 16;
+    let lo_a = a_abs & 0xFFFF;
+    let hi_b = b_abs >> 16;
+    let lo_b = b_abs & 0xFFFF;
+    let result = (hi_a * b_abs) + ((lo_a * lo_b) >> 16) + (lo_a * hi_b);
+    if negate { -result } else { result }
+}
+
 // ========== Lookup Tables ==========
 
 /// Curve encoding tables for commands 9, 10, 13
@@ -65,10 +79,6 @@ pub struct Pfr1HeaderParser<'a> {
     orus_zero_scale: f32,
     target_em_px: i32,
     diag_char_code: u32,
-    // Deferred component scale for compound sub-glyphs (1/4096 fixed-point, 4096 = 1.0).
-    // Applied in parse() AFTER init_transform_flags/compute_coord_shift
-    component_scale_x: i32,
-    component_scale_y: i32,
     first_point_orus_x: Option<i16>,
     first_point_orus_y: Option<i16>,
     font_metrics: Option<FontMetrics>,
@@ -144,6 +154,9 @@ pub struct Pfr1HeaderParser<'a> {
     glyph_gps_offset: i32,
     known_gps_offsets: Option<&'a [usize]>,
 
+    // Recursion guard for compound glyphs
+    recursion_depth: u32,
+
     // Hint state
     hint_pos: i32,
     hint_nibble_high: i32,
@@ -157,7 +170,17 @@ pub struct Pfr1HeaderParser<'a> {
 
     // Recursion depth for compound glyph parsing
     depth: u32,
+
+    // When true, skip compute_coord_shift/compute_font_offsets in parse()
+    // (coord state was inherited from parent via copy_parent_coord_state)
+    coord_state_inherited: bool,
+
+    // Runtime mode bytes for coordinate path
+    cd4_mode_x: u8,
+    cd4_mode_y: u8,
 }
+
+const MAX_RECURSION_DEPTH: u32 = 10;
 
 impl<'a> Pfr1HeaderParser<'a> {
     pub fn new(
@@ -249,8 +272,6 @@ impl<'a> Pfr1HeaderParser<'a> {
             orus_zero_scale: 1.0,
             target_em_px,
             diag_char_code: 0,
-            component_scale_x: 4096,
-            component_scale_y: 4096,
             font_metrics: font_metrics.cloned(),
             bbox_x_min,
             bbox_y_min,
@@ -309,6 +330,7 @@ impl<'a> Pfr1HeaderParser<'a> {
             gps_len,
             glyph_gps_offset,
             known_gps_offsets,
+            recursion_depth: 0,
             hint_pos: -1,
             hint_nibble_high: 0,
             hint_repeat_count: 0,
@@ -321,13 +343,29 @@ impl<'a> Pfr1HeaderParser<'a> {
             first_point_orus_y: None,
             ce9d_nibble_aligned: false,
             depth: 0,
+            coord_state_inherited: false,
+            cd4_mode_x: 4,
+            cd4_mode_y: 4,
         };
 
-        // Compute fontScale from target pixel size and outline resolution
-        if target_em_px > 0 && outline_resolution > 0 {
-            let computed_scale = (target_em_px * 256) / outline_resolution as i32;
-            parser.font_scale_x = computed_scale as i16;
-            parser.font_scale_y = computed_scale as i16;
+        // Initialize cd4 mode from physical font private records
+        if let Some(pf) = physical_font {
+            if pf.private_mode_716 == 5
+                && (pf.private_type2_byte28 != 0 || pf.private_type2_byte29 != 0)
+            {
+                parser.cd4_mode_x = pf.private_type2_byte28;
+                parser.cd4_mode_y = pf.private_type2_byte29;
+            } else {
+                parser.cd4_mode_x = if pf.private_mode_x == 0 { 4 } else { pf.private_mode_x };
+                parser.cd4_mode_y = if pf.private_mode_y == 0 { 4 } else { pf.private_mode_y };
+            }
+        }
+
+        // Seed fontScaleX/Y from raw matrix absolute values.
+        // For targetEmPx > 0, ComputeFontOffsets overrides these with scaled values.
+        if target_em_px <= 0 {
+            parser.font_scale_x = font_matrix[0].abs() as i16;
+            parser.font_scale_y = font_matrix[3].abs() as i16;
         }
 
         parser
@@ -414,9 +452,6 @@ impl<'a> Pfr1HeaderParser<'a> {
 
     /// Compute coordinate shift value
     fn compute_coord_shift(&mut self) {
-        let saved_font_scale_x = self.font_scale_x;
-        let saved_font_scale_y = self.font_scale_y;
-
         let font_matrix16_a = self.matrix_a << 8;
         let font_matrix16_b = self.matrix_b << 8;
         let font_matrix16_c = self.matrix_c << 8;
@@ -475,8 +510,6 @@ impl<'a> Pfr1HeaderParser<'a> {
         }
 
         self.scale_value_656 = (1 << self.coord_shift) >> 1;
-        // base_offset is kept at 0
-        self.base_offset = 0;
 
         self.scaled_matrix_a = self.scale_matrix_element(matrix2136_a);
         self.scaled_matrix_b = self.scale_matrix_element(matrix2136_b);
@@ -521,6 +554,8 @@ impl<'a> Pfr1HeaderParser<'a> {
 
         self.final_shift = (16 - self.secondary_scale) as i16;
         self.rounding_bias_2128 = (1 << self.shift_difference) >> 1;
+        // base_offset = roundingBias2128
+        self.base_offset = self.rounding_bias_2128;
 
         self.boundary_values_532[0] =
             (((self.rounding_bias_2128 + v53) >> self.shift_difference) - self.scaled_pow2 as i32) as i16;
@@ -530,29 +565,6 @@ impl<'a> Pfr1HeaderParser<'a> {
             (self.scaled_pow2 as i32 + ((self.rounding_bias_2128 + v52) >> self.shift_difference)) as i16;
         self.boundary_values_532[3] =
             (self.scaled_pow2 as i32 + ((self.rounding_bias_2128 + v25) >> self.shift_difference)) as i16;
-
-        if self.target_em_px > 0 && self.outline_resolution > 0 {
-            let multiplier = 1 << self.coord_shift;
-            let computed_scale = (self.target_em_px * multiplier) / self.outline_resolution as i32;
-            self.font_scale_x = computed_scale as i16;
-            self.font_scale_y = computed_scale as i16;
-        } else if self.coord_shift != 8 {
-            let shift_adjust = self.coord_shift - 8;
-            if shift_adjust > 0 {
-                self.font_scale_x = ((self.font_scale_x as i32) << shift_adjust) as i16;
-                self.font_scale_y = ((self.font_scale_y as i32) << shift_adjust) as i16;
-            } else if shift_adjust < 0 {
-                self.font_scale_x = (self.font_scale_x as i32 >> (-shift_adjust)) as i16;
-                self.font_scale_y = (self.font_scale_y as i32 >> (-shift_adjust)) as i16;
-            }
-        }
-
-        if self.font_scale_x == 0 && saved_font_scale_x > 0 {
-            self.font_scale_x = saved_font_scale_x;
-        }
-        if self.font_scale_y == 0 && saved_font_scale_y > 0 {
-            self.font_scale_y = saved_font_scale_y;
-        }
     }
 
     /// Fixed-point division with rounding for matrix elements
@@ -647,47 +659,71 @@ impl<'a> Pfr1HeaderParser<'a> {
 
     /// Compute font offsets (ComputeFontOffsets)
     fn compute_font_offsets(&mut self) {
-        let accum_x = self.accumulated_2156;
-        let accum_y = self.accumulated_2164;
+        // Reset all derived values
+        self.font_scale_x = 0;
+        self.font_scale_y = 0;
+        self.font_offset_x = 0;
+        self.font_offset_y = 0;
+        self.x_transform_flag = 4;
+        self.y_transform_flag = 4;
 
-        if self.scaled_matrix_b != 0 {
-            if self.scaled_matrix_a == 0 {
-                if self.scaled_matrix_b < 0 {
-                    self.x_transform_flag = 3;
-                    self.font_offset_x = -accum_x;
-                } else {
-                    self.x_transform_flag = 2;
-                    self.font_offset_x = accum_x;
-                }
-            }
-        } else if self.scaled_matrix_a < 0 {
-            self.x_transform_flag = 1;
-            self.font_offset_x = -accum_x;
-        } else {
-            self.x_transform_flag = 0;
-            self.font_offset_x = accum_x;
-        }
-
+        // Block 1: X-axis analysis (checks scaled_matrix_c first, then A)
         if self.scaled_matrix_c != 0 {
-            if self.scaled_matrix_d == 0 {
+            if self.scaled_matrix_a == 0 {
+                // Rotation/shear: fontScaleY from C, offset into Y
                 if self.scaled_matrix_c < 0 {
-                    self.y_transform_flag = 3;
-                    self.font_offset_y = -accum_y;
+                    self.font_scale_y = -self.scaled_matrix_c;
+                    self.x_transform_flag = 3;
+                    self.font_offset_y = -self.accumulated_2156;
                 } else {
-                    self.y_transform_flag = 2;
-                    self.font_offset_y = accum_y;
+                    self.font_scale_y = self.scaled_matrix_c;
+                    self.x_transform_flag = 2;
+                    self.font_offset_y = self.accumulated_2156;
                 }
             }
-        } else if self.scaled_matrix_d < 0 {
-            self.y_transform_flag = 1;
-            self.font_offset_y = -accum_y;
+            // Both C and A non-zero: flags stay at 4 (full matrix)
         } else {
-            self.y_transform_flag = 0;
-            self.font_offset_y = accum_y;
+            // C == 0 (standard case): fontScaleX from A
+            if self.scaled_matrix_a < 0 {
+                self.font_scale_x = -self.scaled_matrix_a;
+                self.x_transform_flag = 1;
+                self.font_offset_x = -self.accumulated_2156;
+            } else {
+                self.font_scale_x = self.scaled_matrix_a;
+                self.x_transform_flag = 0;
+                self.font_offset_x = self.accumulated_2156;
+            }
         }
 
-        // ComputeFontOffsets: add roundingBias to fontOffset
-        // This flows through to ComputeScaledCoordinates and zone tables
+        // Block 2: Y-axis analysis (checks scaled_matrix_b first, then D)
+        if self.scaled_matrix_b != 0 {
+            if self.scaled_matrix_d == 0 {
+                // Rotation/shear: fontScaleX from B, offset into X
+                if self.scaled_matrix_b < 0 {
+                    self.font_scale_x = -self.scaled_matrix_b;
+                    self.y_transform_flag = 3;
+                    self.font_offset_x = -self.accumulated_2164;
+                } else {
+                    self.font_scale_x = self.scaled_matrix_b;
+                    self.y_transform_flag = 2;
+                    self.font_offset_x = self.accumulated_2164;
+                }
+            }
+            // Both B and D non-zero: flags stay at 4 (full matrix)
+        } else {
+            // B == 0 (standard case): fontScaleY from D
+            if self.scaled_matrix_d < 0 {
+                self.font_scale_y = -self.scaled_matrix_d;
+                self.y_transform_flag = 1;
+                self.font_offset_y = -self.accumulated_2164;
+            } else {
+                self.font_scale_y = self.scaled_matrix_d;
+                self.y_transform_flag = 0;
+                self.font_offset_y = self.accumulated_2164;
+            }
+        }
+
+        // Add roundingBias to fontOffset
         self.font_offset_x += self.rounding_bias_2128;
         self.font_offset_y += self.rounding_bias_2128;
         self.font_shift_amount = 16 - self.secondary_scale as i32;
@@ -702,16 +738,57 @@ impl<'a> Pfr1HeaderParser<'a> {
         }
     }
 
+    /// Copy CoordShift-derived state from a parent parser.
+    /// Sub-glyphs inherit these values and the current matrix state.
+    fn copy_parent_coord_state(&mut self, parent: &Pfr1HeaderParser) {
+        self.coord_shift = parent.coord_shift;
+        self.shift_difference = parent.shift_difference;
+        self.secondary_scale = parent.secondary_scale;
+        self.scaled_pow2 = parent.scaled_pow2;
+        self.scaled_pow2_half = parent.scaled_pow2_half;
+        self.scaled_pow2_neg = parent.scaled_pow2_neg;
+        self.rounding_bias_2128 = parent.rounding_bias_2128;
+        self.base_offset = parent.base_offset;
+        self.scale_counter = parent.scale_counter;
+        self.scale_value_656 = parent.scale_value_656;
+        self.final_shift = parent.final_shift;
+        self.boundary_values_532 = parent.boundary_values_532;
+        self.scaled_matrix_a = parent.scaled_matrix_a;
+        self.scaled_matrix_b = parent.scaled_matrix_b;
+        self.scaled_matrix_c = parent.scaled_matrix_c;
+        self.scaled_matrix_d = parent.scaled_matrix_d;
+        self.accumulated_2156 = parent.accumulated_2156;
+        self.accumulated_2164 = parent.accumulated_2164;
+        self.coord_state_inherited = true;
+    }
+
+    /// Apply component transform (offset + scale) through the matrix,
+    /// then re-derive fontScale/flags from modified matrix.
+    fn apply_component_transform(&mut self, x_offset: i16, y_offset: i16, x_scale: i32, y_scale: i32) {
+        // Offset contribution through matrix
+        self.accumulated_2156 += self.scaled_matrix_b as i32 * y_offset as i32
+            + self.scaled_matrix_a as i32 * x_offset as i32;
+        self.accumulated_2164 += self.scaled_matrix_d as i32 * y_offset as i32
+            + self.scaled_matrix_c as i32 * x_offset as i32;
+        // Scale matrix by component scale (12-bit fixed-point)
+        self.scaled_matrix_a = (((self.scaled_matrix_a as i32) * x_scale + 2048) >> 12) as i16;
+        self.scaled_matrix_b = (((self.scaled_matrix_b as i32) * y_scale + 2048) >> 12) as i16;
+        self.scaled_matrix_c = (((self.scaled_matrix_c as i32) * x_scale + 2048) >> 12) as i16;
+        self.scaled_matrix_d = (((self.scaled_matrix_d as i32) * y_scale + 2048) >> 12) as i16;
+        // Re-derive fontScale/flags from modified matrix
+        self.compute_font_offsets();
+    }
+
     /// Parse a glyph from GPS data
     pub fn parse(&mut self) -> OutlineGlyph {
-        self.init_transform_flags();
-        self.compute_coord_shift();
-        // Apply deferred component scale (fold AFTER ComputeCoordShift)
-        if self.component_scale_x != 4096 || self.component_scale_y != 4096 {
-            self.font_scale_x = (((self.font_scale_x as i32) * self.component_scale_x + 2048) >> 12) as i16;
-            self.font_scale_y = (((self.font_scale_y as i32) * self.component_scale_y + 2048) >> 12) as i16;
+        if self.recursion_depth >= MAX_RECURSION_DEPTH {
+            return OutlineGlyph::new();
         }
-        self.compute_font_offsets();
+
+        if !self.coord_state_inherited {
+            self.compute_coord_shift();
+            self.compute_font_offsets();
+        }
         self.strokes.clear();
         self.stroke_has_pos = false;
 
@@ -878,12 +955,14 @@ impl<'a> Pfr1HeaderParser<'a> {
         // uses exact glyph size - 1 as outline end position
         self.outline_end_pos = if self.data.len() > 0 { self.data.len() - 1 } else { 0 };
 
-        // orusZeroScale is 1.0 for now
+        // Scale output coordinates from secondary_scale space back to orus space.
+        // The coordinate pipeline (compute_coord_shift + apply_transform_flags) right-shifts
+        // by secondary_scale, so we multiply by 2^secondary_scale to recover orus coordinates.
         self.orus_zero_scale = 1.0;
 
         // Initialize hint stream state (reads backwards from end of glyph data)
         self.hint_pos = self.outline_end_pos as i32;
-        self.hint_nibble_high = 0;
+        self.hint_nibble_high = 1;
         self.hint_repeat_count = 0;
         self.last_interp_x = 0;
         self.last_interp_y = 0;
@@ -1153,7 +1232,7 @@ impl<'a> Pfr1HeaderParser<'a> {
         self.nibble_high = false;
 
         let mut iterations = 0;
-        let max_iterations = 500;
+        let max_iterations = self.data.len() * 2; // at most 2 commands per byte
         let mut first_iteration = true;
 
         while iterations < max_iterations {
@@ -1177,21 +1256,7 @@ impl<'a> Pfr1HeaderParser<'a> {
                 if cmd < 0 { break; }
             }
 
-            let before_x = self.cur_x;
-            let before_y = self.cur_y;
-
             self.process_command(cmd);
-
-            // Sanity check: skip if coordinate jump is too large
-            let delta_x = (self.cur_x as i32 - before_x as i32).abs();
-            let delta_y = (self.cur_y as i32 - before_y as i32).abs();
-            if delta_x > 8192 || delta_y > 8192 {
-                self.cur_x = before_x;
-                self.cur_y = before_y;
-                continue;
-            }
-
-            if self.current_contour.commands.len() > 300 { break; }
         }
 
         self.finish_contour();
@@ -1720,12 +1785,19 @@ impl<'a> Pfr1HeaderParser<'a> {
             return current;
         }
 
-        if direction == 0 {
-            return current;
-        }
+        let previous = if axis == 1 { self.prev_y } else { self.prev_x };
 
-        // Binary search for current position in ctrl array
-        let previous = current;
+        // Direction=0: infer direction from current vs previous (matches C# OrusLookup)
+        let mut direction = direction;
+        if direction == 0 {
+            if current < previous {
+                direction = -1;
+            } else if current == previous {
+                return current;
+            } else {
+                direction = 1;
+            }
+        }
 
         // Forward/backward search based on direction
         if direction > 0 {
@@ -1904,19 +1976,18 @@ impl<'a> Pfr1HeaderParser<'a> {
         }
     }
 
-    /// Apply zone transformation to a single coordinate
+    /// Apply zone transformation to a single coordinate.
     fn transform_coordinate(&mut self, coord: i16, axis: i32) -> i32 {
         let zones = if axis == 1 { &self.zones_y } else { &self.zones_x };
         let scalars = if axis == 1 { &self.scalars_y } else { &self.scalars_x };
         let offsets = if axis == 1 { &self.offsets_y } else { &self.offsets_x };
         let n_zones = if axis == 1 { self.n_zones_y } else { self.n_zones_x };
+        let shift = self.shift_difference as i32;
 
         if n_zones == 0 || zones.is_empty() {
             let scale = if axis == 1 { self.font_scale_y } else { self.font_scale_x };
             let offset = if axis == 1 { self.font_offset_y } else { self.font_offset_x };
-            // TransformCoordinate: no rounding_bias here (it's already in fontOffset)
-            let scaled = offset as i64 + coord as i64 * scale as i64;
-            return (scaled >> self.coord_shift) as i32;
+            return ((offset as i64 + coord as i64 * scale as i64) >> shift) as i32;
         }
 
         // Find zone
@@ -1926,11 +1997,7 @@ impl<'a> Pfr1HeaderParser<'a> {
         }
         if i >= zones.len() { i = zones.len() - 1; }
 
-        // TransformCoordinate: no rounding_bias here (it's embedded in zone offsets via fontOffset)
-        let v = offsets[i] as i64 + coord as i64 * scalars[i] as i64;
-        let result = (v >> self.coord_shift) as i32;
-
-        result
+        ((offsets[i] as i64 + coord as i64 * scalars[i] as i64) >> shift) as i32
     }
 
     /// Apply transformation flags (includes case 4 matrix path)
@@ -1945,7 +2012,7 @@ impl<'a> Pfr1HeaderParser<'a> {
                     + self.accumulated_2156
                     + raw_y as i32 * self.scaled_matrix_c as i32
                     + raw_x as i32 * self.scaled_matrix_a as i32;
-                v >> self.coord_shift
+                v >> self.shift_difference
             }
         };
         let mut out_y = match self.y_transform_flag {
@@ -1958,9 +2025,13 @@ impl<'a> Pfr1HeaderParser<'a> {
                     + self.accumulated_2164
                     + raw_y as i32 * self.scaled_matrix_d as i32
                     + raw_x as i32 * self.scaled_matrix_b as i32;
-                v >> self.coord_shift
+                v >> self.shift_difference
             }
         };
+
+        // Apply secondaryScale to convert to pixel space
+        out_x >>= self.secondary_scale;
+        out_y >>= self.secondary_scale;
 
         (out_x, out_y)
     }
@@ -1971,12 +2042,12 @@ impl<'a> Pfr1HeaderParser<'a> {
         self.scaled_y.clear();
 
         for &ctrl in &self.ctrl_x {
-            let scaled = (self.font_offset_x as i64 + self.font_scale_x as i64 * ctrl as i64) >> self.coord_shift;
+            let scaled = (self.font_offset_x as i64 + self.font_scale_x as i64 * ctrl as i64) >> self.shift_difference;
             self.scaled_x.push(scaled as i16);
         }
 
         for &ctrl in &self.ctrl_y {
-            let scaled = (self.font_offset_y as i64 + self.font_scale_y as i64 * ctrl as i64) >> self.coord_shift;
+            let scaled = (self.font_offset_y as i64 + self.font_scale_y as i64 * ctrl as i64) >> self.shift_difference;
             self.scaled_y.push(scaled as i16);
         }
 
@@ -2079,7 +2150,7 @@ impl<'a> Pfr1HeaderParser<'a> {
 
             if ctrl_delta > 0 {
                 let scaled_delta = cur_scaled as i32 - prev_last_scaled as i32;
-                let numerator = scaled_delta << self.coord_shift;
+                let numerator = scaled_delta << self.shift_difference;
                 let round_bias = ctrl_delta >> 1;
                 let scalar = if numerator >= 0 {
                     ((numerator + round_bias) / ctrl_delta) as i16
@@ -2087,8 +2158,11 @@ impl<'a> Pfr1HeaderParser<'a> {
                     ((numerator - round_bias) / ctrl_delta) as i16
                 };
 
-                let cur_scaled_shifted = (cur_scaled as i32) << self.coord_shift;
-                let offset = self.base_offset + cur_scaled_shifted - cur_ctrl as i32 * scalar as i32;
+                // FIX: Use UNTRUNCATED (font_offset + font_scale * ctrl) instead of (scaled << coord_shift).
+                // The truncation loses fractional bits (including rounding bias from font_offset),
+                // which shifts intermediate coordinates ~1px wrong for pixel fonts.
+                let cur_scaled_untruncated = font_offset as i32 + font_scale as i32 * cur_ctrl as i32;
+                let offset = self.base_offset + cur_scaled_untruncated - cur_ctrl as i32 * scalar as i32;
 
                 if zone_count > 0 && scalar == scalars[zone_count - 1] && offset == offsets[zone_count - 1] {
                     zones[zone_count - 1] = cur_ctrl;
@@ -2366,13 +2440,14 @@ impl<'a> Pfr1HeaderParser<'a> {
         ));
 
         // Check for extra data (bit 6 of header)
-        if (self.data[0] & 0x40) != 0 && self.pos + 2 <= self.data.len() {
-            let extra_count = self.data[self.pos] as usize | ((self.data[self.pos + 1] as usize) << 8);
-            self.pos += 2;
+        if (self.data[0] & 0x40) != 0 && self.pos < self.data.len() {
+            let extra_count = self.data[self.pos] as usize;
+            self.pos += 1;
             for _ in 0..extra_count {
                 if self.pos >= self.data.len() { break; }
                 let len = self.data[self.pos] as usize;
-                self.pos += len + 2; // Skip length + type + data
+                self.pos += 1;
+                self.pos += len + 1; // Skip type byte + data
             }
         }
 
@@ -2420,6 +2495,32 @@ impl<'a> Pfr1HeaderParser<'a> {
             });
         }
 
+        // Build sorted offset list and offset→size map (matching C# two-pass approach)
+        let mut sorted_offsets: Vec<i32> = records.iter().map(|r| r.glyph_offset).collect();
+        sorted_offsets.push(self.glyph_gps_offset); // Parent glyph as upper bound
+        sorted_offsets.sort();
+        sorted_offsets.dedup();
+
+        // Build offset→size map from adjacent sorted offsets
+        let mut offset_size_map = std::collections::HashMap::<i32, usize>::new();
+        for i in 0..sorted_offsets.len().saturating_sub(1) {
+            let size = (sorted_offsets[i + 1] - sorted_offsets[i]) as usize;
+            offset_size_map.insert(sorted_offsets[i], size);
+        }
+
+        // Build extended known offsets for sub-parsers (matching C# knownGpsOffsets mutation)
+        let mut extended_offsets: Vec<usize> = self.known_gps_offsets
+            .map(|o| o.to_vec())
+            .unwrap_or_default();
+        for &off in &sorted_offsets {
+            if off >= 0 {
+                let off_usize = off as usize;
+                if let Err(idx) = extended_offsets.binary_search(&off_usize) {
+                    extended_offsets.insert(idx, off_usize);
+                }
+            }
+        }
+
         // PASS 2: Parse each subglyph
         // glyph_offset is relative to GPS section start.
         for record in &records {
@@ -2431,6 +2532,8 @@ impl<'a> Pfr1HeaderParser<'a> {
 
             let subglyph_size = if record.subglyph_size > 0 {
                 (record.subglyph_size as usize).min(max_size)
+            } else if let Some(&map_size) = offset_size_map.get(&glyph_offset) {
+                map_size.min(max_size)
             } else {
                 max_size.min(64) // Default limit
             };
@@ -2438,6 +2541,15 @@ impl<'a> Pfr1HeaderParser<'a> {
             if subglyph_size == 0 { continue; }
 
             let subglyph_data = &self.gps_data[abs_pos..abs_pos + subglyph_size];
+
+            // Reject suspicious subglyph headers
+            if subglyph_data[0] == 0xFF || subglyph_data[0] == 0xFE {
+                continue;
+            }
+
+            // Treat scale=0 as identity (4096)
+            let comp_x_scale = if record.x_scale == 0 { 4096 } else { record.x_scale };
+            let comp_y_scale = if record.y_scale == 0 { 4096 } else { record.y_scale };
 
             // Create sub-parser and parse recursively
             let font_matrix = [self.matrix_a, self.matrix_b, self.matrix_c, self.matrix_d];
@@ -2453,12 +2565,13 @@ impl<'a> Pfr1HeaderParser<'a> {
                 self.gps_base,
                 self.gps_len,
                 glyph_offset,  // subglyph's GPS-section-relative offset
-                self.known_gps_offsets,
+                Some(&extended_offsets),
                 None,
                 self.font_metrics.as_ref(),
                 self.target_em_px,
             );
 
+            sub_parser.recursion_depth = self.recursion_depth + 1;
             sub_parser.depth = self.depth + 1;
             sub_parser.diag_char_code = self.diag_char_code;
             if self.font_stroke_tables_available {
@@ -2473,10 +2586,12 @@ impl<'a> Pfr1HeaderParser<'a> {
                 sub_parser.font_stroke_tables_available = true;
             }
 
-            // Store component scale for deferred application in parse()
-            // (must be applied AFTER init_transform_flags/compute_coord_shift)
-            sub_parser.component_scale_x = record.x_scale;
-            sub_parser.component_scale_y = record.y_scale;
+            // Inherit parent's coord state and apply component transform through matrix
+            sub_parser.copy_parent_coord_state(self);
+            sub_parser.apply_component_transform(
+                record.x_offset as i16, record.y_offset as i16,
+                comp_x_scale, comp_y_scale,
+            );
 
             let sub_glyph = sub_parser.parse();
             let sub_pts: usize = sub_glyph.contours.iter().map(|c| c.commands.len()).sum();
@@ -2488,73 +2603,10 @@ impl<'a> Pfr1HeaderParser<'a> {
                 sub_parser.font_scale_x, sub_parser.font_scale_y
             ));
             if !sub_glyph.contours.is_empty() {
-                let first = &sub_glyph.contours[0].commands[0];
-                log(&format!(
-                    "    sub_coords: first=({:.1},{:.1})",
-                    first.x, first.y
-                ));
-
-                if (record.x_scale != 4096 || record.y_scale != 4096)
-                    && sub_parser.first_point_orus_x.is_some()
-                    && sub_parser.first_point_orus_y.is_some()
-                {
-                    // NON-IDENTITY SCALE: compute correction from first-point alignment.
-                    // The sub-glyph uses a different fontScale (scaled by component_scale),
-                    // so its zone table maps orus→pixels differently than the parent would.
-                    // Compute where the parent would place the first point, compare to where
-                    // the sub-glyph actually placed it, and use the difference as offset.
-                    let first_orus_x = sub_parser.first_point_orus_x.unwrap();
-                    let first_orus_y = sub_parser.first_point_orus_y.unwrap();
-
-                    // Where parent would place this point in orus space
-                    let parent_orus_x = (((first_orus_x as i32) * record.x_scale + 2048) >> 12) + record.x_offset;
-                    let parent_orus_y = (((first_orus_y as i32) * record.y_scale + 2048) >> 12) + record.y_offset;
-
-                    // Transform through parent's zone tables → pixel position
-                    let expected_raw_x = self.transform_coordinate(parent_orus_x as i16, 0);
-                    let expected_raw_y = self.transform_coordinate(parent_orus_y as i16, 1);
-                    let (expected_x, expected_y) = self.apply_transform_flags_with_raw(
-                        parent_orus_x as i16, parent_orus_y as i16,
-                        expected_raw_x, expected_raw_y,
-                    );
-                    let expected_px = expected_x as f32 * self.orus_zero_scale;
-                    let expected_py = expected_y as f32 * self.orus_zero_scale;
-
-                    // Correction = expected - actual
-                    let x_correction = expected_px - first.x;
-                    let y_correction = expected_py - first.y;
-
-                    log(&format!(
-                        "    [correction] first_orus=({},{}), parent_orus=({},{}), expected=({:.1},{:.1}), actual=({:.1},{:.1}), correction=({:.1},{:.1})",
-                        first_orus_x, first_orus_y, parent_orus_x, parent_orus_y,
-                        expected_px, expected_py, first.x, first.y,
-                        x_correction, y_correction
-                    ));
-
-                    // Apply correction to all sub-glyph points
-                    for src_contour in &sub_glyph.contours {
-                        let mut transformed = PfrContour::new();
-                        for cmd in &src_contour.commands {
-                            let mut tcmd = cmd.clone();
-                            if cmd.cmd_type != PfrCmdType::Close {
-                                tcmd.x = cmd.x + x_correction;
-                                tcmd.y = cmd.y + y_correction;
-                                if cmd.cmd_type == PfrCmdType::CurveTo {
-                                    tcmd.x1 = cmd.x1 + x_correction;
-                                    tcmd.y1 = cmd.y1 + y_correction;
-                                    tcmd.x2 = cmd.x2 + x_correction;
-                                    tcmd.y2 = cmd.y2 + y_correction;
-                                }
-                            }
-                            transformed.commands.push(tcmd);
-                        }
-                        self.contours.push(transformed);
-                    }
-                } else {
-                    // IDENTITY SCALE: use standard merge with rounding (Phase 15)
-                    self.merge_transformed_glyph(
-                        &sub_glyph, record.x_offset as i16, record.y_offset as i16, 4096, 4096,
-                    );
+                // Offset and scale already applied through the matrix by apply_component_transform.
+                // Just copy contours directly.
+                for contour in &sub_glyph.contours {
+                    self.contours.push(contour.clone());
                 }
             }
         }

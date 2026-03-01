@@ -79,6 +79,9 @@ pub struct Sprite {
     pub script_instance_list: Vec<ScriptInstanceRef>,
     pub cursor_ref: Option<CursorRef>,
     pub editable: bool,
+    pub moveable: bool,
+    pub constraint: i32, // 0 = stage, >0 = sprite number that constrains movement
+    pub trails: bool,
     pub entered: bool,
     pub exited: bool,
     pub quad: Option<[(i32, i32); 4]>, // [topLeft, topRight, bottomRight, bottomLeft] -- TODO: Tie this to position and size
@@ -146,6 +149,9 @@ impl Sprite {
             script_instance_list: vec![],
             cursor_ref: None,
             editable: false,
+            moveable: false,
+            constraint: 0,
+            trails: false,
             entered: false,
             exited: false,
             quad: None,
@@ -199,6 +205,7 @@ impl Sprite {
         self.script_instance_list.clear();
         self.cursor_ref = None;
         self.editable = false;
+        self.constraint = 0;
         self.entered = false;
         self.exited = false;
         self.quad = None;

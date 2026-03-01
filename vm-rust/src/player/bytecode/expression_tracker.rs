@@ -325,21 +325,27 @@ impl StackExpressionTracker {
             // ============================================================
             
             OpCode::TheBuiltin => {
-                let prop_name = self.get_builtin_name(bytecode.obj as u16);
+                let prop_name = lctx.names.get(bytecode.obj as usize)
+                    .cloned()
+                    .unwrap_or_else(|| format!("builtin{}", bytecode.obj));
                 let expr = format!("the {}", prop_name);
                 self.stack.push(expr.clone());
                 format!("<{}>", expr)
             }
 
             OpCode::GetMovieProp => {
-                let prop_name = self.get_movie_prop_name(bytecode.obj as u16);
+                let prop_name = lctx.names.get(bytecode.obj as usize)
+                    .cloned()
+                    .unwrap_or_else(|| format!("movieProp{}", bytecode.obj));
                 let expr = format!("the {}", prop_name);
                 self.stack.push(expr.clone());
                 format!("<{}>", expr)
             }
 
             OpCode::SetMovieProp => {
-                let prop_name = self.get_movie_prop_name(bytecode.obj as u16);
+                let prop_name = lctx.names.get(bytecode.obj as usize)
+                    .cloned()
+                    .unwrap_or_else(|| format!("movieProp{}", bytecode.obj));
                 if let Some(value) = self.stack.last() {
                     format!("<the {} = {}>", prop_name, value)
                 } else {

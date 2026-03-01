@@ -50,11 +50,12 @@ pub fn parse_physical_font(
     let _two_byte_gps_size = reader.read_bit();
     let _ascii_code_specified = reader.read_bit();
     let proportional_escapement = reader.read_bit();
-    let _two_byte_char_code = reader.read_bit();
+    let two_byte_char_code = reader.read_bit();
     let _vertical_escapement = reader.read_bit();
 
     record.flags = 0;
     if proportional_escapement { record.flags |= 0x04; }
+    record.two_byte_char_code = two_byte_char_code;
 
     // Standard set width when proportionalEscapement == false
     if !proportional_escapement {
@@ -87,16 +88,19 @@ pub fn parse_physical_font(
                     let n_bitmap_sizes = reader.read_bit() as usize;
 
                     for _ in 0..n_bitmap_sizes {
+                        // Use bit-stream reads (not byte-aligned)
+                        // ReadBitsN behavior. After nBitmapSizes (1 bit), we're
+                        // mid-byte; byte-aligned reads would discard remaining bits.
                         let _xppm = if two_byte_xppm {
-                            reader.read_u16() as u32
+                            reader.read_bits(16)
                         } else {
-                            reader.read_u8() as u32
+                            reader.read_bits(8)
                         };
 
                         let _yppm = if two_byte_yppm {
-                            reader.read_u16() as u32
+                            reader.read_bits(16)
                         } else {
-                            reader.read_u8() as u32
+                            reader.read_bits(8)
                         };
 
                         let _zeros2 = reader.read_bits(5);
@@ -105,21 +109,21 @@ pub fn parse_physical_font(
                         let _two_byte_char_code = reader.read_bit();
 
                         let _bct_size = if three_byte_bct_size {
-                            reader.read_u24()
+                            reader.read_bits(24)
                         } else {
-                            reader.read_u16() as u32
+                            reader.read_bits(16)
                         };
 
                         let bct_offset = if three_byte_bct_offset {
-                            reader.read_u24()
+                            reader.read_bits(24)
                         } else {
-                            reader.read_u16() as u32
+                            reader.read_bits(16)
                         };
 
                         let _n_bmap_chars = if two_byte_n_bmap_chars {
-                            reader.read_u16() as u32
+                            reader.read_bits(16)
                         } else {
-                            reader.read_u8() as u32
+                            reader.read_bits(8)
                         };
 
                         record.bitmap_size_table_offset = bct_offset;
@@ -152,22 +156,36 @@ pub fn parse_physical_font(
                         reader.read_i16();
                     }
                 }
+                5 => {
+                    // Font metrics: 4 big-endian 16-bit words
+                    if item_size >= 8 {
+                        record.has_extra_item_type5 = true;
+                        record.extra_type5_word36 = reader.read_i16();
+                        record.extra_type5_word37 = reader.read_i16();
+                        record.extra_type5_line_spacing = reader.read_i16();
+                        record.extra_type5_word39 = reader.read_i16();
+                    }
+                }
                 _ => {
                     // Unknown type, skip
                     reader.skip(item_size);
                 }
             }
 
+            // Ensure reader is positioned at the end of this extra item's data,
+            // regardless of how many bits/bytes were consumed by parsing.
+            reader.set_position(item_start + item_size);
         }
     }
 
     // nAuxBytes (24-bit)
     let n_aux_bytes = reader.read_u24() as usize;
     if n_aux_bytes > 0 && n_aux_bytes < 10000 {
-        // Normal case: consume aux data payload.
-        reader.skip(n_aux_bytes);
+        // Normal case: read and parse aux data payload.
+        let aux_data = reader.read_bytes(n_aux_bytes);
+        parse_private_records_from_aux_data(&aux_data, &mut record);
     } else if n_aux_bytes >= 10000 {
-        let _start_pos = reader.position();
+        let start_pos = reader.position();
 
         while reader.position() != phys_end {
             let probe_pos = reader.position();
@@ -187,7 +205,11 @@ pub fn parse_physical_font(
             let n_characters = reader.read_u16();
 
             if n_characters == max_chars {
-                reader.set_position(probe_pos);
+                reader.set_position(start_pos);
+
+                let aux_bytes_total = probe_pos - start_pos;
+                let aux_data = reader.read_bytes(aux_bytes_total);
+                parse_private_records_from_aux_data(&aux_data, &mut record);
 
                 // Found the "final" marker
                 break;
@@ -399,4 +421,87 @@ pub fn initialize_stroke_tables_fallback(record: &mut PhysicalFontRecord) {
     ];
 
     record.stroke_tables_initialized = true;
+}
+
+/// Parse private records from auxiliary data
+fn parse_private_records_from_aux_data(aux_data: &[u8], record: &mut PhysicalFontRecord) {
+    record.private_flags_492 = 0;
+    record.private_mode_716 = 4;
+    record.private_type2_byte28 = 0;
+    record.private_type2_byte29 = 0;
+    record.private_mode_x = 0;
+    record.private_mode_y = 0;
+
+    if aux_data.len() < 4 {
+        return;
+    }
+
+    // Parse TLV records: 2-byte length, 2-byte type, then payload
+    let mut private_records: std::collections::HashMap<u16, Vec<Vec<u8>>> = std::collections::HashMap::new();
+    let mut off = 0;
+    while off + 3 < aux_data.len() {
+        let len = ((aux_data[off] as usize) << 8) | (aux_data[off + 1] as usize);
+        if len == 0 {
+            break;
+        }
+        if off + len > aux_data.len() {
+            break;
+        }
+
+        let rec_type = ((aux_data[off + 2] as u16) << 8) | (aux_data[off + 3] as u16);
+        let payload_len = if len >= 4 { len - 4 } else { 0 };
+        if payload_len == 0 {
+            off += len;
+            continue;
+        }
+
+        let payload = aux_data[off + 4..off + 4 + payload_len].to_vec();
+        private_records.entry(rec_type).or_insert_with(Vec::new).push(payload);
+        off += len;
+    }
+
+    // Extract font metrics from type 5 (line spacing, ascender/descender offsets)
+    if let Some(t5) = private_records.get(&5) {
+        if !t5.is_empty() && t5[0].len() >= 8 {
+            let d = &t5[0];
+            record.has_extra_item_type5 = true;
+            record.extra_type5_word36 = ((d[0] as i16) << 8) | (d[1] as i16);
+            record.extra_type5_word37 = ((d[2] as i16) << 8) | (d[3] as i16);
+            record.extra_type5_line_spacing = ((d[4] as i16) << 8) | (d[5] as i16);
+            record.extra_type5_word39 = ((d[6] as i16) << 8) | (d[7] as i16);
+        }
+    }
+
+    // Extract mode byte from type 2 record (byte offset 27 in payload)
+    if let Some(t2) = private_records.get(&2) {
+        if !t2.is_empty() && t2[0].len() >= 28 {
+            let mut mode716 = t2[0][27];
+            // If mode byte == 2 and two_byte_char_code flag is set, force to 0
+            if mode716 == 2 && record.two_byte_char_code {
+                mode716 = 0;
+            }
+            record.private_mode_716 = mode716;
+        }
+        if !t2.is_empty() && t2[0].len() >= 30 {
+            record.private_type2_byte28 = t2[0][28];
+            record.private_type2_byte29 = t2[0][29];
+        }
+    }
+
+    // Derive private flags from type 7 or fallback type 2
+    let mut v6 = false;
+    let mut v7 = true;
+    if let Some(t7) = private_records.get(&7) {
+        if !t7.is_empty() && t7[0].len() >= 17 {
+            v6 = (((t7[0][4] as u16) << 8) | (t7[0][5] as u16)) > 550;
+            v7 = t7[0][16] == 0;
+        }
+    } else if let Some(t2) = private_records.get(&2) {
+        if !t2.is_empty() && t2[0].len() >= 27 {
+            v6 = (((t2[0][24] as u16) << 8) | (t2[0][25] as u16)) >= 500;
+            v7 = t2[0][26] == 0;
+        }
+    }
+    if v6 { record.private_flags_492 |= 1; }
+    if !v7 { record.private_flags_492 |= 2; }
 }

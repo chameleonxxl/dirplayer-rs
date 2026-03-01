@@ -562,14 +562,15 @@ impl FontMemberHandlers {
                 }
                 let is_whitespace = is_ws.unwrap_or(false);
                 ctx.set_font(&style.font);
-                // Keep width estimation deterministic; some web-sys builds do not expose
-                // CanvasRenderingContext2d::measure_text.
-                let token_width = token_text.chars().count() as f64 * (style.size_px * 0.55);
+                let token_width = ctx
+                    .measure_text(token_text)
+                    .map(|m| m.width())
+                    .unwrap_or_else(|_| token_text.chars().count() as f64 * (style.size_px * 0.55));
 
-                if line.width + token_width > wrap_width
-                    && !line.segments.is_empty()
-                    && !is_whitespace
-                {
+                let would_overflow = line.width + token_width > wrap_width;
+                let will_wrap = would_overflow && !line.segments.is_empty() && !is_whitespace;
+
+                if will_wrap {
                     lines_out.push(std::mem::take(line));
                 }
 
@@ -727,12 +728,29 @@ impl FontMemberHandlers {
                 let b = pixels[src_idx + 2];
                 let a = pixels[src_idx + 3];
 
-                // Copy all pixels with their alpha channel from the browser's fillText
-                // Background pixels will have alpha=0, text pixels will have alpha>0
-                bitmap.data[dest_idx] = r;
-                bitmap.data[dest_idx + 1] = g;
-                bitmap.data[dest_idx + 2] = b;
-                bitmap.data[dest_idx + 3] = a;
+                // Only copy pixels that have content (alpha > 0).
+                // This preserves any background color already in the bitmap.
+                if a > 0 {
+                    if a == 255 || bitmap.data[dest_idx + 3] == 0 {
+                        // Fully opaque text pixel or no existing background: direct copy
+                        bitmap.data[dest_idx] = r;
+                        bitmap.data[dest_idx + 1] = g;
+                        bitmap.data[dest_idx + 2] = b;
+                        bitmap.data[dest_idx + 3] = a;
+                    } else {
+                        // Semi-transparent (anti-aliased) text over existing background:
+                        // blend text color with background color
+                        let alpha = a as u32;
+                        let inv_alpha = 255 - alpha;
+                        let bg_r = bitmap.data[dest_idx] as u32;
+                        let bg_g = bitmap.data[dest_idx + 1] as u32;
+                        let bg_b = bitmap.data[dest_idx + 2] as u32;
+                        bitmap.data[dest_idx]     = ((r as u32 * alpha + bg_r * inv_alpha) / 255) as u8;
+                        bitmap.data[dest_idx + 1] = ((g as u32 * alpha + bg_g * inv_alpha) / 255) as u8;
+                        bitmap.data[dest_idx + 2] = ((b as u32 * alpha + bg_b * inv_alpha) / 255) as u8;
+                        bitmap.data[dest_idx + 3] = 255;
+                    }
+                }
             }
         }
 

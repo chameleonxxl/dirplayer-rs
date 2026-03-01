@@ -6,8 +6,8 @@ use crate::{
         cast_lib::INVALID_CAST_MEMBER_REF,
         datum_formatting::format_datum, ScriptInstanceRef, Score,
         reserve_player_mut, reserve_player_ref, reserve_player_mut_async,
-        score::get_sprite_at, handlers::datum_handlers::player_call_datum_handler,
-        DatumRef, ScriptError, get_score_sprite_mut, MovieFrameTarget,
+        score::{get_sprite_at, concrete_sprite_hit_test}, handlers::datum_handlers::player_call_datum_handler,
+        DatumRef, ScriptError, ScriptErrorCode, get_score_sprite_mut, MovieFrameTarget,
         events::{
             player_invoke_event_to_instances, player_invoke_static_event,
             player_invoke_global_event, player_wait_available, player_unwrap_result,
@@ -110,7 +110,7 @@ impl MovieHandlers {
                     _ => MovieFrameTarget::Default,
                 };
 
-                let task_id = player.net_manager.preload_net_thing(movie_path);
+                let task_id = player.net_manager.preload_net_thing(movie_path.clone());
                 player.pending_goto_net_movie = Some((task_id, target));
                 Ok(true)
             })?
@@ -161,9 +161,12 @@ impl MovieHandlers {
                 _ => None,
             };
 
-            let frame = dest.ok_or_else(|| {
-                ScriptError::new("Unsupported or invalid frame label passed to go()".to_string())
-            })?;
+            let frame = match dest {
+                Some(f) => f,
+                None => {
+                    return Err(ScriptError::new("Unsupported or invalid frame label passed to go()".to_string()));
+                }
+            };
 
             if player.next_frame.is_none() || frame != player.movie.current_frame {
                 player.next_frame = Some(frame);
@@ -315,6 +318,12 @@ impl MovieHandlers {
                             player_call_datum_handler(&actor_ref, &"stepFrame".to_string(), &vec![]).await;
 
                         if let Err(err) = result {
+                            if err.code == ScriptErrorCode::Abort {
+                                reserve_player_mut(|player| {
+                                    player.is_in_frame_update = false;
+                                });
+                                return Err(err);
+                            }
                             web_sys::console::log_1(
                                 &format!("⚠ stepFrame[{}] error: {}", idx, err.message).into(),
                             );
@@ -621,7 +630,7 @@ impl MovieHandlers {
             };
 
             // Start the network fetch (non-blocking)
-            let task_id = player.net_manager.preload_net_thing(fetch_url);
+            let task_id = player.net_manager.preload_net_thing(fetch_url.clone());
 
             // Store the pending operation (replaces any previous pending one, cancelling it)
             player.pending_goto_net_movie = Some((task_id, target));
@@ -688,6 +697,12 @@ impl MovieHandlers {
                     player_call_datum_handler(&actor_ref, &"stepFrame".to_string(), &vec![]).await;
 
                 if let Err(err) = result {
+                    if err.code == ScriptErrorCode::Abort {
+                        reserve_player_mut(|player| {
+                            player.is_in_frame_update = false;
+                        });
+                        return Err(err);
+                    }
                     web_sys::console::log_1(
                         &format!("⚠ stepFrame[{}] error: {}", idx, err.message).into(),
                     );
@@ -738,53 +753,50 @@ impl MovieHandlers {
 
     pub async fn update_stage(_: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
         let should_yield = reserve_player_ref(|player| {
-
-            debug!("updateStage: handler_stack_depth = {:?}, is_in_frame_update = {}, in_frame_script = {}, in_enter_frame = {}, in_prepare_frame = {}, in_event_dispatch = {}", 
-                player.handler_stack_depth,
-                player.is_in_frame_update,
-                player.in_frame_script,
-                player.in_enter_frame,
-                player.in_prepare_frame,
-                player.in_event_dispatch
-            );
-
-            Ok(player.is_yield_safe())
+            Ok(player.is_yield_safe() || player.command_handler_yielding || player.in_mouse_command)
         })?;
 
         if should_yield {
-            // Synchronous render - only works with Canvas2D backend
-            reserve_player_mut(|player| {
-                crate::rendering::with_canvas2d_renderer_mut(|renderer| {
-                    crate::rendering::render_stage_to_bitmap(
-                        player,
-                        &mut renderer.bitmap,
-                        renderer.debug_selected_channel_num,
-                    );
-
-                    use wasm_bindgen::Clamped;
-                    let bitmap = &renderer.bitmap;
-                    if let Ok(image_data) =
-                        web_sys::ImageData::new_with_u8_clamped_array_and_sh(
-                            Clamped(&bitmap.data[..]),
-                            bitmap.width.into(),
-                            bitmap.height.into(),
-                        )
-                    {
-                        let _ = renderer.ctx2d.put_image_data(&image_data, 0.0, 0.0);
-                    }
-                });
+            // Render using whatever renderer is active (Canvas2D or WebGL)
+            use crate::rendering_gpu::Renderer;
+            crate::rendering::with_renderer_mut(|renderer_lock| {
+                if let Some(renderer) = renderer_lock {
+                    let player = unsafe { crate::player::PLAYER_OPT.as_mut().unwrap() };
+                    renderer.draw_frame(player);
+                }
             });
 
+            // Yield to allow the browser event loop to process pending events
+            // (mouse up/move, keyboard, etc.). This is essential for scripts
+            // using "repeat while the mouseDown" or similar busy-wait loops.
+            // The mouse_up()/mouse_down() WASM exports update movie.mouse_down
+            // immediately via reserve_player_mut, so the state is correct when
+            // the script resumes. The MouseUp command stays queued and won't
+            // dispatch until the current handler finishes.
             async_std::task::sleep(std::time::Duration::from_millis(2)).await;
         }
 
         Ok(DatumRef::Void)
     }
 
-    pub fn rollover(_: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+    pub fn rollover(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
         reserve_player_mut(|player| {
-            let sprite = get_sprite_at(player, player.mouse_loc.0, player.mouse_loc.1, false);
-            Ok(player.alloc_datum(Datum::Int(sprite.unwrap_or(0) as i32)))
+            if !args.is_empty() {
+                // rollOver(spriteNum) - returns TRUE if the mouse is over the specified sprite
+                let sprite_num = player.get_datum(&args[0]).int_value()?;
+                let sprite = player.movie.score.get_sprite(sprite_num as i16);
+                if let Some(sprite) = sprite {
+                    let hit = concrete_sprite_hit_test(player, sprite, player.mouse_loc.0, player.mouse_loc.1);
+                    let result = if hit { 1 } else { 0 };
+                    Ok(player.alloc_datum(Datum::Int(result)))
+                } else {
+                    Ok(player.alloc_datum(Datum::Int(0)))
+                }
+            } else {
+                // the rollOver - returns the sprite number under the mouse
+                let sprite = get_sprite_at(player, player.mouse_loc.0, player.mouse_loc.1, false);
+                Ok(player.alloc_datum(Datum::Int(sprite.unwrap_or(0) as i32)))
+            }
         })
     }
 

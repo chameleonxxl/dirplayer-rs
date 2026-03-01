@@ -584,6 +584,14 @@ pub fn decompress_bitmap(
     cast_lib: u32,
     version: u16,
 ) -> Result<Bitmap, String> {
+    // Use clutCastLib from bitmap data if specified (> 0), otherwise use bitmap's own cast_lib.
+    // clutCastLib tells us which cast library contains the palette member.
+    let palette_cast_lib = if info.clut_cast_lib > 0 {
+        info.clut_cast_lib as u32
+    } else {
+        cast_lib
+    };
+
     let mut result = Vec::new();
     let mut _current_index = 0;
     let num_channels = get_num_channels(info.bit_depth)?;
@@ -679,7 +687,7 @@ pub fn decompress_bitmap(
             info.height,
             scan_width,
             scan_height,
-            PaletteRef::from(info.palette_id, cast_lib),
+            PaletteRef::from(info.palette_id, palette_cast_lib),
             &result,
         ),
         2 => decode_bitmap_2bit(
@@ -687,7 +695,7 @@ pub fn decompress_bitmap(
             info.height,
             scan_width,
             scan_height,
-            PaletteRef::from(info.palette_id, cast_lib),
+            PaletteRef::from(info.palette_id, palette_cast_lib),
             &result,
         ),
         4 => decode_bitmap_4bit(
@@ -695,7 +703,7 @@ pub fn decompress_bitmap(
             info.height,
             scan_width,
             scan_height,
-            PaletteRef::from(info.palette_id, cast_lib),
+            PaletteRef::from(info.palette_id, palette_cast_lib),
             &result,
         ),
         8 => decode_generic_bitmap(
@@ -705,7 +713,7 @@ pub fn decompress_bitmap(
             1,
             scan_width,
             scan_height,
-            PaletteRef::from(info.palette_id, cast_lib),
+            PaletteRef::from(info.palette_id, palette_cast_lib),
             &result,
         ),
         16 => decode_bitmap_16bit(
@@ -713,7 +721,7 @@ pub fn decompress_bitmap(
             info.height,
             scan_width,
             scan_height,
-            PaletteRef::from(info.palette_id, cast_lib),
+            PaletteRef::from(info.palette_id, palette_cast_lib),
             &result,
             skip_compression,
         ),
@@ -739,7 +747,7 @@ pub fn decompress_bitmap(
                     4,
                     scan_width,
                     scan_height,
-                    PaletteRef::from(info.palette_id, cast_lib),
+                    PaletteRef::from(info.palette_id, palette_cast_lib),
                     &result,
                 )?;
 
@@ -749,7 +757,7 @@ pub fn decompress_bitmap(
                     bit_depth: 32,
                     original_bit_depth: 32,
                     data: result_bitmap.data,
-                    palette_ref: PaletteRef::from(info.palette_id, cast_lib),
+                    palette_ref: PaletteRef::from(info.palette_id, palette_cast_lib),
                     matte: None,
                     use_alpha: info.use_alpha,
                     trim_white_space: info.trim_white_space,
@@ -795,7 +803,7 @@ pub fn decompress_bitmap(
                     bit_depth: 32,
                     original_bit_depth: 32,
                     data: final_data,
-                    palette_ref: PaletteRef::from(info.palette_id, cast_lib),
+                    palette_ref: PaletteRef::from(info.palette_id, palette_cast_lib),
                     matte: None,
                     use_alpha: info.use_alpha,
                     trim_white_space: info.trim_white_space,
@@ -932,8 +940,12 @@ pub fn resolve_color_ref(
                     if let Some(member) = palettes.get(slot_number as usize) {
                         member.colors.get(idx as usize).copied()
                             .unwrap_or_else(|| color_fallback(idx))
+                    } else if let Some(member) = palettes.find_by_cast_lib(member_ref.cast_lib as u32) {
+                        // Fallback: exact palette member not found (stale clutId from old numbering),
+                        // use any palette in the same cast library
+                        member.colors.get(idx as usize).copied()
+                            .unwrap_or_else(|| color_fallback(idx))
                     } else {
-                        // Palette not found - fall back to system palette directly
                         lookup_builtin_palette(&get_system_default_palette(), idx, original_bit_depth)
                             .unwrap_or_else(|| color_fallback(idx))
                     }

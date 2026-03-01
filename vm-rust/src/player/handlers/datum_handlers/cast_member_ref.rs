@@ -1,20 +1,24 @@
 use log::{warn, debug};
 
 use crate::{
-    director::lingo::datum::Datum,
+    director::{
+        enums::ShapeType,
+        lingo::datum::{datum_bool, Datum, DatumType},
+    },
     js_api::JsApi,
     player::{
         cast_lib::CastMemberRef,
         cast_member::{BitmapMember, CastMember, CastMemberType, CastMemberTypeId, TextMember},
         handlers::types::TypeUtils,
         reserve_player_mut, reserve_player_ref, DatumRef, DirPlayer, ScriptError,
+        sprite::ColorRef,
     },
 };
 
 use super::cast_member::{
-    bitmap::BitmapMemberHandlers, field::FieldMemberHandlers, film_loop::FilmLoopMemberHandlers,
-    font::FontMemberHandlers, sound::SoundMemberHandlers, text::TextMemberHandlers,
-    palette::PaletteMemberHandlers,
+    bitmap::BitmapMemberHandlers, button::ButtonMemberHandlers, field::FieldMemberHandlers,
+    film_loop::FilmLoopMemberHandlers, font::FontMemberHandlers, sound::SoundMemberHandlers,
+    text::TextMemberHandlers, palette::PaletteMemberHandlers,
 };
 
 pub struct CastMemberRefHandlers {}
@@ -187,6 +191,9 @@ impl CastMemberRefHandlers {
                 CastMemberType::Text(_) => {
                     TextMemberHandlers::call(player, datum, handler_name, args)
                 }
+                CastMemberType::Button(_) => {
+                    ButtonMemberHandlers::call(player, datum, handler_name, args)
+                }
                 _ => Err(ScriptError::new(format!(
                     "No handler {handler_name} for member type"
                 ))),
@@ -289,6 +296,7 @@ impl CastMemberRefHandlers {
             }
             CastMemberTypeId::Field => FieldMemberHandlers::get_prop(player, cast_member_ref, prop),
             CastMemberTypeId::Text => TextMemberHandlers::get_prop(player, cast_member_ref, prop),
+            CastMemberTypeId::Button => ButtonMemberHandlers::get_prop(player, cast_member_ref, prop),
             CastMemberTypeId::FilmLoop => {
                 FilmLoopMemberHandlers::get_prop(player, cast_member_ref, prop)
             }
@@ -321,11 +329,11 @@ impl CastMemberRefHandlers {
                     .ok_or_else(|| ScriptError::new("Cast member not found".to_string()))?;
 
                 if let CastMemberType::Shape(shape_member) = &cast_member.member_type {
+                    let info = &shape_member.shape_info;
                     match prop.as_str() {
                         "rect" => {
-                            // Shape members have width/height in shape_info
-                            let width = shape_member.shape_info.width as i32;
-                            let height = shape_member.shape_info.height as i32;
+                            let width = info.width() as i32;
+                            let height = info.height() as i32;
                             Ok(Datum::Rect([
                                 player.alloc_datum(Datum::Int(0)),
                                 player.alloc_datum(Datum::Int(0)),
@@ -333,14 +341,120 @@ impl CastMemberRefHandlers {
                                 player.alloc_datum(Datum::Int(height)),
                             ]))
                         }
-                        "width" => Ok(Datum::Int(shape_member.shape_info.width as i32)),
-                        "height" => Ok(Datum::Int(shape_member.shape_info.height as i32)),
+                        "width" => Ok(Datum::Int(info.width() as i32)),
+                        "height" => Ok(Datum::Int(info.height() as i32)),
+                        "shapeType" => {
+                            let symbol = match info.shape_type {
+                                ShapeType::Rect => "rect",
+                                ShapeType::OvalRect => "roundRect",
+                                ShapeType::Oval => "oval",
+                                ShapeType::Line => "line",
+                                ShapeType::Unknown => "rect",
+                            };
+                            Ok(Datum::Symbol(symbol.to_string()))
+                        }
+                        "filled" => Ok(datum_bool(info.fill_type != 0)),
+                        "lineSize" => Ok(Datum::Int(info.line_thickness as i32)),
+                        "pattern" => Ok(Datum::Int(info.pattern as i32)),
+                        "foreColor" => Ok(Datum::Int(info.fore_color as i32)),
+                        "backColor" => Ok(Datum::Int(info.back_color as i32)),
                         _ => Err(ScriptError::new(format!(
                             "Shape members don't support property {}", prop
                         ))),
                     }
                 } else {
                     Err(ScriptError::new("Expected shape member".to_string()))
+                }
+            }
+            CastMemberTypeId::VectorShape => {
+                let cast_member = player.movie.cast_manager.find_member_by_ref(cast_member_ref)
+                    .ok_or_else(|| ScriptError::new("Cast member not found".to_string()))?;
+
+                if let CastMemberType::VectorShape(vs) = &cast_member.member_type {
+                    // Extract data we need before dropping the borrow on player
+                    let result: Result<Datum, ScriptError> = match prop.as_str() {
+                        "width" => Ok(Datum::Int(vs.width().ceil() as i32)),
+                        "height" => Ok(Datum::Int(vs.height().ceil() as i32)),
+                        "strokeColor" => {
+                            let (r, g, b) = vs.stroke_color;
+                            Ok(Datum::ColorRef(ColorRef::Rgb(r, g, b)))
+                        }
+                        "strokeWidth" => Ok(Datum::Float(vs.stroke_width as f64)),
+                        "closed" => Ok(datum_bool(vs.closed)),
+                        "fillMode" => {
+                            let sym = match vs.fill_mode {
+                                0 => "none",
+                                1 => "solid",
+                                2 => "gradient",
+                                _ => "none",
+                            };
+                            Ok(Datum::Symbol(sym.to_string()))
+                        }
+                        "fillColor" => {
+                            let (r, g, b) = vs.fill_color;
+                            Ok(Datum::ColorRef(ColorRef::Rgb(r, g, b)))
+                        }
+                        "backgroundColor" => {
+                            let (r, g, b) = vs.bg_color;
+                            Ok(Datum::ColorRef(ColorRef::Rgb(r, g, b)))
+                        }
+                        "endColor" => {
+                            let (r, g, b) = vs.end_color;
+                            Ok(Datum::ColorRef(ColorRef::Rgb(r, g, b)))
+                        }
+                        _ => Err(ScriptError::new(format!(
+                            "VectorShape members don't support property {}", prop
+                        ))),
+                    };
+                    // Handle props that need alloc_datum separately (to avoid borrow conflict)
+                    if prop == "rect" {
+                        let w = vs.width().ceil() as i32;
+                        let h = vs.height().ceil() as i32;
+                        drop(cast_member);
+                        Ok(Datum::Rect([
+                            player.alloc_datum(Datum::Int(0)),
+                            player.alloc_datum(Datum::Int(0)),
+                            player.alloc_datum(Datum::Int(w)),
+                            player.alloc_datum(Datum::Int(h)),
+                        ]))
+                    } else if prop == "vertexList" {
+                        let vert_data: Vec<(i32, i32, i32, i32, i32, i32)> = vs.vertices.iter()
+                            .map(|v| (
+                                v.x as i32, v.y as i32,
+                                v.handle1_x as i32, v.handle1_y as i32,
+                                v.handle2_x as i32, v.handle2_y as i32,
+                            ))
+                            .collect();
+                        drop(cast_member);
+                        let list: Vec<DatumRef> = vert_data.iter().map(|(vx, vy, h1x, h1y, h2x, h2y)| {
+                            let vertex_key = player.alloc_datum(Datum::Symbol("vertex".to_string()));
+                            let vx_ref = player.alloc_datum(Datum::Int(*vx));
+                            let vy_ref = player.alloc_datum(Datum::Int(*vy));
+                            let vertex_val = player.alloc_datum(Datum::Point([vx_ref, vy_ref]));
+
+                            let h1_key = player.alloc_datum(Datum::Symbol("handle1".to_string()));
+                            let h1x_ref = player.alloc_datum(Datum::Int(*h1x));
+                            let h1y_ref = player.alloc_datum(Datum::Int(*h1y));
+                            let h1_val = player.alloc_datum(Datum::Point([h1x_ref, h1y_ref]));
+
+                            let h2_key = player.alloc_datum(Datum::Symbol("handle2".to_string()));
+                            let h2x_ref = player.alloc_datum(Datum::Int(*h2x));
+                            let h2y_ref = player.alloc_datum(Datum::Int(*h2y));
+                            let h2_val = player.alloc_datum(Datum::Point([h2x_ref, h2y_ref]));
+
+                            let prop_list = Datum::PropList(vec![
+                                (vertex_key, vertex_val),
+                                (h1_key, h1_val),
+                                (h2_key, h2_val),
+                            ], false);
+                            player.alloc_datum(prop_list)
+                        }).collect();
+                        Ok(Datum::List(DatumType::List, list, false))
+                    } else {
+                        result
+                    }
+                } else {
+                    Err(ScriptError::new("Expected vectorShape member".to_string()))
                 }
             }
             _ => Err(ScriptError::new(format!(
@@ -378,6 +492,7 @@ impl CastMemberRefHandlers {
         match member_type {
             CastMemberTypeId::Field => FieldMemberHandlers::set_prop(member_ref, prop, value),
             CastMemberTypeId::Text => TextMemberHandlers::set_prop(member_ref, prop, value),
+            CastMemberTypeId::Button => ButtonMemberHandlers::set_prop(member_ref, prop, value),
             CastMemberTypeId::Font => reserve_player_mut(|player| {
                 FontMemberHandlers::set_prop(player, member_ref, prop, value)
             }),
@@ -462,7 +577,13 @@ impl CastMemberRefHandlers {
         match prop.as_str() {
             "name" => Ok(Datum::String(name)),
             "memberNum" => Ok(Datum::Int(member_num as i32)),
-            "number" => Ok(Datum::Int(slot_number)),
+            "number" => {
+                if player.movie.dir_version >= 600 {
+                    Ok(Datum::Int(slot_number))
+                } else {
+                    Ok(Datum::Int(member_num as i32))
+                }
+            }
             "type" => Ok(Datum::Symbol(member_type.symbol_string()?.to_string())),
             "castLibNum" => Ok(Datum::Int(cast_member_ref.cast_lib as i32)),
             "color" => Ok(Datum::ColorRef(color)),

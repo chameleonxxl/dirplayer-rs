@@ -146,17 +146,19 @@ pub async fn player_invoke_event_to_instances(
                 }
             }
             Err(err) => {
-                // Dump bytecode execution history before the error
-                crate::player::bytecode::handler_manager::dump_execution_history_on_error(&err.message);
-                // Log the error to console
-                web_sys::console::error_1(
-                    &format!("⚠ Error in handler '{}': {}", handler_name, err.message).into()
-                );
-                // Report to player's error handler
-                reserve_player_mut(|player| {
-                    player.on_script_error(&err);
-                });
-                // Return the error to caller
+                if err.code != ScriptErrorCode::Abort {
+                    // Dump bytecode execution history before the error
+                    crate::player::bytecode::handler_manager::dump_execution_history_on_error(&err.message);
+                    // Log the error to console
+                    web_sys::console::error_1(
+                        &format!("⚠ Error in handler '{}': {}", handler_name, err.message).into()
+                    );
+                    // Report to player's error handler
+                    reserve_player_mut(|player| {
+                        player.on_script_error(&err);
+                    });
+                }
+                // Return the error to caller (abort propagates to stop handler chain)
                 return Err(err);
             }
         }
@@ -196,7 +198,7 @@ pub async fn player_invoke_frame_and_movie_scripts(
         let mut active_static_scripts: Vec<CastMemberRef> = vec![];
         
         // Frame script first
-        if let Some(frame_script) = frame_script {
+        if let Some(frame_script) = &frame_script {
             let script_ref = CastMemberRef {
                 cast_lib: frame_script.cast_lib.into(),
                 cast_member: frame_script.cast_member.into(),
@@ -236,10 +238,22 @@ pub async fn player_invoke_frame_and_movie_scripts(
         
         let result = player_call_script_handler(
             receiver,  // Changed from None to receiver
-            (script_member_ref, handler_name.to_owned()),
+            (script_member_ref.clone(), handler_name.to_owned()),
             args
-        ).await?;
-        
+        ).await;
+        match &result {
+            Ok(_) => {}
+            Err(err) => {
+                if err.code != ScriptErrorCode::Abort {
+                    web_sys::console::warn_1(&format!(
+                        "  {} handler on {:?} ERROR: {}",
+                        handler_name, script_member_ref, err.message
+                    ).into());
+                }
+            }
+        }
+        let result = result?;
+
         if !result.passed {
             break;
         }
@@ -350,7 +364,12 @@ pub async fn player_invoke_global_event(
 pub async fn player_dispatch_movie_callback(
     handler_name: &str,
 ) -> Result<(), ScriptError> {
-    let call_params = reserve_player_ref(|player| {
+    enum CallbackAction {
+        CallHandler(Option<ScriptInstanceRef>, (CastMemberRef, String)),
+        EvalText(String),
+    }
+
+    let action = reserve_player_ref(|player| {
         let callback = match handler_name {
             "mouseDown" => &player.movie.mouse_down_script,
             "mouseUp" => &player.movie.mouse_up_script,
@@ -364,25 +383,30 @@ pub async fn player_dispatch_movie_callback(
                 let script_instance = player.allocator.get_script_instance(instance_ref);
                 let script = player.movie.cast_manager.get_script_by_ref(&script_instance.script)?;
                 let handler = script.get_own_handler_ref(&handler_name.to_string())?;
-                Some((Some(instance_ref.clone()), handler))
+                Some(CallbackAction::CallHandler(Some(instance_ref.clone()), handler))
             }
             ScriptReceiver::Script(script_ref) => {
                 let script = player.movie.cast_manager.get_script_by_ref(script_ref)?;
                 let handler = script.get_own_handler_ref(&handler_name.to_string())?;
-                Some((None, handler))
+                Some(CallbackAction::CallHandler(None, handler))
             }
             ScriptReceiver::ScriptText(text) => {
                 if text.trim().starts_with("--") || text.trim().is_empty() {
                     None
                 } else {
-                    warn!("Script text execution not yet implemented for {}: {}", handler_name, text);
-                    None
+                    Some(CallbackAction::EvalText(text.to_owned()))
                 }
             }
         }
     });
-    if let Some((receiver, handler)) = call_params {
-        player_call_script_handler(receiver, handler, &vec![]).await?;
+    match action {
+        Some(CallbackAction::CallHandler(receiver, handler)) => {
+            player_call_script_handler(receiver, handler, &vec![]).await?;
+        }
+        Some(CallbackAction::EvalText(text)) => {
+            super::eval::eval_lingo_command(text).await?;
+        }
+        None => {}
     }
     Ok(())
 }
@@ -406,9 +430,11 @@ pub async fn run_event_loop(rx: Receiver<PlayerVMEvent>) {
         };
         match result {
             Err(err) => {
-                // TODO ignore error if it's a CancelledException
-                // TODO print stack trace
-                reserve_player_mut(|player| player.on_script_error(&err));
+                if err.code != super::ScriptErrorCode::Abort {
+                    // TODO ignore error if it's a CancelledException
+                    // TODO print stack trace
+                    reserve_player_mut(|player| player.on_script_error(&err));
+                }
             }
             _ => {}
         };
@@ -420,7 +446,9 @@ pub fn player_unwrap_result(result: Result<DatumRef, ScriptError>) -> DatumRef {
     match result {
         Ok(result) => result,
         Err(err) => {
-            reserve_player_mut(|player| player.on_script_error(&err));
+            if err.code != ScriptErrorCode::Abort {
+                reserve_player_mut(|player| player.on_script_error(&err));
+            }
             DatumRef::Void
         }
     }
@@ -550,6 +578,12 @@ pub async fn player_dispatch_event_beginsprite(
 
         let receivers = vec![behavior.clone()];
         if let Err(err) = player_invoke_targeted_event(handler_name, args, Some(receivers).as_ref()).await {
+            if err.code == ScriptErrorCode::Abort {
+                reserve_player_mut(|player| {
+                    player.current_score_context = ScoreRef::Stage;
+                });
+                return Ok(vec![]);
+            }
             web_sys::console::error_1(
                 &format!("Error in {} for sprite {}: {}", handler_name, sprite_number, err.message).into()
             );
@@ -641,6 +675,9 @@ pub async fn dispatch_event_endsprite_for_score(score_ref: ScoreRef, sprite_nums
             if let Err(err) = player_invoke_event_to_instances(
                     &"endSprite".to_string(), &vec![], &receivers
                 ).await {
+                if err.code == ScriptErrorCode::Abort {
+                    break;
+                }
                 web_sys::console::error_1(
                     &format!("Error in endSprite for sprite {}: {}", sprite_num, err.message).into()
                 );
@@ -774,6 +811,14 @@ pub async fn dispatch_event_to_all_behaviors(
             let receivers = vec![behavior.clone()];
 
             if let Err(err) = player_invoke_event_to_instances(handler_name, args, &receivers).await {
+                if err.code == ScriptErrorCode::Abort {
+                    // abort is flow control: stop all remaining handlers
+                    reserve_player_mut(|player| {
+                        player.is_dispatching_events = false;
+                        player.current_score_context = ScoreRef::Stage;
+                    });
+                    return;
+                }
                 web_sys::console::error_1(
                     &format!("Error in {} for sprite {}: {}", handler_name, sprite_number, err.message).into()
                 );
@@ -790,7 +835,9 @@ pub async fn dispatch_event_to_all_behaviors(
     }
     // Dispatch event to frame/movie scripts
     if let Err(err) = player_invoke_frame_and_movie_scripts(handler_name, args).await {
-        reserve_player_mut(|player| player.on_script_error(&err));
+        if err.code != ScriptErrorCode::Abort {
+            reserve_player_mut(|player| player.on_script_error(&err));
+        }
     }
 
     // Reset the flag after dispatching
@@ -824,6 +871,9 @@ pub async fn dispatch_system_event_to_timeouts(
     for target_ref in timeout_targets {
         let result = player_call_datum_handler(&target_ref, handler_name, args).await;
         if let Err(err) = result {
+            if err.code == ScriptErrorCode::Abort {
+                return; // abort stops the entire handler chain
+            }
             // HandlerNotFound is expected when a script doesn't have the event handler
             // (e.g., timeout target script doesn't have prepareFrame or exitFrame).
             // This is normal Director behavior - just silently skip.

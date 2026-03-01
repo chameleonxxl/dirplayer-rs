@@ -223,6 +223,19 @@ pub struct PhysicalFontRecord {
     pub bitmap_size_table_offset: u32,
     pub gps_offset: u32,
     pub gps_size: u32,
+    // Private records from AuxData
+    pub private_mode_716: u8,
+    pub private_type2_byte28: u8,
+    pub private_type2_byte29: u8,
+    pub private_flags_492: i32,
+    pub private_mode_x: u8,
+    pub private_mode_y: u8,
+    pub has_extra_item_type5: bool,
+    pub extra_type5_word36: i16,
+    pub extra_type5_word37: i16,
+    pub extra_type5_line_spacing: i16,
+    pub extra_type5_word39: i16,
+    pub two_byte_char_code: bool,
 }
 
 impl PhysicalFontRecord {
@@ -257,6 +270,18 @@ impl PhysicalFontRecord {
             bitmap_size_table_offset: 0,
             gps_offset: 0,
             gps_size: 0,
+            private_mode_716: 4,
+            private_type2_byte28: 0,
+            private_type2_byte29: 0,
+            private_flags_492: 0,
+            private_mode_x: 0,
+            private_mode_y: 0,
+            has_extra_item_type5: false,
+            extra_type5_word36: 0,
+            extra_type5_word37: 0,
+            extra_type5_line_spacing: 0,
+            extra_type5_word39: 0,
+            two_byte_char_code: false,
         }
     }
 }

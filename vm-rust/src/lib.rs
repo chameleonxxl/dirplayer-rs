@@ -197,6 +197,12 @@ pub fn player_print_member_bitmap_hex(cast_lib: i32, cast_member: i32) {
 
 #[wasm_bindgen]
 pub fn mouse_down(x: f64, y: f64) {
+    // Update mouse state immediately so the mouseH/the mouseV/the stillDown
+    // reflect real state even during long-running script handlers
+    reserve_player_mut(|player| {
+        player.mouse_loc = (x.to_i32().unwrap(), y.to_i32().unwrap());
+        player.movie.mouse_down = true;
+    });
     player_dispatch(PlayerVMCommand::MouseDown((
         x.to_i32().unwrap(),
         y.to_i32().unwrap(),
@@ -205,6 +211,12 @@ pub fn mouse_down(x: f64, y: f64) {
 
 #[wasm_bindgen]
 pub fn mouse_up(x: f64, y: f64) {
+    // Update mouse state immediately so the mouseH/the mouseV/the stillDown
+    // reflect real state even during long-running script handlers
+    reserve_player_mut(|player| {
+        player.mouse_loc = (x.to_i32().unwrap(), y.to_i32().unwrap());
+        player.movie.mouse_down = false;
+    });
     player_dispatch(PlayerVMCommand::MouseUp((
         x.to_i32().unwrap(),
         y.to_i32().unwrap(),
@@ -213,6 +225,11 @@ pub fn mouse_up(x: f64, y: f64) {
 
 #[wasm_bindgen]
 pub fn mouse_move(x: f64, y: f64) {
+    // Update mouse_loc immediately so the mouseH/the mouseV reflect real
+    // position even during long-running script handlers (same pattern as key_down/key_up)
+    reserve_player_mut(|player| {
+        player.mouse_loc = (x.to_i32().unwrap(), y.to_i32().unwrap());
+    });
     player_dispatch(PlayerVMCommand::MouseMove((
         x.to_i32().unwrap(),
         y.to_i32().unwrap(),
@@ -221,11 +238,21 @@ pub fn mouse_move(x: f64, y: f64) {
 
 #[wasm_bindgen]
 pub fn key_down(key: String, code: u16) {
+    // Update keyboard state immediately so keyPressed() reflects
+    // real state even during long-running script handlers
+    reserve_player_mut(|player| {
+        player.keyboard_manager.key_down(key.clone(), code);
+    });
     player_dispatch(PlayerVMCommand::KeyDown(key, code));
 }
 
 #[wasm_bindgen]
 pub fn key_up(key: String, code: u16) {
+    // Update keyboard state immediately so keyPressed() reflects
+    // real state even during long-running script handlers
+    reserve_player_mut(|player| {
+        player.keyboard_manager.key_up(&key, code);
+    });
     player_dispatch(PlayerVMCommand::KeyUp(key, code));
 }
 
@@ -398,6 +425,49 @@ pub fn eval_command(command: String) {
 #[wasm_bindgen]
 pub fn is_webgl2_supported() -> bool {
     rendering_gpu::is_webgl2_supported()
+}
+
+/// Set glyph rendering preference for text/field members.
+/// Values: "auto" (default), "bitmap" (PFR atlas), "native" (Canvas2D fillText),
+///         "outline" (force outline rasterization, skip PFR bitmap strikes — needs clear_font_cache)
+#[wasm_bindgen]
+pub fn set_glyph_preference(mode: &str) {
+    use player::font::{GlyphPreference, set_glyph_preference as set_pref};
+    let pref = match mode.to_lowercase().as_str() {
+        "bitmap" => GlyphPreference::Bitmap,
+        "native" => GlyphPreference::Native,
+        "outline" => GlyphPreference::Outline,
+        _ => GlyphPreference::Auto,
+    };
+    set_pref(pref);
+}
+
+/// Get the current glyph rendering preference.
+#[wasm_bindgen]
+pub fn get_glyph_preference() -> String {
+    use player::font::{GlyphPreference, get_glyph_preference as get_pref};
+    match get_pref() {
+        GlyphPreference::Auto => "auto".to_string(),
+        GlyphPreference::Bitmap => "bitmap".to_string(),
+        GlyphPreference::Native => "native".to_string(),
+        GlyphPreference::Outline => "outline".to_string(),
+    }
+}
+
+/// Clear the font cache so fonts will be re-rasterized on next use.
+/// Call this after set_glyph_preference("outline") to see the effect.
+#[wasm_bindgen]
+pub fn clear_font_cache() {
+    reserve_player_mut(|player| {
+        let count = player.font_manager.font_cache.len();
+        player.font_manager.font_cache.clear();
+        player.font_manager.fonts.clear();
+        player.font_manager.font_by_id.clear();
+        player.font_manager.font_counter = 0;
+        web_sys::console::log_1(
+            &format!("[clear_font_cache] Cleared {} cached fonts. Reload movie to re-rasterize.", count).into()
+        );
+    });
 }
 
 /// Get the current renderer backend name

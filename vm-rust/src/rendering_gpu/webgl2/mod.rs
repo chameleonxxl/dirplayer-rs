@@ -23,7 +23,7 @@ use crate::player::{
     bitmap::drawing::CopyPixelsParams,
     cast_lib::CastMemberRef,
     cast_member::CastMemberType,
-    font::{bitmap_font_copy_char, measure_text, BitmapFont},
+    font::{bitmap_font_copy_char, measure_text, measure_text_wrapped, get_glyph_preference, GlyphPreference, BitmapFont},
     geometry::IntRect,
     handlers::datum_handlers::cast_member::font::{FontMemberHandlers, StyledSpan, HtmlStyle, TextAlignment},
     score::{get_concrete_sprite_rect, get_sprite_at, ScoreRef},
@@ -80,6 +80,12 @@ pub struct WebGL2Renderer {
     rendered_text_cache: RenderedTextCache,
     /// Last known palette version - used to clear texture cache when palettes change
     last_palette_version: u32,
+    /// Trails framebuffer object for accumulating trails sprite images
+    trails_fbo: Option<web_sys::WebGlFramebuffer>,
+    /// Trails texture (color attachment for trails FBO)
+    trails_texture: Option<web_sys::WebGlTexture>,
+    /// Size of the trails FBO texture
+    trails_size: (u32, u32),
 }
 
 impl WebGL2Renderer {
@@ -88,8 +94,30 @@ impl WebGL2Renderer {
         canvas: HtmlCanvasElement,
         preview_canvas: HtmlCanvasElement,
     ) -> Result<Self, JsValue> {
+        // Force pixel-perfect rendering: prevent browser from bilinear-scaling
+        // the canvas when CSS size or devicePixelRatio differs from canvas dimensions.
+        // Also disable ClearType/subpixel rendering and compositor smoothing.
+        {
+            let style = canvas.style();
+            let _ = style.set_property("image-rendering", "pixelated");
+            let _ = style.set_property("image-rendering", "-moz-crisp-edges");
+            let _ = style.set_property("image-rendering", "crisp-edges");
+            let _ = style.set_property("-webkit-font-smoothing", "none");
+            let _ = style.set_property("-moz-osx-font-smoothing", "grayscale");
+            let _ = style.set_property("font-smooth", "never");
+            let _ = style.set_property("text-rendering", "optimizeSpeed");
+            let _ = style.set_property("backface-visibility", "hidden");
+        }
+
+        // Create WebGL2 context with pixel-perfect settings:
+        // - antialias: false - disable MSAA to prevent sub-pixel blurring
+        // - alpha: false - stage is always opaque, no HTML page bleed-through
+        let context_options = js_sys::Object::new();
+        js_sys::Reflect::set(&context_options, &"antialias".into(), &false.into())?;
+        js_sys::Reflect::set(&context_options, &"alpha".into(), &false.into())?;
+
         let gl = canvas
-            .get_context("webgl2")?
+            .get_context_with_context_options("webgl2", &context_options)?
             .ok_or_else(|| JsValue::from_str("WebGL2 not supported"))?
             .dyn_into::<WebGl2RenderingContext>()?;
 
@@ -129,6 +157,9 @@ impl WebGL2Renderer {
             preview_container_element: None,
             rendered_text_cache: RenderedTextCache::new(),
             last_palette_version: 0,
+            trails_fbo: None,
+            trails_texture: None,
+            trails_size: (0, 0),
         })
     }
 
@@ -153,6 +184,141 @@ impl WebGL2Renderer {
     /// Check if WebGL2 is available
     pub fn is_supported() -> bool {
         super::is_webgl2_supported()
+    }
+
+    /// Ensure the trails framebuffer exists and is the correct size.
+    /// The trails FBO accumulates images of trails sprites across frames.
+    fn ensure_trails_fbo(&mut self, width: u32, height: u32) {
+        if self.trails_fbo.is_some() && self.trails_size == (width, height) {
+            return;
+        }
+
+        let gl = self.context.gl();
+
+        // Delete old resources
+        if let Some(fbo) = self.trails_fbo.take() {
+            gl.delete_framebuffer(Some(&fbo));
+        }
+        if let Some(tex) = self.trails_texture.take() {
+            gl.delete_texture(Some(&tex));
+        }
+
+        // Create texture
+        let tex = match gl.create_texture() {
+            Some(t) => t,
+            None => return,
+        };
+        gl.bind_texture(WebGl2RenderingContext::TEXTURE_2D, Some(&tex));
+        let _ = gl.tex_image_2d_with_i32_and_i32_and_i32_and_format_and_type_and_opt_u8_array(
+            WebGl2RenderingContext::TEXTURE_2D,
+            0,
+            WebGl2RenderingContext::RGBA as i32,
+            width as i32,
+            height as i32,
+            0,
+            WebGl2RenderingContext::RGBA,
+            WebGl2RenderingContext::UNSIGNED_BYTE,
+            None,
+        );
+        gl.tex_parameteri(WebGl2RenderingContext::TEXTURE_2D, WebGl2RenderingContext::TEXTURE_MIN_FILTER, WebGl2RenderingContext::NEAREST as i32);
+        gl.tex_parameteri(WebGl2RenderingContext::TEXTURE_2D, WebGl2RenderingContext::TEXTURE_MAG_FILTER, WebGl2RenderingContext::NEAREST as i32);
+        gl.tex_parameteri(WebGl2RenderingContext::TEXTURE_2D, WebGl2RenderingContext::TEXTURE_WRAP_S, WebGl2RenderingContext::CLAMP_TO_EDGE as i32);
+        gl.tex_parameteri(WebGl2RenderingContext::TEXTURE_2D, WebGl2RenderingContext::TEXTURE_WRAP_T, WebGl2RenderingContext::CLAMP_TO_EDGE as i32);
+        gl.bind_texture(WebGl2RenderingContext::TEXTURE_2D, None);
+
+        // Create framebuffer and attach texture
+        let fbo = match gl.create_framebuffer() {
+            Some(f) => f,
+            None => {
+                gl.delete_texture(Some(&tex));
+                return;
+            }
+        };
+        gl.bind_framebuffer(WebGl2RenderingContext::FRAMEBUFFER, Some(&fbo));
+        gl.framebuffer_texture_2d(
+            WebGl2RenderingContext::FRAMEBUFFER,
+            WebGl2RenderingContext::COLOR_ATTACHMENT0,
+            WebGl2RenderingContext::TEXTURE_2D,
+            Some(&tex),
+            0,
+        );
+
+        // Clear to transparent
+        gl.clear_color(0.0, 0.0, 0.0, 0.0);
+        gl.clear(WebGl2RenderingContext::COLOR_BUFFER_BIT);
+
+        // Unbind
+        gl.bind_framebuffer(WebGl2RenderingContext::FRAMEBUFFER, None);
+
+        self.trails_fbo = Some(fbo);
+        self.trails_texture = Some(tex);
+        self.trails_size = (width, height);
+    }
+
+    /// Delete the trails FBO and texture.
+    fn destroy_trails_fbo(&mut self) {
+        let gl = self.context.gl();
+        if let Some(fbo) = self.trails_fbo.take() {
+            gl.delete_framebuffer(Some(&fbo));
+        }
+        if let Some(tex) = self.trails_texture.take() {
+            gl.delete_texture(Some(&tex));
+        }
+        self.trails_size = (0, 0);
+    }
+
+    /// Draw the accumulated trails texture as a full-screen quad.
+    fn draw_trails_texture(&mut self) {
+        let trails_tex = match &self.trails_texture {
+            Some(t) => t,
+            None => return,
+        };
+
+        let gl = self.context.gl();
+        let (width, height) = self.size;
+
+        // Use Copy ink for simple blitting
+        let effective_ink = self.shader_manager.use_program(&self.context, InkMode::Copy);
+        let program = match self.shader_manager.get_program(effective_ink) {
+            Some(p) => p,
+            None => return,
+        };
+
+        self.context.set_blend_alpha();
+
+        // Bind trails texture
+        gl.active_texture(WebGl2RenderingContext::TEXTURE0);
+        gl.bind_texture(WebGl2RenderingContext::TEXTURE_2D, Some(trails_tex));
+        if let Some(ref loc) = program.u_texture {
+            gl.uniform1i(Some(loc), 0);
+        }
+
+        // Full-screen quad
+        if let Some(ref loc) = program.u_sprite_rect {
+            gl.uniform4f(Some(loc), 0.0, 0.0, width as f32, height as f32);
+        }
+        if let Some(ref loc) = program.u_tex_rect {
+            gl.uniform4f(Some(loc), 0.0, 0.0, 1.0, 1.0);
+        }
+        if let Some(ref loc) = program.u_flip {
+            gl.uniform2f(Some(loc), 0.0, 0.0);
+        }
+        if let Some(ref loc) = program.u_rotation {
+            gl.uniform1f(Some(loc), 0.0);
+        }
+        if let Some(ref loc) = program.u_skew_flip {
+            gl.uniform1f(Some(loc), 0.0);
+        }
+        if let Some(ref loc) = program.u_rotation_center {
+            gl.uniform2f(Some(loc), 0.0, 0.0);
+        }
+        if let Some(ref loc) = program.u_blend {
+            gl.uniform1f(Some(loc), 1.0);
+        }
+
+        self.quad.draw(gl);
+
+        gl.bind_texture(WebGl2RenderingContext::TEXTURE_2D, None);
     }
 
     /// Draw the current frame
@@ -188,12 +354,75 @@ impl WebGL2Renderer {
             .map(|x| (x.number as i16, x.sprite.loc_z))
             .collect_vec();
 
+        // Check if any sprite has trails
+        let trails_channels: Vec<i16> = sorted_channels.iter()
+            .filter(|(ch, _)| {
+                player.movie.score.get_sprite(*ch).map_or(false, |s| s.trails)
+            })
+            .map(|(ch, _)| *ch)
+            .collect();
+        let has_trails = !trails_channels.is_empty();
+
         // Bind quad geometry once
         self.quad.bind(self.context.gl());
+
+        // Draw accumulated trails texture onto the cleared stage
+        if has_trails && self.trails_texture.is_some() {
+            self.draw_trails_texture();
+        }
 
         // Render each sprite
         for (channel_num, _) in &sorted_channels {
             self.render_sprite(player, *channel_num);
+        }
+
+        // Accumulate trails sprites into the trails texture via GPU-side copy.
+        // Instead of re-rendering sprites to the FBO, we copy the already-rendered
+        // pixel rects from the default framebuffer using copyTexSubImage2D.
+        if has_trails {
+            let (w, h) = self.size;
+            self.ensure_trails_fbo(w, h);
+
+            if self.trails_texture.is_some() {
+                let gl = self.context.gl();
+
+                // Read from default framebuffer (screen)
+                gl.bind_framebuffer(WebGl2RenderingContext::READ_FRAMEBUFFER, None);
+
+                // Bind trails texture to copy into
+                let tex = self.trails_texture.as_ref().unwrap();
+                gl.bind_texture(WebGl2RenderingContext::TEXTURE_2D, Some(tex));
+
+                // For each trails sprite, copy its bounding rect from screen to trails texture
+                for ch in &trails_channels {
+                    if let Some(sprite) = player.movie.score.get_sprite(*ch) {
+                        let rect = get_concrete_sprite_rect(player, sprite);
+                        let x = rect.left.max(0).min(w as i32);
+                        let y = rect.top.max(0).min(h as i32);
+                        let r = rect.right.max(0).min(w as i32);
+                        let b = rect.bottom.max(0).min(h as i32);
+                        if r > x && b > y {
+                            // WebGL Y is flipped: screen Y=0 is bottom, texture Y=0 is top
+                            let gl_y = h as i32 - b;
+                            let _ = gl.copy_tex_sub_image_2d(
+                                WebGl2RenderingContext::TEXTURE_2D,
+                                0,
+                                x,         // xoffset in texture
+                                gl_y,      // yoffset in texture (flipped)
+                                x,         // x in framebuffer
+                                gl_y,      // y in framebuffer (flipped)
+                                r - x,     // width
+                                b - y,     // height
+                            );
+                        }
+                    }
+                }
+
+                gl.bind_texture(WebGl2RenderingContext::TEXTURE_2D, None);
+            }
+        } else if self.trails_fbo.is_some() {
+            // No trails sprites - clean up FBO
+            self.destroy_trails_fbo();
         }
 
         // Draw custom cursor sprite
@@ -746,7 +975,7 @@ impl WebGL2Renderer {
     /// Render a single sprite
     fn render_sprite(&mut self, player: &mut DirPlayer, channel_num: i16) {
         // Get sprite and member info
-        let (member_ref, sprite_rect, ink, blend, flip_h, flip_v, rotation, skew, bg_color, fg_color, has_fore_color, has_back_color, is_puppet, raw_loc, sprite_width, sprite_height) = {
+        let (member_ref, mut sprite_rect, ink, blend, flip_h, flip_v, rotation, skew, bg_color, fg_color, has_fore_color, has_back_color, is_puppet, raw_loc, sprite_width, sprite_height) = {
             let score = &player.movie.score;
             let sprite = match score.get_sprite(channel_num) {
                 Some(s) => s,
@@ -808,6 +1037,30 @@ impl WebGL2Renderer {
                 width: u32,
                 height: u32,
             },
+            ButtonBitmap {
+                width: u32,
+                height: u32,
+                button_type: crate::player::cast_member::ButtonType,
+                hilite: bool,
+                text: String,
+                font_name: String,
+                font_size: u16,
+                font_id: Option<u16>,
+                alignment: String,
+                ink: i32,
+            },
+            ShapeBitmap {
+                width: u32,
+                height: u32,
+                shape_info: crate::director::enums::ShapeInfo,
+                fg_color: (u8, u8, u8),
+                bg_color: (u8, u8, u8),
+            },
+            VectorShapeBitmap {
+                width: u32,
+                height: u32,
+                vector_member: crate::player::cast_member::VectorShapeMember,
+            },
         }
 
         let texture_source = {
@@ -820,29 +1073,51 @@ impl WebGL2Renderer {
                 CastMemberType::Bitmap(bitmap_member) => {
                     TextureSource::Bitmap { image_ref: bitmap_member.image_ref }
                 }
-                CastMemberType::Shape(_shape_member) => {
+                CastMemberType::Shape(shape_member) => {
                     // Skip rendering shapes with tiny dimensions (blank placeholders or zero-size)
-                    // Skip if EITHER dimension is <= 1
                     if sprite_width <= 1 || sprite_height <= 1 {
                         return;
                     }
 
-                    // Skip rendering shapes that use member 1:1 - this is a placeholder/empty shape
-                    // in Director that shouldn't be rendered visually
+                    // Skip rendering shapes that use member 1:1 (placeholder)
                     if member_ref.cast_lib == 1 && member_ref.cast_member == 1 {
                         return;
                     }
 
-                    // Resolve foreground color to RGB
                     let palettes = player.movie.cast_manager.palettes();
-                    let (r, g, b) = resolve_color_ref(
+                    let fg_rgb = resolve_color_ref(
                         &palettes,
                         &fg_color,
                         &PaletteRef::BuiltIn(get_system_default_palette()),
-                        8, // default bit depth
+                        8,
+                    );
+                    let bg_rgb = resolve_color_ref(
+                        &palettes,
+                        &bg_color,
+                        &PaletteRef::BuiltIn(get_system_default_palette()),
+                        8,
                     );
 
-                    TextureSource::SolidColor { r, g, b }
+                    TextureSource::ShapeBitmap {
+                        width: sprite_width as u32,
+                        height: sprite_height as u32,
+                        shape_info: shape_member.shape_info.clone(),
+                        fg_color: fg_rgb,
+                        bg_color: bg_rgb,
+                    }
+                }
+                CastMemberType::VectorShape(vector_member) => {
+                    if sprite_width <= 1 || sprite_height <= 1 {
+                        return;
+                    }
+                    if member_ref.cast_lib == 1 && member_ref.cast_member == 1 {
+                        return;
+                    }
+                    TextureSource::VectorShapeBitmap {
+                        width: sprite_width as u32,
+                        height: sprite_height as u32,
+                        vector_member: vector_member.clone(),
+                    }
                 }
                 CastMemberType::Font(font_member) => {
                     // Font member: render preview_text using the font
@@ -934,13 +1209,25 @@ impl WebGL2Renderer {
                     } else {
                         sprite_rect.width().max(1) as u32
                     };
-                    let height = sprite_rect.height().max(text_member.height as i32).max(1) as u32;
+                    let height = sprite_rect.height().max(1) as u32;
 
                     // Extract font properties from first styled span if available
                     let (font_name, font_size, font_style) = if !text_member.html_styled_spans.is_empty() {
                         let first_style = &text_member.html_styled_spans[0].style;
-                        let name = first_style.font_face.clone().unwrap_or_else(|| text_member.font.clone());
-                        let size = first_style.font_size.map(|s| s as u16).unwrap_or(text_member.font_size);
+                        // Always prefer text_member.font (may have been changed at runtime via Lingo)
+                        // Only fall back to styled span font_face when member font is empty
+                        let name = if !text_member.font.is_empty() {
+                            text_member.font.clone()
+                        } else {
+                            first_style.font_face.clone().unwrap_or_else(|| "Arial".to_string())
+                        };
+                        // Prefer runtime font_size (set by Lingo) over original XMED span size.
+                        // The XMED span retains the authoring-time value; the runtime value takes priority.
+                        let size = if text_member.font_size > 0 {
+                            text_member.font_size
+                        } else {
+                            first_style.font_size.map(|s| s as u16).unwrap_or(12)
+                        };
                         // Convert bold/italic/underline to font_style: bit 0 = bold, bit 1 = italic, bit 2 = underline
                         let style = (if first_style.bold { 1u8 } else { 0 })
                             | (if first_style.italic { 2u8 } else { 0 })
@@ -1010,18 +1297,27 @@ impl WebGL2Renderer {
                         }
                         _ => text_fg_color,
                     };
-                    let text_bg_color = match &bg_color {
+                    // Priority: sprite bgColor (if explicitly set) > member bgColor > sprite bgColor (default)
+                    let effective_bg = if has_back_color {
+                        bg_color.clone()
+                    } else {
+                        match &member.bg_color {
+                            ColorRef::Rgb(_, _, _) => member.bg_color.clone(),
+                            _ => bg_color.clone(),
+                        }
+                    };
+                    let text_bg_color = match &effective_bg {
                         ColorRef::PaletteIndex(_) => {
                             let palettes = player.movie.cast_manager.palettes();
                             let (r, g, b) = resolve_color_ref(
                                 &palettes,
-                                &bg_color,
+                                &effective_bg,
                                 &PaletteRef::BuiltIn(get_system_default_palette()),
                                 8,
                             );
                             ColorRef::Rgb(r, g, b)
                         }
-                        _ => bg_color.clone(),
+                        _ => effective_bg,
                     };
 
                     // Log color decision for text members
@@ -1161,14 +1457,10 @@ impl WebGL2Renderer {
                     // Field member: editable text field
                     let text = &field_member.text;
 
-                    // Use the larger of sprite rect or field member dimensions
-                    // Sprite rect gives the display size, field member gives the content size
-                    let width = (sprite_rect.width())
-                        .max(field_member.width as i32)
-                        .max(1) as u32;
-                    let height = (sprite_rect.height())
-                        .max(field_member.height as i32)
-                        .max(1) as u32;
+                    // Use sprite_rect dimensions — get_concrete_sprite_rect already
+                    // computes the correct size from text_height/rect/borders
+                    let width = sprite_rect.width().max(1) as u32;
+                    let height = sprite_rect.height().max(1) as u32;
 
                     // Check if this field has keyboard focus (for cursor rendering)
                     let has_focus = player.keyboard_focus_sprite == channel_num;
@@ -1202,9 +1494,11 @@ impl WebGL2Renderer {
                     };
 
                     debug!(
-                        "Field sprite#{} text='{}' ink={} sprite.color={:?} sprite.bgColor={:?} member.color={:?} member.bgColor={:?} has_fore={} has_back={} -> effective_fg={:?} effective_bg={:?}",
-                        channel_num, text, ink, fg_color, bg_color, member.color, member.bg_color,
+                        "[FIELD] sprite#{} text='{}' ink={} font='{}' fontSize={} fg={:?} bg={:?} member.fg={:?} member.bg={:?} has_fore={} has_back={} -> eff_fg={:?} eff_bg={:?} box_type='{}' editable={} border={} size={}x{}",
+                        channel_num, &text[..text.len().min(30)], ink, field_member.font, field_member.font_size,
+                        fg_color, bg_color, field_member.fore_color, field_member.back_color,
                         has_fore_color, has_back_color, effective_fg, effective_bg,
+                        field_member.box_type, field_member.editable, field_member.border, width, height,
                     );
 
                     // Include focus state in cache key so cursor state changes invalidate cache
@@ -1248,17 +1542,28 @@ impl WebGL2Renderer {
                         box_drop_shadow: field_member.box_drop_shadow,
                     }
                 }
+                CastMemberType::Button(button_member) => {
+                    // Button member: render to offscreen bitmap with button chrome
+                    let width = sprite_rect.width().max(1) as u32;
+                    let height = sprite_rect.height().max(1) as u32;
+                    TextureSource::ButtonBitmap {
+                        width,
+                        height,
+                        button_type: button_member.button_type.clone(),
+                        hilite: button_member.hilite,
+                        text: button_member.field.text.clone(),
+                        font_name: button_member.field.font.clone(),
+                        font_size: button_member.field.font_size,
+                        font_id: button_member.field.font_id,
+                        alignment: button_member.field.alignment.clone(),
+                        ink,
+                    }
+                }
                 CastMemberType::FilmLoop(film_loop) => {
                     // Film loop: render the film loop's score to an offscreen bitmap
-                    // The film loop's rect is stored in info as:
-                    // - reg_point = (left, top) coordinates of the rect
-                    // - width = right coordinate
-                    // - height = bottom coordinate
-                    let info_rect_left = film_loop.info.reg_point.0 as i32;
-                    let info_rect_top = film_loop.info.reg_point.1 as i32;
-                    let info_rect_right = film_loop.info.width as i32;
-                    let info_rect_bottom = film_loop.info.height as i32;
-                    let initial_rect = IntRect::from(info_rect_left, info_rect_top, info_rect_right, info_rect_bottom);
+                    // Use the computed initial_rect (bounding box of all sprites) instead of
+                    // the info header rect. ScummVM also recomputes this from actual sprite data.
+                    let initial_rect = film_loop.initial_rect.clone();
 
                     // Store just the metadata - we'll render after this block ends
                     let width = initial_rect.width().max(1);
@@ -1275,6 +1580,39 @@ impl WebGL2Renderer {
                     return;
                 }
             }
+        };
+
+        // For filmloops, recompute initial_rect using actual member dimensions and registration
+        // points. The load-time compute_filmloop_initial_rect uses channel data dimensions which
+        // may not match actual bitmap sizes (especially for D5 SCVW format filmloops).
+        // Also update sprite_rect to match the recomputed dimensions so the texture isn't
+        // stretched when drawn.
+        let texture_source = match texture_source {
+            TextureSource::FilmLoop { initial_rect, .. } => {
+                let better_rect = crate::rendering::compute_filmloop_initial_rect_with_members(player, &member_ref)
+                    .unwrap_or(initial_rect);
+                let width = better_rect.width().max(1);
+                let height = better_rect.height().max(1);
+
+                // Override sprite_rect to use the correct filmloop dimensions.
+                // sprite_rect may have been computed from film_loop.info header which
+                // can have wrong dimensions for D5 SCVW format filmloops.
+                let reg_x = width / 2;
+                let reg_y = height / 2;
+                sprite_rect = IntRect::from(
+                    raw_loc.0 as i32 - reg_x,
+                    raw_loc.1 as i32 - reg_y,
+                    raw_loc.0 as i32 - reg_x + width,
+                    raw_loc.1 as i32 - reg_y + height,
+                );
+
+                TextureSource::FilmLoop {
+                    initial_rect: better_rect,
+                    width: width as u32,
+                    height: height as u32,
+                }
+            }
+            other => other,
         };
 
         // Get bitmap info for palette reference, bit depth, and use_alpha (only used for bitmap sprites)
@@ -1297,6 +1635,14 @@ impl WebGL2Renderer {
             }
             TextureSource::FilmLoop { .. } => {
                 // Film loops are rendered as 32-bit RGBA with alpha
+                (PaletteRef::BuiltIn(get_system_default_palette()), 32, true)
+            }
+            TextureSource::ButtonBitmap { .. } => {
+                // Buttons are rendered as 32-bit RGBA with alpha
+                (PaletteRef::BuiltIn(get_system_default_palette()), 32, true)
+            }
+            TextureSource::ShapeBitmap { .. } | TextureSource::VectorShapeBitmap { .. } => {
+                // Shapes are rendered as 32-bit RGBA with alpha
                 (PaletteRef::BuiltIn(get_system_default_palette()), 32, true)
             }
         };
@@ -1392,6 +1738,7 @@ impl WebGL2Renderer {
         // Colorize is also baked into the texture when has_fore_color or has_back_color is set
 
         let is_rendered_text = matches!(texture_source, TextureSource::RenderedText { .. });
+        let is_button_alpha_matte = matches!(texture_source, TextureSource::ButtonBitmap { ink: i, .. } if i == 36 || i == 8 || i == 7);
 
         let tex = match texture_source {
             TextureSource::Bitmap { image_ref } => {
@@ -1433,6 +1780,14 @@ impl WebGL2Renderer {
             } => {
                 // Check cache first
                 if let Some(cached) = self.rendered_text_cache.get(cache_key) {
+                    // Update sprite_rect to match cached texture dimensions
+                    let actual_h = cached.height as i32;
+                    if actual_h != sprite_rect.height() {
+                        sprite_rect = IntRect::from(
+                            sprite_rect.left, sprite_rect.top,
+                            sprite_rect.right, sprite_rect.top + actual_h,
+                        );
+                    }
                     cached.texture.clone()
                 } else {
                     // Render text to a bitmap and upload as texture
@@ -1459,7 +1814,16 @@ impl WebGL2Renderer {
                         border,
                         box_drop_shadow,
                     ) {
-                        Some(tex) => tex,
+                        Some((tex, _actual_w, actual_h)) => {
+                            // Update sprite_rect to match actual rendered dimensions
+                            if actual_h as i32 != sprite_rect.height() {
+                                sprite_rect = IntRect::from(
+                                    sprite_rect.left, sprite_rect.top,
+                                    sprite_rect.right, sprite_rect.top + actual_h as i32,
+                                );
+                            }
+                            tex
+                        }
                         None => return,
                     }
                 }
@@ -1504,6 +1868,343 @@ impl WebGL2Renderer {
                 }
                 texture
             }
+            TextureSource::ButtonBitmap {
+                width, height, button_type, hilite, text,
+                font_name, font_size, font_id, alignment, ink: button_ink,
+            } => {
+                use crate::player::cast_member::ButtonType;
+
+                let w = width as i32;
+                let h = height as i32;
+
+                // Create a 32-bit RGBA bitmap for the button
+                let mut btn_bitmap = Bitmap::new(
+                    width as u16, height as u16, 32, 32, 8,
+                    PaletteRef::BuiltIn(get_system_default_palette()),
+                );
+                btn_bitmap.use_alpha = true;
+                btn_bitmap.data.fill(0); // Start fully transparent
+
+                let palettes = player.movie.cast_manager.palettes();
+
+                // Only push buttons invert everything; radio/checkbox keep black text
+                let is_push = matches!(button_type, ButtonType::PushButton);
+                let (frame_color, fill_color, text_color): ((u8,u8,u8),(u8,u8,u8),(u8,u8,u8)) = if hilite && is_push {
+                    // Hilited push button: white frame, white text, black fill
+                    ((255,255,255), (0,0,0), (255,255,255))
+                } else {
+                    // Normal / radio/checkbox: black frame, black text, white fill
+                    ((0,0,0), (255,255,255), (0,0,0))
+                };
+
+                // For matte-like inks (bgTransparent 36, Matte 8, Not Ghost 7),
+                // skip the fill and rely on the alpha channel instead of color-keying.
+                // The shader will use alpha-based compositing for these inks.
+                let use_alpha_matte = button_ink == 36 || button_ink == 8 || button_ink == 7;
+
+                match button_type {
+                    ButtonType::PushButton => {
+                        // Fill interior with fill color — skip for matte-like inks
+                        // to avoid AA text fringe from color-keying near-white pixels
+                        if !use_alpha_matte {
+                            btn_bitmap.fill_rect(1, 1, w - 1, h - 1, fill_color, &palettes, 1.0);
+                        }
+                        // Draw border (top, bottom, left, right)
+                        btn_bitmap.fill_rect(2, 0, w - 2, 1, frame_color, &palettes, 1.0);
+                        btn_bitmap.fill_rect(2, h - 1, w - 2, h, frame_color, &palettes, 1.0);
+                        btn_bitmap.fill_rect(0, 2, 1, h - 2, frame_color, &palettes, 1.0);
+                        btn_bitmap.fill_rect(w - 1, 2, w, h - 2, frame_color, &palettes, 1.0);
+                        // Corner pixels for rounded corners (1px radius)
+                        btn_bitmap.fill_rect(1, 0, 2, 1, frame_color, &palettes, 1.0);
+                        btn_bitmap.fill_rect(w - 2, 0, w - 1, 1, frame_color, &palettes, 1.0);
+                        btn_bitmap.fill_rect(0, 1, 1, 2, frame_color, &palettes, 1.0);
+                        btn_bitmap.fill_rect(w - 1, 1, w, 2, frame_color, &palettes, 1.0);
+                        btn_bitmap.fill_rect(1, h - 1, 2, h, frame_color, &palettes, 1.0);
+                        btn_bitmap.fill_rect(w - 2, h - 1, w - 1, h, frame_color, &palettes, 1.0);
+                        btn_bitmap.fill_rect(0, h - 2, 1, h - 1, frame_color, &palettes, 1.0);
+                        btn_bitmap.fill_rect(w - 1, h - 2, w, h - 1, frame_color, &palettes, 1.0);
+                        // Set corner pixels fully transparent for rounded look
+                        for &(cx, cy) in &[(0i32, 0i32), (w-1, 0), (0, h-1), (w-1, h-1)] {
+                            if cx >= 0 && cy >= 0 && cx < w && cy < h {
+                                let idx = ((cy * w + cx) * 4) as usize;
+                                if idx + 3 < btn_bitmap.data.len() {
+                                    btn_bitmap.data[idx + 3] = 0;
+                                }
+                            }
+                        }
+                    }
+                    ButtonType::CheckBox => {
+                        let box_y = 0;
+                        // Box outline
+                        btn_bitmap.fill_rect(0, box_y, 10, box_y + 1, (0,0,0), &palettes, 1.0);
+                        btn_bitmap.fill_rect(0, box_y + 9, 10, box_y + 10, (0,0,0), &palettes, 1.0);
+                        btn_bitmap.fill_rect(0, box_y, 1, box_y + 10, (0,0,0), &palettes, 1.0);
+                        btn_bitmap.fill_rect(9, box_y, 10, box_y + 10, (0,0,0), &palettes, 1.0);
+                        // White fill inside
+                        btn_bitmap.fill_rect(1, box_y + 1, 9, box_y + 9, (255,255,255), &palettes, 1.0);
+                        // Make the text area opaque
+                        for y in 0..h {
+                            for x in 12..w {
+                                let idx = ((y * w + x) * 4) as usize;
+                                if idx + 3 < btn_bitmap.data.len() && btn_bitmap.data[idx + 3] == 0 {
+                                    btn_bitmap.data[idx + 3] = 1; // minimal alpha so it's not cut
+                                }
+                            }
+                        }
+                        if hilite {
+                            for i in 1..9 {
+                                btn_bitmap.fill_rect(i, box_y + i, i + 1, box_y + i + 1, (0,0,0), &palettes, 1.0);
+                                btn_bitmap.fill_rect(9 - i, box_y + i, 10 - i, box_y + i + 1, (0,0,0), &palettes, 1.0);
+                            }
+                        }
+                    }
+                    ButtonType::RadioButton => {
+                        let base_x = 0;
+                        let base_y = 0;
+                        // Outer circle outline (midpoint circle, radius 5, center 5,5)
+                        let circle_points: &[(i32, i32)] = &[
+                            (4,0),(5,0),(6,0),
+                            (3,1),(7,1),
+                            (2,2),(8,2),
+                            (1,3),(9,3),
+                            (0,4),(10,4),
+                            (0,5),(10,5),
+                            (0,6),(10,6),
+                            (1,7),(9,7),
+                            (2,8),(8,8),
+                            (3,9),(7,9),
+                            (4,10),(5,10),(6,10),
+                        ];
+                        for &(px, py) in circle_points {
+                            btn_bitmap.fill_rect(base_x + px, base_y + py, base_x + px + 1, base_y + py + 1, (0,0,0), &palettes, 1.0);
+                        }
+                        if hilite {
+                            // Filled inner circle (radius 2, center 5,5)
+                            btn_bitmap.fill_rect(base_x + 4, base_y + 3, base_x + 7, base_y + 4, (0,0,0), &palettes, 1.0);
+                            btn_bitmap.fill_rect(base_x + 3, base_y + 4, base_x + 8, base_y + 5, (0,0,0), &palettes, 1.0);
+                            btn_bitmap.fill_rect(base_x + 3, base_y + 5, base_x + 8, base_y + 6, (0,0,0), &palettes, 1.0);
+                            btn_bitmap.fill_rect(base_x + 3, base_y + 6, base_x + 8, base_y + 7, (0,0,0), &palettes, 1.0);
+                            btn_bitmap.fill_rect(base_x + 4, base_y + 7, base_x + 7, base_y + 8, (0,0,0), &palettes, 1.0);
+                        }
+                    }
+                }
+
+                // Draw text label
+                let chrome_offset_x = match button_type {
+                    ButtonType::CheckBox => 13, // 10px box + 3px gap
+                    ButtonType::RadioButton => 14, // 11px circle + 3px gap
+                    _ => 0,
+                };
+
+                // Load font and draw text
+                let font_opt = player.font_manager.get_font_with_cast_and_bitmap(
+                    &font_name,
+                    &player.movie.cast_manager,
+                    &mut player.bitmap_manager,
+                    Some(font_size),
+                    None,
+                );
+                let font_loaded = font_opt.or_else(|| {
+                    if let Some(id) = font_id {
+                        if let Some(fref) = player.font_manager.font_by_id.get(&id).copied() {
+                            player.font_manager.fonts.get(&fref).cloned()
+                        } else { None }
+                    } else { None }
+                });
+
+                let text_area_w = w - chrome_offset_x;
+                let is_pfr_font = font_loaded.as_ref().map_or(false, |f| f.char_widths.is_some());
+
+                if let (true, Some(font)) = (is_pfr_font, &font_loaded) {
+                    if let Some(font_bmp) = player.bitmap_manager.get_bitmap(font.bitmap_ref) {
+                        let wrapped_lines = Bitmap::wrap_text_lines(&text, font, text_area_w);
+                        let line_h = font.char_height as i32;
+                        let total_text_h = (wrapped_lines.len() as i32) * line_h;
+                        // Push buttons center text vertically; radio/checkbox start at top
+                        let text_y = if is_push {
+                            ((h - total_text_h) / 2).max(0)
+                        } else {
+                            0
+                        };
+
+                        let params = CopyPixelsParams {
+                            blend: 100,
+                            ink: 36, // bg transparent
+                            color: ColorRef::Rgb(text_color.0, text_color.1, text_color.2),
+                            bg_color: ColorRef::Rgb(255, 255, 255),
+                            mask_image: None,
+                            is_text_rendering: true,
+                            rotation: 0.0,
+                            skew: 0.0,
+                            sprite: None,
+                            original_dst_rect: None,
+                        };
+                        btn_bitmap.draw_text_wrapped(
+                            &text, font, font_bmp,
+                            chrome_offset_x, text_y,
+                            text_area_w, &alignment,
+                            params, &palettes, 0, 0,
+                        );
+                    }
+                } else {
+                    // Use native Canvas2D rendering for system fonts (Arial etc.)
+                    let native_font_name = if font_name.is_empty() { "Arial".to_string() } else { font_name.clone() };
+                    let native_font_size = if font_size > 0 { font_size as i32 } else { 12 };
+                    let tc = ((text_color.0 as u32) << 16)
+                        | ((text_color.1 as u32) << 8)
+                        | (text_color.2 as u32);
+
+                    let span = StyledSpan {
+                        text: text.clone(),
+                        style: HtmlStyle {
+                            font_face: Some(native_font_name),
+                            font_size: Some(native_font_size),
+                            color: Some(tc),
+                            ..HtmlStyle::default()
+                        },
+                    };
+
+                    let text_alignment = match alignment.to_lowercase().as_str() {
+                        "center" | "#center" => TextAlignment::Center,
+                        "right" | "#right" => TextAlignment::Right,
+                        _ => TextAlignment::Left,
+                    };
+
+                    // Push buttons center text vertically; radio/checkbox start at top
+                    let text_y = if is_push {
+                        ((h - native_font_size) / 2).max(0)
+                    } else {
+                        0
+                    };
+
+                    if let Err(e) = FontMemberHandlers::render_native_text_to_bitmap(
+                        &mut btn_bitmap,
+                        &[span],
+                        chrome_offset_x,
+                        text_y,
+                        text_area_w,
+                        h,
+                        text_alignment,
+                        text_area_w,
+                        true,
+                        None,
+                        0,
+                        0,
+                        0,
+                    ) {
+                        web_sys::console::warn_1(&format!("Native text render error for Button (WebGL2): {:?}", e).into());
+                    }
+                }
+
+                // Upload button bitmap as texture
+                let texture = match self.context.create_texture() {
+                    Ok(t) => t,
+                    Err(_) => return,
+                };
+                if self.context.upload_texture_rgba(&texture, width, height, &btn_bitmap.data).is_err() {
+                    return;
+                }
+                texture
+            }
+            TextureSource::ShapeBitmap {
+                width, height, shape_info, fg_color, bg_color,
+            } => {
+                use crate::director::enums::ShapeType;
+
+                let w = width as i32;
+                let h = height as i32;
+
+                let mut shape_bitmap = Bitmap::new(
+                    width as u16, height as u16, 32, 32, 8,
+                    PaletteRef::BuiltIn(get_system_default_palette()),
+                );
+                shape_bitmap.use_alpha = true;
+                shape_bitmap.data.fill(0);
+
+                let palettes = player.movie.cast_manager.palettes();
+                let filled = shape_info.fill_type != 0;
+                let thickness = if filled {
+                    (shape_info.line_thickness as i32).max(1)
+                } else {
+                    (shape_info.line_thickness as i32) - 1
+                };
+
+                match shape_info.shape_type {
+                    ShapeType::Rect => {
+                        if filled {
+                            shape_bitmap.fill_rect(0, 0, w, h, fg_color, &palettes, 1.0);
+                        }
+                        if thickness > 0 {
+                            for t in 0..thickness {
+                                shape_bitmap.stroke_rect(t, t, w - t, h - t, fg_color, &palettes, 1.0);
+                            }
+                        }
+                    }
+                    ShapeType::OvalRect => {
+                        let radius = 12;
+                        if filled {
+                            shape_bitmap.fill_round_rect(0, 0, w, h, radius, fg_color, &palettes, 1.0);
+                        }
+                        if thickness > 0 {
+                            shape_bitmap.stroke_round_rect(0, 0, w, h, radius, fg_color, &palettes, 1.0, thickness);
+                        }
+                    }
+                    ShapeType::Oval => {
+                        if filled {
+                            shape_bitmap.fill_ellipse(0, 0, w, h, fg_color, &palettes, 1.0);
+                        }
+                        if thickness > 0 {
+                            shape_bitmap.stroke_ellipse(0, 0, w, h, fg_color, &palettes, 1.0, thickness);
+                        }
+                    }
+                    ShapeType::Line => {
+                        let t = (shape_info.line_thickness as i32).max(1);
+                        if shape_info.line_direction == 6 {
+                            shape_bitmap.draw_line_thick(0, h - 1, w - 1, 0, fg_color, &palettes, 1.0, t);
+                        } else {
+                            shape_bitmap.draw_line_thick(0, 0, w - 1, h - 1, fg_color, &palettes, 1.0, t);
+                        }
+                    }
+                    ShapeType::Unknown => {
+                        shape_bitmap.fill_rect(0, 0, w, h, fg_color, &palettes, 1.0);
+                    }
+                }
+
+                let texture = match self.context.create_texture() {
+                    Ok(t) => t,
+                    Err(_) => return,
+                };
+                if self.context.upload_texture_rgba(&texture, width, height, &shape_bitmap.data).is_err() {
+                    return;
+                }
+                texture
+            }
+            TextureSource::VectorShapeBitmap {
+                width, height, vector_member,
+            } => {
+                let w = width as i32;
+                let h = height as i32;
+
+                let mut shape_bitmap = Bitmap::new(
+                    width as u16, height as u16, 32, 32, 8,
+                    PaletteRef::BuiltIn(get_system_default_palette()),
+                );
+                shape_bitmap.use_alpha = true;
+                shape_bitmap.data.fill(0);
+
+                let palettes = player.movie.cast_manager.palettes();
+                let dst_rect = IntRect::from(0, 0, w, h);
+                shape_bitmap.draw_vector_shape(&vector_member, dst_rect, &palettes, 1.0);
+
+                let texture = match self.context.create_texture() {
+                    Ok(t) => t,
+                    Err(_) => return,
+                };
+                if self.context.upload_texture_rgba(&texture, width, height, &shape_bitmap.data).is_err() {
+                    return;
+                }
+                texture
+            }
         };
 
         // Select shader based on ink mode
@@ -1511,6 +2212,10 @@ impl WebGL2Renderer {
         // and alpha>0 for text pixels (bg fill is suppressed for ink 36). Use Copy (alpha
         // blending) so the shader doesn't color-key text pixels that match bgColor.
         let ink_mode = if is_rendered_text && ink == 36 {
+            InkMode::Copy
+        } else if is_button_alpha_matte {
+            // Button bitmap with matte-like ink: fill was omitted, alpha channel
+            // encodes transparency. Use Copy (alpha blending) instead of color-keying.
             InkMode::Copy
         } else {
             InkMode::from_ink_number(ink)
@@ -2439,6 +3144,36 @@ impl WebGL2Renderer {
         texture
     }
 
+    /// Check if a font is actually available in the browser's Canvas2D.
+    /// Compares measureText widths against known fallbacks to detect substitution.
+    fn is_font_available_in_canvas2d(font_name: &str, font_size: u16) -> bool {
+        let check = || -> Option<bool> {
+            let document = web_sys::window()?.document()?;
+            let canvas: web_sys::HtmlCanvasElement = document
+                .create_element("canvas").ok()?
+                .dyn_into().ok()?;
+            canvas.set_width(1);
+            canvas.set_height(1);
+            let ctx: web_sys::CanvasRenderingContext2d = canvas
+                .get_context("2d").ok()??
+                .dyn_into().ok()?;
+
+            let test_str = "ABCDwxyz0189";
+
+            ctx.set_font(&format!("{}px {}", font_size, font_name));
+            let requested_width = ctx.measure_text(test_str).ok()?.width();
+
+            ctx.set_font(&format!("{}px sans-serif", font_size));
+            let sans_width = ctx.measure_text(test_str).ok()?.width();
+
+            ctx.set_font(&format!("{}px serif", font_size));
+            let serif_width = ctx.measure_text(test_str).ok()?.width();
+
+            Some(requested_width != sans_width && requested_width != serif_width)
+        };
+        check().unwrap_or(false)
+    }
+
     /// Render text to a CPU bitmap, then upload as a WebGL texture
     ///
     /// This allows us to reuse the existing text rendering code from Canvas2D
@@ -2467,24 +3202,19 @@ impl WebGL2Renderer {
         word_wrap: bool,
         border: u16,
         box_drop_shadow: u16,
-    ) -> Option<web_sys::WebGlTexture> {
+    ) -> Option<(web_sys::WebGlTexture, u32, u32)> {
         let styled_span_count = styled_spans.map_or(0, |s| s.len());
-        let base_requested_size = styled_spans
-            .and_then(|spans| spans.iter().filter_map(|s| s.style.font_size).max())
-            .map(|s| s.max(font_size as i32) as u16)
-            .unwrap_or(font_size);
-
-        // Request the exact styled size. Some PFR fonts (e.g. Tiki Magic *)
-        // render incorrectly when we oversample and scale back down.
-        let requested_font_size = base_requested_size;
+        // Use the text member's own font_size for PFR rasterization target.
+        // Taking the max of styled span sizes causes pixel fonts to be rasterized
+        // at the wrong size (e.g. 15 instead of 12), producing wrong glyph shapes.
+        let requested_font_size = font_size;
         if DEBUG_WEBGL2_TEXT {
             web_sys::console::log_1(&format!(
-                "[webgl2.text] text_len={} spans={} font='{}' in_size={} base={} req={} box={}x{} wrap={} align='{}'",
+                "[webgl2.text] text_len={} spans={} font='{}' in_size={} req={} box={}x{} wrap={} align='{}'",
                 text.len(),
                 styled_span_count,
                 font_name,
                 font_size,
-                base_requested_size,
                 requested_font_size,
                 width,
                 height,
@@ -2517,12 +3247,48 @@ impl WebGL2Renderer {
                 }
             }
 
+            // Try case-insensitive match in font cache before falling back to system font
+            if font_opt.is_none() {
+                let font_name_lower = font_name.to_lowercase();
+                for (key, font) in player.font_manager.font_cache.iter() {
+                    if key.to_lowercase() == font_name_lower
+                        || key.to_lowercase().starts_with(&format!("{}_", font_name_lower))
+                    {
+                        font_opt = Some(font.clone());
+                        lookup_method = "cache_case_insensitive";
+                        break;
+                    }
+                }
+            }
+
+            // PFR canonical fallback: if a PFR font with matching canonical name exists
+            // in the cache, prefer it over falling back to system font / Canvas2D native.
+            // Director movies embed PFR fonts to be used for all matching text — the PFR
+            // font name may differ slightly from the text member's font reference.
+            if font_opt.is_none() && !font_name.is_empty() {
+                use crate::player::font::FontManager;
+                let canon = FontManager::canonical_font_name(font_name);
+                if !canon.is_empty() {
+                    for (_key, font) in player.font_manager.font_cache.iter() {
+                        if font.char_widths.is_some() && FontManager::canonical_font_name(&font.font_name) == canon {
+                            font_opt = Some(font.clone());
+                            lookup_method = "pfr_canonical_fallback";
+                            break;
+                        }
+                    }
+                }
+            }
+
             if font_opt.is_none() {
                 lookup_method = "system_fallback";
 
                 if DEBUG_WEBGL2_TEXT {
                     web_sys::console::warn_1(
-                        &format!("WebGL2 text: font '{}' (id={:?}) not found, using system font", font_name, font_id).into()
+                        &format!(
+                            "WebGL2 text: font '{}' (id={:?}) not found, using system font. Available fonts: {:?}",
+                            font_name, font_id,
+                            player.font_manager.font_cache.keys().collect::<Vec<_>>()
+                        ).into()
                     );
                 }
             }
@@ -2586,6 +3352,30 @@ impl WebGL2Renderer {
         let mut render_height = height as u16;
         let mut render_line_spacing = line_spacing;
 
+        // Measure actual text height and shrink render_height if the measured
+        // content is smaller. Never grow beyond the member's rect — the rect
+        // defines the visual boundary and the background fill must not exceed it.
+        if word_wrap && render_width > 0 {
+            let (_, measured_h) = measure_text_wrapped(
+                text, &font, render_width, true,
+                line_spacing, top_spacing, bottom_spacing,
+            );
+            let measured_h = measured_h
+                + (2 * border) + (4 * box_drop_shadow);
+            if measured_h > 0 && measured_h < render_height {
+                render_height = measured_h;
+            }
+        } else if !word_wrap {
+            let (_, measured_h) = measure_text(
+                text, &font, None, line_spacing, top_spacing, bottom_spacing,
+            );
+            let measured_h = measured_h
+                + (2 * border) + (4 * box_drop_shadow);
+            if measured_h > 0 && measured_h < render_height {
+                render_height = measured_h;
+            }
+        }
+
         // For bitmap font rendering (PFR or System font), keep rendering constrained to the sprite text box.
         // Expanding to measured width breaks wrapping because max_width tracks render width.
         // System font is a bitmap font that needs the same treatment as PFR fonts
@@ -2625,24 +3415,42 @@ impl WebGL2Renderer {
 
         let palettes = player.movie.cast_manager.palettes();
 
-        // Check if this PFR font has a system font equivalent.
-        // The original Shockwave player used the OS font engine for common fonts
-        // (Arial, Times New Roman, etc.) - PFR data was used for metrics/layout only.
-        // We replicate this by using Canvas2D native rendering for known system fonts.
-        let font_name_lower = font_name.to_ascii_lowercase();
-        let use_native_for_pfr = is_pfr_font && matches!(
-            font_name_lower.as_str(),
-            "arial" | "times new roman" | "times" | "verdana" | "courier new" | "courier"
-            | "helvetica" | "georgia" | "trebuchet ms" | "impact" | "comic sans ms"
-            | "tahoma" | "palatino" | "garamond" | "book antiqua" | "century gothic"
-        );
+        // Check glyph preference to allow runtime switching
+        let glyph_pref = get_glyph_preference();
+
+        // PFR fonts with char_widths have a valid bitmap atlas from the PFR rasterizer.
+        // Never use Canvas2D native for these — the PFR font name (e.g. "v") is not
+        // registered in the browser, so Canvas2D fillText would fall back to a system font.
+        let use_native_for_pfr = match glyph_pref {
+            GlyphPreference::Native => true,  // Force native even for PFR
+            GlyphPreference::Bitmap | GlyphPreference::Outline => false,  // Force bitmap atlas
+            GlyphPreference::Auto => {
+                if is_pfr_font {
+                    if font.char_widths.is_some() {
+                        // PFR rasterized font — use bitmap rendering
+                        false
+                    } else {
+                        Self::is_font_available_in_canvas2d(&font.font_name, font_size)
+                    }
+                } else {
+                    false
+                }
+            }
+        };
 
         // Build synthetic spans for native rendering (non-PFR fonts OR PFR with system equivalent).
         // This ensures alignment, font size, and font style are applied for field/text input.
-        // EXCEPTION: System font is a bitmap font and must use bitmap rendering, not native
-        let is_system_font = font.font_name == "System";
+        // EXCEPTION: System font is a bitmap font and must use bitmap rendering, not native.
+        // Check the REQUESTED font name, not the loaded font. When "Arial" is requested but
+        // falls back to System bitmap, we should still use Canvas2D native with "Arial".
+        let is_system_font_requested = font_name == "System" || font_name.is_empty();
+        let force_bitmap = glyph_pref == GlyphPreference::Bitmap || glyph_pref == GlyphPreference::Outline;
+        let force_native = glyph_pref == GlyphPreference::Native;
         let mut synthetic_spans: Option<Vec<StyledSpan>> = None;
-        let spans_for_native: Option<&Vec<StyledSpan>> = if (!is_pfr_font || use_native_for_pfr) && !is_system_font {
+        let spans_for_native: Option<&Vec<StyledSpan>> = if force_bitmap {
+            // Force bitmap rendering for everything
+            None
+        } else if (force_native || !is_pfr_font || use_native_for_pfr) && !is_system_font_requested {
             if let Some(spans) = styled_spans {
                 Some(spans)
             } else {
@@ -2653,8 +3461,10 @@ impl WebGL2Renderer {
                     8,
                 );
                 let mut style = HtmlStyle::default();
-                // Use the actual loaded font name, not the requested one (important for fallback)
-                style.font_face = Some(font.font_name.clone());
+                // Use the REQUESTED font name for Canvas2D rendering, not the fallback.
+                // When "Arial" is requested but the PFR lookup falls back to System,
+                // we want Canvas2D to render with "Arial" (a real browser font).
+                style.font_face = Some(font_name.to_string());
                 style.font_size = Some(font_size as i32);
                 style.color = Some(((r as u32) << 16) | ((g as u32) << 8) | (b as u32));
                 style.bold = bold;
@@ -2753,6 +3563,14 @@ impl WebGL2Renderer {
             let line_height = if font.font_size > 0 { font.font_size as i32 } else { font.char_height as i32 };
             let max_width = width as i32;
             let mut y = top_spacing as i32;
+
+            // Resolve foreground color to RGB once for PFR direct copy
+            let fg_color_rgb = resolve_color_ref(
+                &palettes,
+                fg_color,
+                &PaletteRef::BuiltIn(get_system_default_palette()),
+                8,
+            );
 
                 let mut render_line = |line: &str, y_pos: i32, bitmap: &mut Bitmap| {
                     let line_width: i32 = line
@@ -3433,23 +4251,39 @@ impl WebGL2Renderer {
             }
         }
 
-        // Resolve the bg_color to RGB to determine if we have a real background
+        // Resolve the bg_color to RGB. The caller already picks the correct source:
+        // member bgColor (from XMED Section 0x0000) with sprite bgColor as fallback.
         let bg_rgb = resolve_color_ref(
             &palettes,
             bg_color,
             &PaletteRef::BuiltIn(get_system_default_palette()),
             8,
         );
-        // For ink 36 (BackgroundTransparent), NEVER fill the background.
+        // For transparency inks, NEVER fill the background.
         // The text bitmap already has alpha=0 for background, alpha>0 for text.
-        // The sprite will be composited with alpha blending (InkMode::Copy),
-        // so the transparent background shows through correctly.
-        let has_bg_fill = ink != 36 && bg_rgb != (255, 255, 255);
+        // These inks rely on the alpha channel for transparency:
+        // - Ink 7 (Not Ghost): discards alpha=0 pixels via matte
+        // - Ink 8 (Matte): discards alpha<0.01 pixels in shader
+        // - Ink 9 (Mask): uses alpha as mask
+        // - Ink 36 (BgTransparent): composited with alpha blending
+        // Filling background with bg_color at alpha=255 would make the entire
+        // text area opaque, producing solid colored rectangles instead of text.
+        let is_transparency_ink = ink == 7 || ink == 8 || ink == 9 || ink == 36;
+        // For non-transparency inks (e.g. ink 0 Copy), always fill the background
+        // with bgColor at alpha=255. This matches Director behavior where ink 0
+        // for field/text members renders as an opaque rectangle. Only transparency
+        // inks (36, 7, 8, 9) leave the background transparent.
+        let has_bg_fill = !is_transparency_ink;
 
         // After drawing text, handle background pixels.
         // The bitmap was pre-filled with alpha=0 (transparent).
         // Both Canvas2D and PFR rendering write text pixels with alpha>0.
         // Background = alpha==0 (never written to by either renderer).
+        //
+        // For anti-aliased text, Canvas2D produces edge pixels with alpha 1-254
+        // composited against transparent black. When has_bg_fill is active, these
+        // semi-transparent pixels need to be blended against the background color
+        // and made fully opaque, otherwise the stage color bleeds through.
         for i in 0..text_bitmap.data.len() / 4 {
             let a = text_bitmap.data[i * 4 + 3];
 
@@ -3462,6 +4296,19 @@ impl WebGL2Renderer {
                     text_bitmap.data[i * 4 + 3] = 255; // Fully opaque
                 }
                 // else: already alpha=0 (transparent), nothing to do
+            } else if has_bg_fill && a < 255 {
+                // Anti-aliased edge pixel: blend text color with background color.
+                // Canvas2D composited against transparent black, so we need to
+                // re-composite against the actual background color.
+                let alpha = a as u32;
+                let inv_alpha = 255 - alpha;
+                let r = text_bitmap.data[i * 4] as u32;
+                let g = text_bitmap.data[i * 4 + 1] as u32;
+                let b = text_bitmap.data[i * 4 + 2] as u32;
+                text_bitmap.data[i * 4]     = ((r * alpha + bg_rgb.0 as u32 * inv_alpha) / 255) as u8;
+                text_bitmap.data[i * 4 + 1] = ((g * alpha + bg_rgb.1 as u32 * inv_alpha) / 255) as u8;
+                text_bitmap.data[i * 4 + 2] = ((b * alpha + bg_rgb.2 as u32 * inv_alpha) / 255) as u8;
+                text_bitmap.data[i * 4 + 3] = 255; // Fully opaque
             }
         }
 
@@ -3580,7 +4427,7 @@ impl WebGL2Renderer {
             render_height as u32,
         );
 
-        Some(texture)
+        Some((texture, render_width as u32, render_height as u32))
     }
 
     /// Set preview size

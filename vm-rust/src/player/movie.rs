@@ -172,7 +172,9 @@ impl Movie {
                     Ok(Datum::Int(ticks as i32))
                 })
             }
-            "mouseDown" => Ok(datum_bool(self.mouse_down)),
+            "mouseDown" => {
+                Ok(datum_bool(self.mouse_down))
+            }
             "traceScript" => Ok(datum_bool(self.trace_script)),
             "activeWindow" => Ok(Datum::Stage),
             "rollOver" => {
@@ -257,9 +259,14 @@ impl Movie {
                         Ok(())
                     }
                     Datum::String(script_text) => {
-                        if script_text.trim().starts_with("--") {
+                        if script_text.is_empty() {
+                            // EMPTY clears the script
                             *target = None;
                         } else {
+                            // Store everything, including comments like "--nothing".
+                            // In Director, setting mouseDownScript to a comment means
+                            // "intercept the event but do nothing" - the presence of
+                            // the script blocks normal event propagation to sprites.
                             *target = Some(ScriptReceiver::ScriptText(script_text));
                         }
                         Ok(())

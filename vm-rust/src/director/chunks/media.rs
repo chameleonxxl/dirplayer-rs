@@ -36,6 +36,21 @@ impl MediaChunk {
 
         reader.pos = r_begin;
 
+        // Detect JPEG data before parsing sound header.
+        // MediaChunk is used for both sound data (with a sound header) and JPEG bitmap
+        // data (no header). If we parse the sound header on JPEG data, the JPEG magic
+        // bytes get consumed and the data is lost.
+        if data_test.len() >= 3 && data_test[0] == 0xFF && data_test[1] == 0xD8 && data_test[2] == 0xFF {
+            debug!("MediaChunk: detected JPEG data ({} bytes), skipping sound header parse", data_test.len());
+            return Ok(MediaChunk {
+                sample_rate: 0,
+                data_size_field: data_test.len() as u32,
+                guid: None,
+                audio_data: data_test,
+                is_compressed: false,
+            });
+        }
+
         let original_endian = reader.endian;
         reader.endian = Endian::Big;
 
@@ -105,7 +120,7 @@ impl MediaChunk {
             sample_rate,
             data_size_field,
             guid,
-            audio_data: data_test,
+            audio_data,
             is_compressed,
         })
     }

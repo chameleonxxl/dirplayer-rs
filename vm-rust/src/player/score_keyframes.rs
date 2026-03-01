@@ -212,8 +212,10 @@ impl DirectorProperty for Size {
         match prev {
             None => Size(raw.0, raw.1),
             Some(p) => Size(
-                if raw.0 == 0 { p.0 } else { raw.0 },
-                if raw.1 == 0 { p.1 } else { raw.1 },
+                // 0 or 1 means "no size data" in score — keep previous value.
+                // Director uses 1x1 as a sentinel for empty/unused sprite slots.
+                if raw.0 <= 1 { p.0 } else { raw.0 },
+                if raw.1 <= 1 { p.1 } else { raw.1 },
             ),
         }
     }

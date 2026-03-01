@@ -211,6 +211,7 @@ impl StaticBytecodeHandlerManager {
             OpCode::PushArgListNoRet => StackBytecodeHandler::push_arglist_no_ret(ctx),
             OpCode::PushSymb => StackBytecodeHandler::push_symb(ctx),
             OpCode::Swap => StackBytecodeHandler::swap(ctx),
+            OpCode::PushVarRef => StackBytecodeHandler::push_symb(ctx),
             OpCode::GetProp => GetSetBytecodeHandler::get_prop(ctx),
             OpCode::GetObjProp => GetSetBytecodeHandler::get_obj_prop(ctx),
             OpCode::GetMovieProp => GetSetBytecodeHandler::get_movie_prop(ctx),
@@ -280,6 +281,7 @@ impl StaticBytecodeHandlerManager {
             OpCode::NewObj => true,
             OpCode::ExtCall => true,
             OpCode::ObjCall => true,
+            OpCode::ObjCallV4 => true,
             OpCode::LocalCall => true,
             OpCode::SetObjProp => true,
             _ => false,
@@ -295,6 +297,7 @@ impl StaticBytecodeHandlerManager {
             OpCode::NewObj => StackBytecodeHandler::new_obj(&ctx).await,
             OpCode::ExtCall => FlowControlBytecodeHandler::ext_call(&ctx).await,
             OpCode::ObjCall => FlowControlBytecodeHandler::obj_call(&ctx).await,
+            OpCode::ObjCallV4 => FlowControlBytecodeHandler::obj_call_v4(&ctx).await,
             OpCode::LocalCall => FlowControlBytecodeHandler::local_call(&ctx).await,
             OpCode::SetObjProp => GetSetBytecodeHandler::set_obj_prop(&ctx).await,
             _ => {
