@@ -168,7 +168,7 @@ fn get_sprite_rect_in_context(player: &DirPlayer, sprite_id: i16) -> IntRectTupl
 
 pub fn get_channel_number_from_index(index: u32) -> u32 {
     match index {
-        0 => 0,
+        0..=4 => 0,
         index => index - 5,
     }
 }
@@ -2083,8 +2083,11 @@ impl Score {
         // Copy sprite detail behaviors (D6+)
         self.sprite_details = score_chunk.sprite_details.clone();
 
-        // Compute frame count for auto-looping (applies to all movie versions)
-        if self.frame_count.is_none() {
+        // Compute frame count for auto-looping (applies to all movie versions).
+        // Always run this even if generate_sprite_spans_from_channel_data already set
+        // frame_count, because we also need to consider the score chunk header and frame labels.
+        {
+            let header_fc = score_chunk.frame_data.header.frame_count;
             let span_max = self.sprite_spans.iter()
                 .map(|span| span.end_frame)
                 .max()
@@ -2099,7 +2102,12 @@ impl Score {
                 .map(|kf| kf.frame)
                 .max()
                 .unwrap_or(1);
-            self.frame_count = Some(span_max.max(init_data_max).max(keyframes_max));
+            let labels_max = self.frame_labels.iter()
+                .map(|fl| fl.frame_num as u32)
+                .max()
+                .unwrap_or(1);
+            let current = self.frame_count.unwrap_or(1);
+            self.frame_count = Some(current.max(header_fc).max(span_max).max(init_data_max).max(keyframes_max).max(labels_max));
         }
     }
 
