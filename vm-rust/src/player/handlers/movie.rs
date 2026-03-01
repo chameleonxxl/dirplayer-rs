@@ -110,7 +110,7 @@ impl MovieHandlers {
                     _ => MovieFrameTarget::Default,
                 };
 
-                let task_id = player.net_manager.preload_net_thing(movie_path);
+                let task_id = player.net_manager.preload_net_thing(movie_path.clone());
                 player.pending_goto_net_movie = Some((task_id, target));
                 Ok(true)
             })?
@@ -630,7 +630,7 @@ impl MovieHandlers {
             };
 
             // Start the network fetch (non-blocking)
-            let task_id = player.net_manager.preload_net_thing(fetch_url);
+            let task_id = player.net_manager.preload_net_thing(fetch_url.clone());
 
             // Store the pending operation (replaces any previous pending one, cancelling it)
             player.pending_goto_net_movie = Some((task_id, target));

@@ -248,7 +248,7 @@ pub enum MovieFrameTarget {
     /// Jump to a labeled frame (from URL #fragment or string arg)
     Label(String),
     /// Jump to a specific frame number
-Frame(u32),
+    Frame(u32),
 }
 
 impl DirPlayer {
@@ -2426,26 +2426,11 @@ pub async fn run_frame_loop() {
                     });
                 }
 
-                let ended_sprite_nums = reserve_player_mut_async(|player| {
-                    Box::pin(async move {
-                        player.end_all_sprites().await
-                    })
-                }).await;
-                player_wait_available().await;
-                reserve_player_mut(|player| {
-                    for (score_source, sprite_num) in ended_sprite_nums.iter() {
-                        // let sprite = player.movie.score.get_sprite_mut(*sprite_num as i16);
-                        if let Some(sprite) =
-                            get_score_sprite_mut(&mut player.movie, score_source, *sprite_num as i16)
-                        {
-                            sprite.exited = true;
-                        }
-                    }
-                });
-
+                // go() already performed end_all_sprites + advance_frame + begin_all_sprites,
+                // so we only clear the flag here. Without this fix, advance_frame() would be
+                // called a second time with next_frame=None, causing get_next_frame() to return
+                // current_frame+1, which wraps to frame 1 when at the last frame.
                 (is_playing, is_script_paused) = reserve_player_mut(|player| {
-                    player.advance_frame();
-
                     player.has_player_frame_changed = false;
                     (player.is_playing, player.is_script_paused)
                 });
